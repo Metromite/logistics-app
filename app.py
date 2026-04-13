@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, date
 import io
 import os
 import json
+import textwrap
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -18,15 +19,22 @@ try:
         if not firebase_admin._apps:
             cert_dict = dict(st.secrets["firebase"])
             
-            # --- THE BULLETPROOF PEM FIX ---
-            # 1. Get the key and make sure it's a string
+            # --- THE INDESTRUCTIBLE PEM FIX ---
+            # 1. Get whatever messed up string Streamlit gave us
             raw_key = str(cert_dict.get("private_key", ""))
-            # 2. Remove any accidental starting/ending quotes the user might have pasted
-            raw_key = raw_key.strip('"').strip("'")
-            # 3. Force replace literal escaped newlines with actual invisible line breaks
-            clean_key = raw_key.replace("\\n", "\n").replace("\\\\n", "\n")
-            # 4. Put the perfectly clean key back into the dictionary
-            cert_dict["private_key"] = clean_key
+            
+            # 2. Rip out everything except the pure base64 hash
+            clean_key = raw_key.replace("-----BEGIN PRIVATE KEY-----", "")
+            clean_key = clean_key.replace("-----END PRIVATE KEY-----", "")
+            clean_key = clean_key.replace("\\n", "").replace("\n", "").replace("\r", "")
+            clean_key = clean_key.replace(" ", "").replace('"', "").replace("'", "").strip()
+            
+            # 3. Mathematically rebuild it to exact PEM cryptographic standards (64 chars per line)
+            wrapped_key = '\n'.join(textwrap.wrap(clean_key, 64))
+            perfect_key = f"-----BEGIN PRIVATE KEY-----\n{wrapped_key}\n-----END PRIVATE KEY-----\n"
+            
+            # 4. Inject the perfect key back in
+            cert_dict["private_key"] = perfect_key
             
             cred = credentials.Certificate(cert_dict)
             firebase_admin.initialize_app(cred)
