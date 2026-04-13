@@ -4,74 +4,12 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import io
 import os
-import json
 import textwrap
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- UI CONFIGURATION & IOS 26 LIQUID GLASS CSS ---
+# --- UI CONFIGURATION (Native Streamlit Light/Dark Mode) ---
 st.set_page_config(page_title="Logistics AI Planner", layout="wide")
-
-st.markdown("""
-<style>
-    /* iOS 26 Liquid Glass Theme */
-    .stApp {
-        background: linear-gradient(-45deg, #e0eafc, #cfdef3, #f5f7fa, #c3cfe2);
-        background-size: 400% 400%;
-        animation: gradientBG 15s ease infinite;
-    }
-    @keyframes gradientBG {
-        0% { background-position: 0% 50%; }
-        50% { background-position: 100% 50%; }
-        100% { background-position: 0% 50%; }
-    }
-    /* Sidebar Glass */
-    [data-testid="stSidebar"] {
-        background-color: rgba(255, 255, 255, 0.15) !important;
-        backdrop-filter: blur(25px) !important;
-        -webkit-backdrop-filter: blur(25px) !important;
-        border-right: 1px solid rgba(255, 255, 255, 0.3);
-    }
-    /* Cards and Expanders */
-    div[data-testid="stBlock"], div[data-testid="stExpander"] {
-        background-color: rgba(255, 255, 255, 0.2) !important;
-        backdrop-filter: blur(15px) !important;
-        -webkit-backdrop-filter: blur(15px) !important;
-        border-radius: 20px !important;
-        border: 1px solid rgba(255, 255, 255, 0.4) !important;
-        box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.05);
-        padding: 5px;
-    }
-    /* Buttons */
-    .stButton > button {
-        background-color: rgba(255, 255, 255, 0.3) !important;
-        backdrop-filter: blur(10px) !important;
-        border: 1px solid rgba(255, 255, 255, 0.5) !important;
-        border-radius: 20px !important;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.05) !important;
-        font-weight: 600 !important;
-        transition: all 0.3s ease !important;
-    }
-    .stButton > button:hover {
-        background-color: rgba(255, 255, 255, 0.6) !important;
-        transform: translateY(-2px);
-    }
-    /* Inputs & Selectboxes */
-    .stTextInput>div>div>input, .stSelectbox>div>div>div {
-        background-color: rgba(255, 255, 255, 0.4) !important;
-        backdrop-filter: blur(10px) !important;
-        border-radius: 12px !important;
-        border: 1px solid rgba(255, 255, 255, 0.5) !important;
-    }
-    /* Dataframes */
-    [data-testid="stDataFrame"] {
-        border-radius: 15px;
-        overflow: hidden;
-        border: 1px solid rgba(255, 255, 255, 0.4);
-    }
-</style>
-""", unsafe_allow_html=True)
-
 
 # --- FIREBASE INITIALIZATION & DB ADAPTER ---
 FIREBASE_READY = False
@@ -108,11 +46,11 @@ try:
 except Exception as e:
     FIREBASE_READY = False
 
-# Sleek iOS Dot Indicator for Connection
+# Sleek Native Dot Indicator for Connection
 if FIREBASE_READY:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 24px; margin-top: -20px;' title='Connected to Secure Cloud'>🟢</div>", unsafe_allow_html=True)
+    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢</div>", unsafe_allow_html=True)
 else:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 24px; margin-top: -20px;' title='Local Database Mode'>🔴</div>", unsafe_allow_html=True)
+    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴</div>", unsafe_allow_html=True)
 
 # SQLite Fallback Initialization
 def init_sqlite_db():
@@ -141,7 +79,7 @@ if not FIREBASE_READY:
     conn = init_sqlite_db()
 
 
-# --- 1. SEED DATA (AUTO-RECOVERS FIREBASE IF EMPTY) ---
+# --- 1. SEED DATA (FORCES POPULATION IF TABLES ARE EMPTY) ---
 SEED_AREAS = [
     ("BAN", "BANIYAS AREA"), ("DXB", "Dubai Area"), ("MUS", "MUSAFFAH AREA"), ("KLF", "KHALIFA CITY AREA"),
     ("TCA", "TOURIST CLUB AREA"), ("KLD", "KHALIDIYA AREA"), ("ARP", "AIRPORT AREA"), ("ALNJ", "AL AIN JIMMY AREA"),
@@ -232,10 +170,13 @@ SEED_HELPERS = [
 
 def auto_seed_database():
     if FIREBASE_READY:
-        if not list(db_fs.collection("areas").limit(1).stream()):
+        if len(list(db_fs.collection("areas").limit(1).stream())) == 0:
             for code, name in SEED_AREAS: db_fs.collection("areas").add({"code": code, "name": name})
+        if len(list(db_fs.collection("vehicles").limit(1).stream())) == 0:
             for num, vtype in SEED_VEHICLES: db_fs.collection("vehicles").add({"number": num, "type": vtype})
+        if len(list(db_fs.collection("drivers").limit(1).stream())) == 0:
             for code, name in SEED_DRIVERS: db_fs.collection("drivers").add({"name": name, "code": code, "veh_type": "VAN", "sector": "Pharma", "restriction": "None", "anchor_area": "None"})
+        if len(list(db_fs.collection("helpers").limit(1).stream())) == 0:
             for code, name in SEED_HELPERS: db_fs.collection("helpers").add({"name": name, "code": code, "restriction": "None", "anchor_area": "None"})
     else:
         c = conn.cursor()
@@ -273,10 +214,8 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
         elif action == "UPDATE": 
             if doc_id: db_fs.collection(table_name).document(str(doc_id)).update(data)
         elif action == "DELETE_DOC": 
-            # SAFE DELETE: Will only delete if doc_id explicitly exists
             if doc_id: db_fs.collection(table_name).document(str(doc_id)).delete()
         elif action == "CLEAR_TABLE":
-            # ONLY used for Excel Sync or Route Replacements
             docs = db_fs.collection(table_name).stream()
             for doc in docs: doc.reference.delete()
     else:
@@ -472,13 +411,15 @@ if choice == "1. AI Route Planner":
     if 'generated_plan' in st.session_state:
         df_r = pd.DataFrame(st.session_state.generated_plan)
         df_log = pd.DataFrame(st.session_state.generated_report)
-        st.dataframe(df_r, use_container_width=True)
-        st.dataframe(df_log, use_container_width=True)
+        st.dataframe(df_r, use_container_width=True, hide_index=True)
+        st.dataframe(df_log, use_container_width=True, hide_index=True)
         
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_r.to_excel(writer, sheet_name='Route Plan', index=False)
-            df_log.to_excel(writer, sheet_name='AI Logic Report', index=False)
+            df_export = df_r.drop(columns=['id'], errors='ignore')
+            df_export.to_excel(writer, sheet_name='Route Plan', index=False)
+            df_log_export = df_log.drop(columns=['id'], errors='ignore')
+            df_log_export.to_excel(writer, sheet_name='AI Logic Report', index=False)
         output.seek(0)
         
         col_down, col_app = st.columns(2)
@@ -516,7 +457,7 @@ elif choice == "2. Database Management":
     with tab1:
         st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
-        st.dataframe(drivers_df, use_container_width=True, height=250)
+        st.dataframe(drivers_df.drop(columns=['id'], errors='ignore'), use_container_width=True, height=250, hide_index=True)
         c_add, c_edit = st.columns(2)
         with c_add:
             d_name = st.text_input("Name")
@@ -551,7 +492,7 @@ elif choice == "2. Database Management":
     with tab2:
         st.subheader("📋 Full Helpers List")
         helpers_df = load_table('helpers')
-        st.dataframe(helpers_df, use_container_width=True, height=250)
+        st.dataframe(helpers_df.drop(columns=['id'], errors='ignore'), use_container_width=True, height=250, hide_index=True)
         c_add, c_edit = st.columns(2)
         with c_add:
             h_name = st.text_input("Helper Name")
@@ -582,7 +523,7 @@ elif choice == "2. Database Management":
     with tab3:
         st.subheader("📋 Full Areas List")
         a_df = load_table('areas')
-        st.dataframe(a_df, use_container_width=True, height=250)
+        st.dataframe(a_df.drop(columns=['id'], errors='ignore'), use_container_width=True, height=250, hide_index=True)
         c_add, c_edit = st.columns(2)
         with c_add:
             a_name = st.text_input("Area Full Name")
@@ -600,7 +541,7 @@ elif choice == "2. Database Management":
     with tab4:
         st.subheader("📋 Full Vehicles List")
         v_df = load_table('vehicles')
-        st.dataframe(v_df, use_container_width=True, height=250)
+        st.dataframe(v_df.drop(columns=['id'], errors='ignore'), use_container_width=True, height=250, hide_index=True)
         c_add, c_edit = st.columns(2)
         with c_add:
             v_num = st.text_input("Vehicle Number")
@@ -619,12 +560,9 @@ elif choice == "2. Database Management":
         st.subheader("📥 Export / 📤 Import Database")
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            load_table('drivers').to_excel(writer, sheet_name='drivers', index=False)
-            load_table('helpers').to_excel(writer, sheet_name='helpers', index=False)
-            load_table('areas').to_excel(writer, sheet_name='areas', index=False)
-            load_table('vehicles').to_excel(writer, sheet_name='vehicles', index=False)
-            load_table('history').to_excel(writer, sheet_name='history', index=False)
-            load_table('vacations').to_excel(writer, sheet_name='vacations', index=False)
+            for table in ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations']:
+                df_export = load_table(table).drop(columns=['id'], errors='ignore')
+                df_export.to_excel(writer, sheet_name=table, index=False)
         output.seek(0)
         st.download_button("📥 Download Master Database (Excel)", data=output, file_name="Master_Database.xlsx", type="primary")
         
@@ -654,12 +592,13 @@ elif choice == "3. Past Experience Builder":
     st.header("🕰️ Manage Past Experience")
     history_df = load_table('history')
     
-    st.dataframe(history_df.sort_values(by="id", ascending=False) if not history_df.empty else history_df, use_container_width=True, height=250)
+    st.dataframe(history_df.drop(columns=['id'], errors='ignore').sort_values(by="date", ascending=False) if not history_df.empty else history_df, use_container_width=True, height=250, hide_index=True)
     
     with st.expander("📥 Export / 📤 Import History Data"):
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            history_df.to_excel(writer, sheet_name='history', index=False)
+            df_export = history_df.drop(columns=['id'], errors='ignore')
+            df_export.to_excel(writer, sheet_name='history', index=False)
         output.seek(0)
         st.download_button("📥 Download History Data", data=output, file_name="History_Data.xlsx")
         
@@ -735,12 +674,13 @@ elif choice == "4. Vacation Schedule":
     st.header("🌴 Manage Vacation Schedule")
     vacs_df = load_table('vacations')
 
-    st.dataframe(vacs_df, use_container_width=True, height=250)
+    st.dataframe(vacs_df.drop(columns=['id'], errors='ignore'), use_container_width=True, height=250, hide_index=True)
 
     with st.expander("📥 Export / 📤 Import Vacation Data"):
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            vacs_df.to_excel(writer, sheet_name='vacations', index=False)
+            df_export = vacs_df.drop(columns=['id'], errors='ignore')
+            df_export.to_excel(writer, sheet_name='vacations', index=False)
         output.seek(0)
         st.download_button("📥 Download Vacation Data", data=output, file_name="Vacation_Data.xlsx")
         
