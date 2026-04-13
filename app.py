@@ -8,22 +8,32 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # --- FIREBASE INITIALIZATION & DB ADAPTER ---
-# The app tries to use Firebase first. If 'firebase-key.json' is missing, it automatically falls back to local SQLite to prevent crashing.
 FIREBASE_READY = False
+conn = None
+
 try:
     if os.path.exists("firebase-key.json"):
         if not firebase_admin._apps:
             cred = credentials.Certificate("firebase-key.json")
             firebase_admin.initialize_app(cred)
         db_fs = firestore.client()
-        FIREBASE_READY = True
+        
+        # SMART CONNECTION PING: Test if Firestore is actually created and reachable
+        try:
+            list(db_fs.collection("_system_ping").limit(1).stream())
+            FIREBASE_READY = True
+        except Exception as ping_error:
+            st.sidebar.error("⚠️ Firebase key found, but Firestore Database is not active or reachable. Go to Firebase Console > Firestore Database > Create Database. Falling back to Local Database.")
+            FIREBASE_READY = False
 except Exception as e:
-    st.sidebar.error(f"Firebase Init Error: {e}")
+    st.sidebar.error(f"Firebase Config Error: {e}")
+    FIREBASE_READY = False
+
 
 # SQLite Fallback Initialization
 def init_sqlite_db():
-    conn = sqlite3.connect('logistics.db', check_same_thread=False)
-    c = conn.cursor()
+    local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
+    c = local_conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY, name TEXT, code TEXT)''')
@@ -42,10 +52,121 @@ def init_sqlite_db():
     ]:
         try: c.execute(query)
         except sqlite3.OperationalError: pass
-    conn.commit()
-    return conn
+    local_conn.commit()
+    return local_conn
 
-conn = None if FIREBASE_READY else init_sqlite_db()
+if not FIREBASE_READY:
+    conn = init_sqlite_db()
+
+
+# --- 1. SEED DATA ---
+SEED_AREAS = [
+    ("BAN", "BANIYAS AREA"), ("DXB", "Dubai Area"), ("MUS", "MUSAFFAH AREA"), ("KLF", "KHALIFA CITY AREA"),
+    ("TCA", "TOURIST CLUB AREA"), ("KLD", "KHALIDIYA AREA"), ("ARP", "AIRPORT AREA"), ("ALNJ", "AL AIN JIMMY AREA"),
+    ("ALNC", "AL AIN CITY"), ("WRG", "WESTERN REGION"), ("AUH1", "ABU DHABI WH-1"), ("AUH", "Abu Dhabi"),
+    ("KIZ", "KIZAD, CPC"), ("BUH", "BUHAIRAH"), ("ALQ-2", "Dubai Al Quoz - Rasal Khoor , Business B"),
+    ("JFZ", "JAFZA City Pharmacy Stores"), ("SHJ", "Sharjah Stores"), ("QUS", "Al Qusais & Mamzar Area Dubai"),
+    ("RAK", "Ras Al Khaimah & Umm Al Quwain"), ("FUJ", "Fujairah & Kalba & Dhaid"), ("AJM", "Ajman"),
+    ("SHJS", "Sharjah & Sanaiya & Al Nahda"), ("SHJK", "Sharjah & King Faizal & Zahrah St"),
+    ("SHJR", "Sharjah & Rolla & Taawun Area"), ("DXBI", "Deira In & Rigga & Naif St"),
+    ("DXBO", "Deira Out & Mirdif & Rashidiya Area"), ("BUR", "Bur Dubai & Karama & Mankhol Area"),
+    ("JUM", "Dubai Jumairah & Satwa Area"), ("ALQ", "Dubai Al Quoz & Awir & Barsha Area"),
+    ("JA", "Dubai Jebal Ali & DIP Area"), ("DIC", "DIC City Pharmacy Store"), ("AD", "AUH City Pharmacy Store"),
+    ("ALN", "Al Ain City Pharmacy Store"), ("HAT", "Hatta & Al Madam Area")
+]
+
+SEED_VEHICLES = [
+    ("M 95321", "PICK-UP"), ("C 47055", "PICK-UP"), ("B 14813", "BUS"), ("C 58107", "PICK-UP"), ("C 58801", "VAN"),
+    ("16 47645", "BUS"), ("I 85664", "PICK-UP"), ("I 86488", "VAN"), ("R 96871", "BUS"), ("U 65986", "PICK-UP"),
+    ("U 65988", "VAN"), ("U 65990", "VAN"), ("V-83576", "VAN"), ("V-84049", "VAN"), ("V-84050", "VAN"),
+    ("W 49535", "PICK-UP"), ("W 49536", "VAN"), ("W 49539", "VAN"), ("W 49540", "VAN"), ("O 72506", "VAN"),
+    ("O 72533", "PICK-UP"), ("O 72548", "PICK-UP"), ("O 72567", "VAN"), ("O 72578", "VAN"), ("O 72579", "VAN"),
+    ("O 72581", "VAN"), ("D 85038", "VAN"), ("D 85076", "VAN"), ("D 85823", "VAN"), ("C 26596", "BUS"),
+    ("V 60857", "VAN"), ("N 31329", "VAN"), ("N 32094", "VAN"), ("N 32119", "VAN"), ("N 32126", "VAN"),
+    ("N 33680", "VAN"), ("E 18104", "VAN"), ("E 18316", "VAN"), ("BB 72473", "BUS"), ("I 71528", "PICK-UP"),
+    ("W 11792", "VAN"), ("T 26701", "VAN"), ("CC 98174", "VAN"), ("CC 98175", "VAN"), ("CC 98176", "VAN")
+]
+
+SEED_DRIVERS = [
+    ("AD056", "NAUSHAD ALI"), ("AD060", "TINTU JOSEPH"), ("AD054", "VIJU NAIR"), ("AD067", "SREEKANTH"),
+    ("AD038", "RAHAMATULLAH"), ("AD063", "MOHAMMED SHEREEF"), ("AD055", "AHAMAD JAN"), ("AD068", "MOHAMED ANSAR"),
+    ("AD047", "Michael De Torres"), ("AD066", "ANSARI"), ("AD062", "NIJAVUDEEN"), ("AD065", "SABIR SHAH"),
+    ("AD039", "H. SAGUL AMEED"), ("AD053", "Mohamed Shefeeq"), ("AD046", "MUSTHAFA . KA"), ("AD061", "YASAR ARAFATH"),
+    ("SH003", "RAHUL RAJENDRAN"), ("AD045", "ESLAM SABRI"), ("AD050", "SHAHID ALI"), ("AD041", "MOHD. MUSTHAFA"),
+    ("AD051", "ABDUL JALEEL"), ("AD064", "FAYAZ KHAN"), ("AD057", "SHEKKEER PH"), ("AD021", "CUSTOMER"),
+    ("AD004", "ADIL SHAH GULAM"), ("AD006", "ABDUL NAEEM"), ("AD010", "RAHMATH BUNAIRY"), ("AD013", "FAZAL NAEM"),
+    ("AD014", "NISAAR AHMED"), ("AD023", "FAISAL"), ("AD025", "ALI AHAMAD"), ("AD026", "NADAR SHAH"),
+    ("AD022", "MOHAMMED GHANI"), ("AD029", "ABDUL AZIZ"), ("AD033", "RASHID"), ("D106", "Mohammed Shereef K V"),
+    ("D081", "Musthafa Kadangod"), ("D094", "Shuhaib Mullantakath"), ("D083", "Asaf Khan Fazal"), ("SBP1", "SEBA MED PROMOTION"),
+    ("D076", "Rahmatullah Mohammed"), ("D067", "Shebin Kabeer"), ("D096", "Ahmad Jan Mughal"), ("SRV", "Service Dept BUH"),
+    ("D100", "Adil Ghulam"), ("D104", "Mahammed Ansar"), ("D086", "Abdul Jaleel Nadakkavu"), ("D105", "Fayaz Khan RS"),
+    ("D087", "Abdul Naeem"), ("D108", "Ansari Ithayathullah"), ("D103", "Jamseer PV Ibrahim"), ("D080", "Shahid Ali khan"),
+    ("D107", "Muneeb Hussain"), ("D085", "Rahul R.P"), ("D095", "Islam Sabri"), ("D089", "Jisam K Saleem"),
+    ("SLM", "SALAMA PACKING"), ("D072", "Rahmat Bunairy"), ("D073", "Mohamed Mustafa Kummalil"), ("D063", "Ajmal Ali Akbar"),
+    ("D097", "Shekkeer P Hamza"), ("D059", "Jeham Sher AUH"), ("D099", "Muhammed Noushad P"), ("CPC001", "Danish Mohammed"),
+    ("BUH002", "Mohamed Khaled"), ("D078", "Mahammad Arif"), ("D075", "Michael DE Torres"), ("D061", "Said Alavy"),
+    ("D082", "Rashid Meethal"), ("D088", "Saheer Ali V Z"), ("D079", "Nadar Shah Shah"), ("D102", "Mohammed Nasiruddeen"),
+    ("D098", "Muhammed Aslam K"), ("D071", "Fazal Naeem Abdur Rahim"), ("D101", "Tintu V Joseph"), ("D058", "Nazeer Khan AUH"),
+    ("D074", "Nisar Ahamed Shah"), ("D090", "Faisal Mahmood"), ("MED1", "Kathleen Grace"), ("D070", "Mohamed Ghani"),
+    ("D092", "Mohamed Shefeeq.MP"), ("D093", "Viju Nair"), ("D068", "Ali Ahamed"), ("D049", "Abdul Jabbar"),
+    ("D051", "Mohammed Ibrahim"), ("D052", "Noushad Ali"), ("D050", "Abdul Mansoor"), ("D047", "Ahmed Faraj"),
+    ("D048", "Moideen Azeez"), ("C001", "Collected By Customer"), ("D010", "Nasar"), ("D011", "Imran Khan"),
+    ("D019", "Muhammed Kunji"), ("D023", "Sabir Shah"), ("D024", "Sadiq Shah"), ("D026", "Jahaberudheen"),
+    ("D029", "Baderudheen"), ("SLPO", "Delivered by LPO Dept"), ("D033", "Naeem Fazal"), ("D037", "Nijavudeen"),
+    ("D038", "Ismail Korokkaran"), ("D035", "Shaul Hameed"), ("D036", "Rashid Baderzaman"), ("D040", "Hussain Mohammed"),
+    ("D042", "Gulam Khan Mohammad"), ("D044", "Zainul Abid"), ("D032", "Sayd Mubarak"), ("D034", "Adil Hassan"),
+    ("D046", "Azeez Abdulla"), ("D054", "Sameer Zakariyah"), ("SH002", "GULAM KHAN"), ("SH001", "SADIQ SHA"),
+    ("SH004", "Zainulabid"), ("AD069", "MOH KUNHI"), ("C002", "OTHERS"), ("D027", "Sultan"), ("D064", "Shabeer Ali A.Rahman"),
+    ("D109", "Yousuf Nobi Shakib")
+]
+
+SEED_HELPERS = [
+    ("AH039", "RABIYA"), ("AH031", "HAJA MOIDEEN"), ("AH036", "SYED MAISAM"), ("AH037", "RASHEED"),
+    ("AH038", "AUREL"), ("AH033", "JOSEPH"), ("AH034", "MUBARAK"), ("AH042", "LORLDWINE"), ("AH044", "ISMAIL"),
+    ("AH041", "ABBAS"), ("AH040", "AMANULLHA"), ("AH043", "CHARL-VINCE"), ("AH002", "RAFEEQ"), ("AH012", "SAYED ALI"),
+    ("AH020", "LATHIF"), ("AH021", "RAMSHEED"), ("AH022", "NAIK"), ("AH025", "FAZAL HADI"), ("AH027", "REJITHA"),
+    ("AH030", "SHAHID"), ("AH40", "RAJESH"), ("H117", "Mahammad Nawaz PM"), ("H115", "Omar AlSaeed"),
+    ("H111", "Muhammed Saif VS"), ("H130", "Javed Akhtar"), ("H077", "Ihab Mohamad Kaddour"), ("H107", "Abdul Razak"),
+    ("H123", "Sheik Abdul Malik"), ("H097", "Mahdi"), ("H125", "Kadar Moideen"), ("H082", "Hassan Mohammed"),
+    ("H083", "Shakeer"), ("H091", "Mohammed Sameem"), ("H095", "Noushad Ali"), ("H104", "Mohammed Shakeer"),
+    ("H069", "Muhammed Shajahan"), ("H070", "A. Harshad"), ("H075", "Mohamed Hassan"), ("H116", "Munawir P Kabeer"),
+    ("H119", "Muhammed Janees P"), ("H118", "Muhammed Shamil P"), ("H127", "Rafsal Rafeek"), ("H112", "Abbas Mohamed MA"),
+    ("H113", "Chadi Otmani"), ("H073", "Jose John"), ("H066", "Christopherlov Brian"), ("H124", "Nethaniel Fernandez M"),
+    ("H067", "Jansher"), ("H100", "Mohammed Sajeer"), ("H120", "Abdul Karim AS"), ("H080", "Muhammed Saleh"),
+    ("H084", "Housine EL Amri"), ("H129", "Pratik Bista"), ("H121", "Afreen Salam"), ("H122", "Mohamed Arsath"),
+    ("H126", "Subin Kovammal"), ("H078", "Abdul Rahman Ayyuob"), ("H079", "Dilip Siwakoti"), ("H101", "Jeffrey Gumban"),
+    ("H109", "AL Ameen"), ("H110", "Mohammed Fameem"), ("H102", "Shameer Manikkunnummal"), ("H128", "Manil Dilusha"),
+    ("H074", "Abdullah Leppa"), ("H098", "Caleb Manaois"), ("H099", "Muhammed Rajas"), ("H103", "Ali Akbar Hassan"),
+    ("H087", "Elmer Flores"), ("H114", "Abdul Khader"), ("H054", "Siddik Abdulla"), ("H062", "Rakshith.p"),
+    ("H059", "Rekhil Kodakka"), ("H063", "Janeesh mullappally"), ("H023", "Adil"), ("H024", "Mohd Musthafa"),
+    ("H005", "Aboobacker Aliyar"), ("H011", "Sudhakaran"), ("H013", "Haris K"), ("H017", "Mujammal"),
+    ("H021", "Saifudheen"), ("H022", "Jose Patibo"), ("H026", "Riyas Ahmed"), ("H034", "Riyasudheen Khuthubudheen"),
+    ("H055", "Shaji"), ("H046", "Shihabudeen"), ("H049", "Shobith"), ("H050", "Ranjith. P"), ("H051", "Shar Bahadar"),
+    ("H053", "Sabeer Ali Chemban"), ("H039", "Ranjith"), ("H041", "Axel Flores"), ("H058", "Sheik Kareem"),
+    ("H064", "Shahul C"), ("H065", "Juancho"), ("H068", "Muhammed Shafiq"), ("H072", "Mohammed Haseeb"),
+    ("H081", "M. Ziaudeen"), ("H085", "Afreed Mahmood"), ("H088", "Shafneed Nazar"), ("H089", "Mohamed Saleh Ibrahem Saleh"),
+    ("H092", "Mohammed Saddam"), ("H131", "Said Ahmed Ibrahim"), ("H105", "Yousaf Nobi"), ("H132", "Ahmed Younis")
+]
+
+# Run seeds for SQLite only (if fallback is active)
+if not FIREBASE_READY:
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM areas")
+    if c.fetchone()[0] == 0:
+        c.executemany("INSERT INTO areas (code, name) VALUES (?, ?)", SEED_AREAS)
+    c.execute("SELECT COUNT(*) FROM vehicles")
+    if c.fetchone()[0] == 0:
+        c.executemany("INSERT INTO vehicles (number, type) VALUES (?, ?)", SEED_VEHICLES)
+    c.execute("SELECT COUNT(*) FROM drivers")
+    if c.fetchone()[0] == 0:
+        d_seed = [(name, code, "VAN", "Pharma", "None", "None") for code, name in SEED_DRIVERS]
+        c.executemany("INSERT INTO drivers (name, code, veh_type, sector, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?)", d_seed)
+    c.execute("SELECT COUNT(*) FROM helpers")
+    if c.fetchone()[0] == 0:
+        h_seed = [(name, code, "None", "None") for code, name in SEED_HELPERS]
+        c.executemany("INSERT INTO helpers (name, code, restriction, anchor_area) VALUES (?, ?, ?, ?)", h_seed)
+    conn.commit()
+
 
 # --- CACHED DATA LOADERS (Performance Optimization) ---
 def clear_cache():
@@ -53,7 +174,6 @@ def clear_cache():
 
 @st.cache_data
 def load_table(table_name):
-    """Loads a collection from Firestore OR a table from SQLite into a Pandas DataFrame."""
     if FIREBASE_READY:
         docs = db_fs.collection(table_name).stream()
         data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
@@ -62,8 +182,7 @@ def load_table(table_name):
         return pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
-    """Universal function to write to SQLite OR Firebase."""
-    clear_cache() # Invalidate cache on any database write
+    clear_cache()
     if FIREBASE_READY and table_name and action:
         if action == "INSERT": db_fs.collection(table_name).add(data)
         elif action == "UPDATE": db_fs.collection(table_name).document(str(doc_id)).update(data)
@@ -98,7 +217,6 @@ def get_last_assignment(history_df, person_code, area_name):
 
 @st.cache_data
 def is_on_vacation(vacations_df, person_name, target_date):
-    """Checks if a person is on vacation during the target date."""
     if vacations_df.empty: return False
     for _, row in vacations_df.iterrows():
         if row['person_name'] == person_name:
@@ -119,43 +237,35 @@ def check_restriction(restriction, area_name):
     return restriction.lower() in area_name.lower()
 
 def select_best_candidate(candidates_df, area_name, target_date, history_df, vacations_df, perf_df, partner_exp_months):
-    """Scoring System instead of first-match assignment."""
     best_candidate, best_score, best_reason = None, -9999, "No valid candidates found"
     
     for _, person in candidates_df.iterrows():
-        # 1. Vacation Blocker
         if is_on_vacation(vacations_df, person['name'], target_date): continue
-        # 2. Restriction & Anchor Validation
         if not check_restriction(person.get('restriction', 'None'), area_name): continue
         if person.get('anchor_area') not in ["None", None, ""] and person.get('anchor_area') != area_name: continue
         
         exp_months = get_experience_months(history_df, person['code'], area_name)
-        
-        # 3. Minimum Experience Rule (Partner must have 3 months exp if candidate has < 3)
-        if partner_exp_months < 3 and exp_months < 3 and person.get('anchor_area') != area_name:
-            continue
+        if partner_exp_months < 3 and exp_months < 3 and person.get('anchor_area') != area_name: continue
             
-        # --- SCORING FORMULA ---
         score = (exp_months * 2)
         reasons = []
 
         if exp_months == 0:
-            score += 100 # Huge priority for areas never visited
+            score += 100
             reasons.append("Never Visited (+100)")
         
         last_date = get_last_assignment(history_df, person['code'], area_name)
         if last_date:
             months_since = (target_date - last_date).days / 30.0
             if months_since < 6:
-                penalty = int(max(0, 6 - months_since) * 10 * 3) # Penalty * 3 as requested
+                penalty = int(max(0, 6 - months_since) * 10 * 3)
                 score -= penalty
                 reasons.append(f"Recent Penalty (-{penalty})")
                 
         if person.get('anchor_area') == area_name:
-            score += 200 # Anchor bonus * 2
+            score += 200
             reasons.append("Anchor Bonus (+200)")
 
-        # Performance Scoring
         if not perf_df.empty and 'person_code' in perf_df.columns:
             p_data = perf_df[(perf_df['person_code'] == person['code']) & (perf_df['area'] == area_name)]
             if not p_data.empty:
@@ -177,7 +287,7 @@ def select_best_candidate(candidates_df, area_name, target_date, history_df, vac
 st.set_page_config(page_title="Logistics AI Planner", layout="wide")
 st.title("🚛 Smart Logistics Route & Vacation Planner")
 if FIREBASE_READY: st.success("🟢 Connected to Firebase Cloud")
-else: st.warning("🟡 Running on Local SQLite Database (firebase-key.json not found)")
+else: st.warning("🟡 Running on Local Database (Firebase disabled or connection failed)")
 
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
 choice = st.sidebar.radio("Navigate", menu)
@@ -249,7 +359,6 @@ if choice == "1. AI Route Planner":
 
                 if not needs_helper: a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
 
-                # Assign Vehicle
                 if a_d_code != "UNASSIGNED":
                     d_type = drivers[drivers['code'] == a_d_code]['veh_type'].values[0] if not drivers[drivers['code'] == a_d_code].empty else "VAN"
                     tvt = "PICK-UP" if "Pickup" in area_name else ("BUS" if "2-8" in area_name else d_type)
@@ -301,7 +410,7 @@ if choice == "1. AI Route Planner":
 
 
 # ==========================================
-# SCREEN 2: DATABASE MANAGEMENT (All Original Tabs Restored + Excel Tab)
+# SCREEN 2: DATABASE MANAGEMENT
 # ==========================================
 elif choice == "2. Database Management":
     st.header("🗄️ Manage Database")
@@ -311,7 +420,6 @@ elif choice == "2. Database Management":
     
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Bulk Excel Sync"])
 
-    # DRIVERS TAB (RESTORED)
     with tab1:
         st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
@@ -353,7 +461,6 @@ elif choice == "2. Database Management":
                     st.warning("Deleted!")
                     st.rerun()
 
-    # HELPERS TAB (RESTORED)
     with tab2:
         st.subheader("📋 Full Helpers List")
         helpers_df = load_table('helpers')
@@ -391,7 +498,6 @@ elif choice == "2. Database Management":
                     st.warning("Deleted!")
                     st.rerun()
 
-    # AREAS TAB (RESTORED)
     with tab3:
         st.subheader("📋 Full Areas List")
         a_df = load_table('areas')
@@ -415,7 +521,6 @@ elif choice == "2. Database Management":
                 st.warning("Deleted!")
                 st.rerun()
 
-    # VEHICLES TAB (RESTORED)
     with tab4:
         st.subheader("📋 Full Vehicles List")
         v_df = load_table('vehicles')
@@ -439,7 +544,6 @@ elif choice == "2. Database Management":
                 st.warning("Deleted!")
                 st.rerun()
                 
-    # NEW BULK EXCEL SYNC TAB
     with tab5:
         st.subheader("📥 Export / 📤 Import Database")
         st.write("You can download the full database, make changes in Excel, and upload it back here.")
@@ -474,7 +578,7 @@ elif choice == "2. Database Management":
 
 
 # ==========================================
-# SCREEN 3: PAST EXPERIENCE BUILDER (RESTORED)
+# SCREEN 3: PAST EXPERIENCE BUILDER
 # ==========================================
 elif choice == "3. Past Experience Builder":
     st.header("🕰️ Manage Past Experience")
@@ -485,7 +589,6 @@ elif choice == "3. Past Experience Builder":
     st.divider()
     
     c_add, c_edit = st.columns(2)
-    
     areas_df = load_table('areas')
     area_list = areas_df['name'].tolist() if not areas_df.empty else []
     
@@ -543,14 +646,12 @@ elif choice == "3. Past Experience Builder":
 
 
 # ==========================================
-# SCREEN 4: VACATION SCHEDULE (RESTORED + AI)
+# SCREEN 4: VACATION SCHEDULE
 # ==========================================
 elif choice == "4. Vacation Schedule":
-    st.header("🌴 Manage Vacation Schedule & AI Tracking")
-    
+    st.header("🌴 Manage Vacation Schedule")
     vacs_df = load_table('vacations')
-    
-    # NEW SMART SUGGESTIONS FEATURE
+
     with st.expander("🤖 Show AI Vacation Suggestions (Overdue Personnel)"):
         due_list = []
         for df, role in [(load_table('drivers'), "Driver"), (load_table('helpers'), "Helper")]:
@@ -591,7 +692,7 @@ elif choice == "4. Vacation Schedule":
                 if overlapping >= 3: st.error(f"Cannot add! Already {overlapping} {v_type}s on vacation.")
                 else:
                     run_query("INSERT INTO vacations (person_type, person_name, start_date, end_date) VALUES (?, ?, ?, ?)", (v_type, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")), table_name="vacations", action="INSERT", data={"person_type":v_type, "person_name":v_name, "start_date":v_start.strftime("%Y-%m-%d"), "end_date":v_end.strftime("%Y-%m-%d")})
-                    st.success("Vacation scheduled successfully! System will auto-block them from route selection.")
+                    st.success("Vacation scheduled successfully! System will auto-block them from routes.")
                     st.rerun()
 
     with c_edit:
