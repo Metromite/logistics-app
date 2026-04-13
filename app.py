@@ -6,9 +6,25 @@ import io
 import os
 
 # ==========================================
-# 1. PAGE CONFIGURATION (MUST BE FIRST!)
+# 1. PAGE CONFIGURATION & CUSTOM CSS
 # ==========================================
-st.set_page_config(page_title="LogisticsApp", layout="wide")
+st.set_page_config(page_title="LogisticsApp", layout="wide", page_icon="🚛")
+
+# Custom CSS matching your HTML design for the Dashboard
+st.markdown("""
+    <style>
+    .stApp { background-color: #0f172a; color: white; }
+    .stButton>button { background-color: #38bdf8; color: black; font-weight: bold; border-radius: 8px; border: none; }
+    .stButton>button:hover { background-color: #0284c7; color: white; }
+    div[data-testid="stExpander"] { background-color: #1e293b !important; border-radius: 10px; }
+    div.stAlert { background-color: #1e293b; color: white; border: 1px solid #334155; }
+    </style>
+""", unsafe_allow_html=True)
+
+# Navigation State Management
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = "🏠 Home Dashboard"
+
 
 # ==========================================
 # 2. FIREBASE / SQLITE INITIALIZATION
@@ -24,7 +40,13 @@ try:
             cred = credentials.Certificate("firebase-key.json")
             firebase_admin.initialize_app(cred)
         db_fs = firestore.client()
-        FIREBASE_READY = True
+        # SMART CONNECTION PING
+        try:
+            list(db_fs.collection("_system_ping").limit(1).stream())
+            FIREBASE_READY = True
+        except Exception:
+            firebase_error_msg = "Firebase key found, but Firestore Database is not active or reachable. Falling back to Local Database."
+            FIREBASE_READY = False
 except Exception as e:
     firebase_error_msg = f"Firebase Init Error: {e}"
 
@@ -40,12 +62,7 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS active_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS performance (id INTEGER PRIMARY KEY, person_code TEXT, area TEXT, success_rate REAL, delay_count INTEGER)''')
     
-    for query in [
-        "ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'",
-        "ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'",
-        "ALTER TABLE history ADD COLUMN end_date TEXT",
-        "ALTER TABLE history ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'"
-    ]:
+    for query in ["ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'", "ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'", "ALTER TABLE history ADD COLUMN end_date TEXT", "ALTER TABLE history ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'"]:
         try: c.execute(query)
         except sqlite3.OperationalError: pass
     local_conn.commit()
@@ -178,23 +195,51 @@ def select_best_candidate(candidates_df, area_name, target_date, history_df, vac
 
 
 # ==========================================
-# 4. USER INTERFACE
+# 4. NAVIGATION & USER INTERFACE
 # ==========================================
-st.title("🚛 LogisticsApp - Route & Vacation Planner")
-
-if FIREBASE_READY:
-    st.success("🟢 Connected to Firebase Cloud - Your data is synced online.")
-else:
-    st.warning("🟡 Running on Local Database. Offline mode active.")
-    if firebase_error_msg: st.sidebar.error(firebase_error_msg)
-
-menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
-choice = st.sidebar.radio("Navigation", menu)
+menu = ["🏠 Home Dashboard", "1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
+choice = st.sidebar.radio("Navigation", menu, index=menu.index(st.session_state.current_page))
+st.session_state.current_page = choice
 
 RESTRICTION_OPTIONS = ["None", "Consumer Only", "2-8 Cars Only", "Sharjah", "Dubai", "Ajman", "Fujairah", "Ras Al Khaimah", "Abu Dhabi", "Al Ain"]
 
+
+# --- 0. HOME DASHBOARD ---
+if choice == "🏠 Home Dashboard":
+    st.markdown("<h1 style='text-align: center;'>🚛 Logistics AI Dashboard</h1>", unsafe_allow_html=True)
+    if FIREBASE_READY: st.markdown("<p style='text-align: center; color:#38bdf8;'>🟢 Connected to Firebase Cloud</p>", unsafe_allow_html=True)
+    else: st.markdown(f"<p style='text-align: center; color:#ef4444;'>🟡 Running on Local Database (Offline). {firebase_error_msg}</p>", unsafe_allow_html=True)
+    st.write("<br><br>", unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info("### 🧠 AI Route Planner\nGenerate optimized driver & helper routes")
+        if st.button("Open AI Planner", use_container_width=True): 
+            st.session_state.current_page = "1. AI Route Planner"
+            st.rerun()
+            
+        st.write("<br>", unsafe_allow_html=True)
+        
+        st.info("### 🌴 Vacation System\nPlan and manage vacations smartly via AI")
+        if st.button("Open Vacation System", use_container_width=True): 
+            st.session_state.current_page = "4. Vacation Schedule"
+            st.rerun()
+            
+    with col2:
+        st.info("### 🗄️ Database Management\nManage drivers, helpers, vehicles, areas")
+        if st.button("Open Database", use_container_width=True): 
+            st.session_state.current_page = "2. Database Management"
+            st.rerun()
+            
+        st.write("<br>", unsafe_allow_html=True)
+        
+        st.info("### 🕰️ Experience Analytics\nPerformance and history tracking")
+        if st.button("Open Analytics", use_container_width=True): 
+            st.session_state.current_page = "3. Past Experience Builder"
+            st.rerun()
+
 # --- 1. AI ROUTE PLANNER ---
-if choice == "1. AI Route Planner":
+elif choice == "1. AI Route Planner":
     st.header("🧠 AI Route Generation")
     col1, col2 = st.columns(2)
     month_target = col1.date_input("Target Rotation Date", value=date.today())
@@ -285,7 +330,6 @@ if choice == "1. AI Route Planner":
             
             for r in st.session_state.generated_plan:
                 run_query("INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (r['Order Number'], r['Area Code'], r['Area Full Name'], r['Driver Code'], r['Driver Name'], r['Helper Code'], r['Helper Name'], r['Vehicle Number']), table_name="active_routes", action="INSERT", data=r)
-                
                 for code, name, ptype in [(r['Driver Code'], r['Driver Name'], "Driver"), (r['Helper Code'], r['Helper Name'], "Helper")]:
                     if code not in ["UNASSIGNED", "N/A"]:
                         run_query("INSERT INTO history (person_type, person_code, person_name, area, date, end_date) VALUES (?, ?, ?, ?, ?, ?)", (ptype, code, name, r['Area Full Name'], p_s, p_e), table_name="history", action="INSERT", data={"person_type":ptype, "person_code":code, "person_name":name, "area":r['Area Full Name'], "date":p_s, "end_date":p_e})
@@ -298,7 +342,6 @@ elif choice == "2. Database Management":
     st.header("🗄️ Manage Database")
     areas_df = load_table('areas')
     area_list = ["None"] + (areas_df['name'].tolist() if not areas_df.empty else [])
-    
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Bulk Excel Sync"])
 
     with tab1:
@@ -307,18 +350,16 @@ elif choice == "2. Database Management":
         c_add, c_edit = st.columns(2)
         with c_add:
             st.subheader("➕ Add Driver")
-            d_name = st.text_input("Name")
-            d_code = st.text_input("Code")
+            d_name, d_code = st.text_input("Name"), st.text_input("Code")
             d_type = st.selectbox("Vehicle Type", ["VAN", "PICK-UP", "BUS"])
             d_restr = st.selectbox("Restriction/Permit", RESTRICTION_OPTIONS)
             d_anchor = st.selectbox("Anchor Area", area_list, key="d_add_anchor")
             if st.button("Add New Driver", use_container_width=True):
                 run_query("INSERT INTO drivers (name, code, veh_type, sector, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?)", (d_name, d_code, d_type, "Pharma", d_restr, d_anchor), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":d_type, "sector":"Pharma", "restriction":d_restr, "anchor_area":d_anchor})
                 st.rerun()
-
         with c_edit:
             st.subheader("✏️ Edit / Delete Driver")
-            sel_d_code = st.selectbox("Select Driver to Edit/Delete", drivers_df['code'].tolist() if not drivers_df.empty else [])
+            sel_d_code = st.selectbox("Select Driver", drivers_df['code'].tolist() if not drivers_df.empty else [])
             if sel_d_code:
                 d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
                 e_name = st.text_input("Edit Name", d_data['name'])
@@ -339,8 +380,7 @@ elif choice == "2. Database Management":
         c_add, c_edit = st.columns(2)
         with c_add:
             st.subheader("➕ Add Helper")
-            h_name = st.text_input("Helper Name")
-            h_code = st.text_input("Helper Code")
+            h_name, h_code = st.text_input("Helper Name"), st.text_input("Helper Code")
             h_restr = st.selectbox("Restriction", RESTRICTION_OPTIONS, key="h_restr_add")
             h_anchor = st.selectbox("Anchor Area", area_list, key="h_anchor_add")
             if st.button("Add New Helper", use_container_width=True):
@@ -348,7 +388,7 @@ elif choice == "2. Database Management":
                 st.rerun()
         with c_edit:
             st.subheader("✏️ Edit / Delete Helper")
-            sel_h_code = st.selectbox("Select Helper to Edit/Delete", helpers_df['code'].tolist() if not helpers_df.empty else [])
+            sel_h_code = st.selectbox("Select Helper", helpers_df['code'].tolist() if not helpers_df.empty else [])
             if sel_h_code:
                 h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
                 e_hname = st.text_input("Edit Name", h_data['name'], key="eh_name")
@@ -368,14 +408,13 @@ elif choice == "2. Database Management":
         c_add, c_edit = st.columns(2)
         with c_add:
             st.subheader("➕ Add Area")
-            a_name = st.text_input("Area Full Name")
-            a_code = st.text_input("Area Code")
+            a_name, a_code = st.text_input("Area Full Name"), st.text_input("Area Code")
             if st.button("Add New Area", use_container_width=True):
                 run_query("INSERT INTO areas (name, code) VALUES (?, ?)", (a_name, a_code), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code})
                 st.rerun()
         with c_edit:
             st.subheader("🗑️ Delete Area")
-            sel_a = st.selectbox("Select Area to Delete", a_df['name'].tolist() if not a_df.empty else [])
+            sel_a = st.selectbox("Select Area", a_df['name'].tolist() if not a_df.empty else [])
             if st.button("Delete Selected Area", use_container_width=True) and sel_a:
                 run_query("DELETE FROM areas WHERE name=?", (sel_a,), table_name="areas", action="DELETE", doc_id=a_df[a_df['name'] == sel_a].iloc[0]['id'])
                 st.rerun()
@@ -393,7 +432,7 @@ elif choice == "2. Database Management":
                 st.rerun()
         with c_edit:
             st.subheader("🗑️ Delete Vehicle")
-            sel_v = st.selectbox("Select Vehicle to Delete", v_df['number'].tolist() if not v_df.empty else [])
+            sel_v = st.selectbox("Select Vehicle", v_df['number'].tolist() if not v_df.empty else [])
             if st.button("Delete Selected Vehicle", use_container_width=True) and sel_v:
                 run_query("DELETE FROM vehicles WHERE number=?", (sel_v,), table_name="vehicles", action="DELETE", doc_id=v_df[v_df['number'] == sel_v].iloc[0]['id'])
                 st.rerun()
@@ -419,7 +458,7 @@ elif choice == "2. Database Management":
                         run_query(f"INSERT INTO {sheet} ({cols}) VALUES ({', '.join(['?'] * len(row))})", vals)
                     else:
                         run_query(None, table_name=sheet, action="INSERT", data=row.to_dict())
-            st.success("Database fully synchronized from Excel!")
+            st.success("Database synchronized perfectly!")
 
 # --- 3. PAST EXPERIENCE BUILDER ---
 elif choice == "3. Past Experience Builder":
@@ -449,7 +488,7 @@ elif choice == "3. Past Experience Builder":
     with c_edit:
         st.subheader("✏️ Edit / Delete Experience")
         if not history_df.empty:
-            sel_hist_str = st.selectbox("Select Record to Edit/Delete", [f"{row['id']} - {row['person_name']} ({row['area']})" for _, row in history_df.iterrows()])
+            sel_hist_str = st.selectbox("Select Record", [f"{row['id']} - {row['person_name']} ({row['area']})" for _, row in history_df.iterrows()])
             if sel_hist_str:
                 hist_id = sel_hist_str.split(" - ")[0]
                 hist_data = history_df[history_df['id'].astype(str) == hist_id].iloc[0]
@@ -490,15 +529,18 @@ elif choice == "4. Vacation Schedule":
         v_name = st.selectbox("Name", load_table('drivers' if v_type == "Driver" else 'helpers')['name'].tolist())
         d1, d2 = st.columns(2)
         v_start = d1.date_input("Start Date (Leave)")
-        v_end = d2.date_input("End Date", value=date.today() + timedelta(days=30))
+        v_end = d2.date_input("End Date (Replacement comes exactly on this day)", value=date.today() + timedelta(days=30))
         if st.button("➕ Add Vacation", use_container_width=True):
-            run_query("INSERT INTO vacations (person_type, person_name, start_date, end_date) VALUES (?, ?, ?, ?)", (v_type, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")), table_name="vacations", action="INSERT", data={"person_type":v_type, "person_name":v_name, "start_date":v_start.strftime("%Y-%m-%d"), "end_date":v_end.strftime("%Y-%m-%d")})
-            st.rerun()
+            overlapping = sum([1 for _, row in vacs_df.iterrows() if row['person_type'] == v_type and max(v_start, safe_parse_date(row['start_date'])) <= min(v_end, safe_parse_date(row['end_date']))])
+            if overlapping >= 3: st.error(f"Cannot add! Already {overlapping} {v_type}s on vacation.")
+            else:
+                run_query("INSERT INTO vacations (person_type, person_name, start_date, end_date) VALUES (?, ?, ?, ?)", (v_type, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")), table_name="vacations", action="INSERT", data={"person_type":v_type, "person_name":v_name, "start_date":v_start.strftime("%Y-%m-%d"), "end_date":v_end.strftime("%Y-%m-%d")})
+                st.rerun()
 
     with c_edit:
         st.subheader("✏️ Edit / Delete Vacation")
         if not vacs_df.empty:
-            sel_vac_str = st.selectbox("Select Vacation to Edit/Delete", [f"{row['id']} - {row['person_name']} ({row['start_date']} to {row['end_date']})" for _, row in vacs_df.iterrows()])
+            sel_vac_str = st.selectbox("Select Vacation", [f"{row['id']} - {row['person_name']} ({row['start_date']} to {row['end_date']})" for _, row in vacs_df.iterrows()])
             if sel_vac_str:
                 vac_id = sel_vac_str.split(" - ")[0]
                 vac_data = vacs_df[vacs_df['id'].astype(str) == vac_id].iloc[0]
