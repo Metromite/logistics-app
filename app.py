@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import io
 import os
+import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -12,19 +13,35 @@ FIREBASE_READY = False
 conn = None
 
 try:
-    if os.path.exists("firebase-key.json"):
+    # 1. CLOUD DEPLOYMENT: Try to load from Streamlit Secrets first
+    if "firebase" in st.secrets:
+        if not firebase_admin._apps:
+            cert_dict = dict(st.secrets["firebase"])
+            cred = credentials.Certificate(cert_dict)
+            firebase_admin.initialize_app(cred)
+        db_fs = firestore.client()
+        FIREBASE_READY = True
+
+    # 2. LOCAL TESTING: Fallback to the local JSON file
+    elif os.path.exists("firebase-key.json"):
         if not firebase_admin._apps:
             cred = credentials.Certificate("firebase-key.json")
             firebase_admin.initialize_app(cred)
         db_fs = firestore.client()
+        FIREBASE_READY = True
         
-        # SMART CONNECTION PING: Test if Firestore is actually created and reachable
+    else:
+        st.sidebar.error("⚠️ No Firebase credentials found. Falling back to Local SQLite.")
+        FIREBASE_READY = False
+
+    # Ping test to ensure Firestore Database is actually created
+    if FIREBASE_READY:
         try:
             list(db_fs.collection("_system_ping").limit(1).stream())
-            FIREBASE_READY = True
         except Exception as ping_error:
-            st.sidebar.error("⚠️ Firebase key found, but Firestore Database is not active or reachable. Go to Firebase Console > Firestore Database > Create Database. Falling back to Local Database.")
+            st.sidebar.error("⚠️ Firebase key found, but Firestore Database is not active. Go to Firebase Console > Firestore Database > Create Database.")
             FIREBASE_READY = False
+
 except Exception as e:
     st.sidebar.error(f"Firebase Config Error: {e}")
     FIREBASE_READY = False
@@ -184,9 +201,18 @@ def load_table(table_name):
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
     clear_cache()
     if FIREBASE_READY and table_name and action:
-        if action == "INSERT": db_fs.collection(table_name).add(data)
-        elif action == "UPDATE": db_fs.collection(table_name).document(str(doc_id)).update(data)
-        elif action == "DELETE": db_fs.collection(table_name).document(str(doc_id)).delete()
+        if action == "INSERT": 
+            db_fs.collection(table_name).add(data)
+        elif action == "UPDATE": 
+            db_fs.collection(table_name).document(str(doc_id)).update(data)
+        elif action == "DELETE": 
+            if doc_id:
+                db_fs.collection(table_name).document(str(doc_id)).delete()
+            else:
+                # Used for bulk delete (like clear active_routes before inserting new)
+                docs = db_fs.collection(table_name).stream()
+                for doc in docs:
+                    doc.reference.delete()
     else:
         c = conn.cursor()
         c.execute(query, params)
@@ -286,8 +312,10 @@ def select_best_candidate(candidates_df, area_name, target_date, history_df, vac
 # --- UI SETUP & NAVIGATION ---
 st.set_page_config(page_title="Logistics AI Planner", layout="wide")
 st.title("🚛 Smart Logistics Route & Vacation Planner")
-if FIREBASE_READY: st.success("🟢 Connected to Firebase Cloud")
-else: st.warning("🟡 Running on Local Database (Firebase disabled or connection failed)")
+if FIREBASE_READY: 
+    st.success("🟢 Connected to Firebase Cloud (Data is Permanent & Secure)")
+else: 
+    st.warning("🟡 Running on Local Database (Firebase not fully connected)")
 
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
 choice = st.sidebar.radio("Navigate", menu)
@@ -565,12 +593,19 @@ elif choice == "2. Database Management":
             xls = pd.ExcelFile(uploaded_file)
             for sheet in xls.sheet_names:
                 df = pd.read_excel(xls, sheet_name=sheet)
-                if not FIREBASE_READY: run_query(f"DELETE FROM {sheet}")
+                
+                # Clear existing table data
+                if not FIREBASE_READY: 
+                    run_query(f"DELETE FROM {sheet}")
+                else:
+                    run_query(None, table_name=sheet, action="DELETE")
+
+                # Insert new data
                 for _, row in df.iterrows():
-                    data_dict = row.to_dict()
+                    data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k != 'id'}
                     if not FIREBASE_READY:
-                        cols, vals = ', '.join(row.index), tuple(row.values)
-                        qmarks = ', '.join(['?'] * len(row))
+                        cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
+                        qmarks = ', '.join(['?'] * len(data_dict))
                         run_query(f"INSERT INTO {sheet} ({cols}) VALUES ({qmarks})", vals)
                     else:
                         run_query(None, table_name=sheet, action="INSERT", data=data_dict)
