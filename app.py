@@ -79,7 +79,38 @@ if not FIREBASE_READY:
     conn = init_sqlite_db()
 
 
-# --- 1. SEED DATA (FORCES POPULATION IF TABLES ARE EMPTY) ---
+# --- SAFE DB QUERY HANDLER ---
+def clear_cache():
+    st.cache_data.clear()
+
+@st.cache_data
+def load_table(table_name):
+    if FIREBASE_READY:
+        docs = db_fs.collection(table_name).stream()
+        data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
+        return pd.DataFrame(data)
+    else:
+        return pd.read_sql(f"SELECT * FROM {table_name}", conn)
+
+def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
+    clear_cache()
+    if FIREBASE_READY and table_name and action:
+        if action == "INSERT": 
+            db_fs.collection(table_name).add(data)
+        elif action == "UPDATE": 
+            if doc_id: db_fs.collection(table_name).document(str(doc_id)).update(data)
+        elif action == "DELETE_DOC": 
+            if doc_id: db_fs.collection(table_name).document(str(doc_id)).delete()
+        elif action == "CLEAR_TABLE":
+            docs = db_fs.collection(table_name).stream()
+            for doc in docs: doc.reference.delete()
+    else:
+        c = conn.cursor()
+        c.execute(query, params)
+        conn.commit()
+
+
+# --- 1. SEED DATA (FORCES POPULATION) ---
 SEED_AREAS = [
     ("BAN", "BANIYAS AREA"), ("DXB", "Dubai Area"), ("MUS", "MUSAFFAH AREA"), ("KLF", "KHALIFA CITY AREA"),
     ("TCA", "TOURIST CLUB AREA"), ("KLD", "KHALIDIYA AREA"), ("ARP", "AIRPORT AREA"), ("ALNJ", "AL AIN JIMMY AREA"),
@@ -168,20 +199,34 @@ SEED_HELPERS = [
     ("H092", "Mohammed Saddam"), ("H131", "Said Ahmed Ibrahim"), ("H105", "Yousaf Nobi"), ("H132", "Ahmed Younis")
 ]
 
-def auto_seed_database():
+def auto_seed_database(force=False):
+    seeded = False
     if FIREBASE_READY:
-        if len(list(db_fs.collection("areas").limit(1).stream())) == 0:
+        if force or len(list(db_fs.collection("areas").limit(1).stream())) == 0:
+            if force: run_query(None, table_name="areas", action="CLEAR_TABLE")
             for code, name in SEED_AREAS: db_fs.collection("areas").add({"code": code, "name": name})
-        if len(list(db_fs.collection("vehicles").limit(1).stream())) == 0:
+            seeded = True
+        if force or len(list(db_fs.collection("vehicles").limit(1).stream())) == 0:
+            if force: run_query(None, table_name="vehicles", action="CLEAR_TABLE")
             for num, vtype in SEED_VEHICLES: db_fs.collection("vehicles").add({"number": num, "type": vtype})
-        if len(list(db_fs.collection("drivers").limit(1).stream())) == 0:
+            seeded = True
+        if force or len(list(db_fs.collection("drivers").limit(1).stream())) == 0:
+            if force: run_query(None, table_name="drivers", action="CLEAR_TABLE")
             for code, name in SEED_DRIVERS: db_fs.collection("drivers").add({"name": name, "code": code, "veh_type": "VAN", "sector": "Pharma", "restriction": "None", "anchor_area": "None"})
-        if len(list(db_fs.collection("helpers").limit(1).stream())) == 0:
+            seeded = True
+        if force or len(list(db_fs.collection("helpers").limit(1).stream())) == 0:
+            if force: run_query(None, table_name="helpers", action="CLEAR_TABLE")
             for code, name in SEED_HELPERS: db_fs.collection("helpers").add({"name": name, "code": code, "restriction": "None", "anchor_area": "None"})
+            seeded = True
     else:
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM areas")
-        if c.fetchone()[0] == 0:
+        if force or c.fetchone()[0] == 0:
+            if force:
+                c.execute("DELETE FROM areas")
+                c.execute("DELETE FROM vehicles")
+                c.execute("DELETE FROM drivers")
+                c.execute("DELETE FROM helpers")
             c.executemany("INSERT INTO areas (code, name) VALUES (?, ?)", SEED_AREAS)
             c.executemany("INSERT INTO vehicles (number, type) VALUES (?, ?)", SEED_VEHICLES)
             d_seed = [(name, code, "VAN", "Pharma", "None", "None") for code, name in SEED_DRIVERS]
@@ -189,39 +234,12 @@ def auto_seed_database():
             h_seed = [(name, code, "None", "None") for code, name in SEED_HELPERS]
             c.executemany("INSERT INTO helpers (name, code, restriction, anchor_area) VALUES (?, ?, ?, ?)", h_seed)
             conn.commit()
+            seeded = True
+    
+    if seeded:
+        clear_cache()
 
 auto_seed_database()
-
-
-# --- SAFE DB QUERY HANDLER ---
-def clear_cache():
-    st.cache_data.clear()
-
-@st.cache_data
-def load_table(table_name):
-    if FIREBASE_READY:
-        docs = db_fs.collection(table_name).stream()
-        data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
-        return pd.DataFrame(data)
-    else:
-        return pd.read_sql(f"SELECT * FROM {table_name}", conn)
-
-def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
-    clear_cache()
-    if FIREBASE_READY and table_name and action:
-        if action == "INSERT": 
-            db_fs.collection(table_name).add(data)
-        elif action == "UPDATE": 
-            if doc_id: db_fs.collection(table_name).document(str(doc_id)).update(data)
-        elif action == "DELETE_DOC": 
-            if doc_id: db_fs.collection(table_name).document(str(doc_id)).delete()
-        elif action == "CLEAR_TABLE":
-            docs = db_fs.collection(table_name).stream()
-            for doc in docs: doc.reference.delete()
-    else:
-        c = conn.cursor()
-        c.execute(query, params)
-        conn.commit()
 
 
 # --- SMART SCORING LOGIC ---
@@ -583,6 +601,15 @@ elif choice == "2. Database Management":
                     else:
                         run_query(None, table_name=sheet, action="INSERT", data=data_dict)
             st.success("Database synchronized successfully!")
+            
+        st.divider()
+        st.subheader("🚨 Emergency Data Restore")
+        st.warning("If your database is empty, click this button to instantly restore all original default Drivers, Helpers, Areas, and Vehicles.")
+        if st.button("♻️ Restore Original Default Data", type="primary"):
+            with st.spinner("Forcing data restoration into database..."):
+                auto_seed_database(force=True)
+            st.success("All original data restored successfully!")
+            st.rerun()
 
 
 # ==========================================
