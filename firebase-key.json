@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "logistic-planner-72f72",
+  "private_key_id": "cd82a1f2d05900884cdee15fee794a0eb8856240",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQD6YpvPScbhuYN0\nYPP8yO9QvQkALiT+OG14v+aFqMTYiwbomohivQYA7iV6dGU2jDW/M43yDUstNcYd\nQRDfywcN/dRxp1soVr+ixizzdJUuqFN89bLjLK9ObT/LueFNZ3XkDFd1RDoqx2rS\nZxkCk4nJiX1dhHknPmCAc/LFcuI1mtO3338G8S60CacA/1/JrVpC0hsDlcM0RYQR\nfOqkk2LDBaTrsbENCIjiohRdPS0n94Phd4t6iyt5FR2JW2s/PRCuI1exH4tSFu6z\nQCSbbb5jU89BG1gOhxw/X+llzDyzZT7CXbULBqwJH1OLEPDUZhhgI9ISLTEcSD5J\n98jiVLxpAgMBAAECggEAJchyjZ2q8s39PbcRqmAh6NOVw56y+1/FeTawERROHAUi\ntj/3e7rdaI+HPUrKKSiQRbmAXnnOEdTu/+QdKUAoYN6gS8Q+17/7bBMunlBF4MQK\n0Sz8YRaRn6qRuWrjyjvmCNMp8WqpwmHUR0rCdeaQoMZsEgwXAiqCAnA8vrne08qs\nZf/1Mx/7mxeNAMiw7dLpU5jNXlgomPjqisbhT/Apx4yVERssAHT5sMdoMPdkutGD\n9jU+dAsKwFIPpHEHyHmu6BRm6ImUumYLtz8q6WHyfiuHcKs4VqgS0EE3lNLl3iH3\nv1r2E/Cqeb3DRrTJdRYhe+zZa+X7oPkfA9x8HMvPPwKBgQD+kKFa1mR2bSRYDwKJ\neei6+t09vGI9snJctXDkIN8DcFnl8J6xho/74qPzJMiTPZ/t9d92bc/eJRRj6mME\n1ZCX4BP5zE9wZuSAIzeOnN1ZlueDNT4g9Uiz1jHrsiW7pc9FYZcnANRJ9cYVlgXI\n2HgeQFMyYPPcRxcZ32nEBiIDHwKBgQD7y/JG89RJ7D0f0vH8Qpif/iOdjkvrrQqM\nrCqRlDhzQzvCj6QWLBcjRlkyl+UmDpOEevIVdNu+Gq7chzp0ldK/WbutcXO5VDJW\nnEfY6JPW/eQEY39GTAIynHWIBdOAhYh29/8XeKwQCDzBBN8KybVZeVvrqVF4Kxns\nOyT8r5KXdwKBgEOKRAVB1K3HD1l9wgKPobvaS1DR5o7QBZ+rVCRyxDi5WmCzkqcv\nOIxv+WfNXpoSQ5hzH7LgN8KMu/g2e8cQkqh4/1PLbVg5NG766Qahf+kBLLOXMMC1\n03BDaENMpM5Ak9mopt3mTmzBFKktgKNlK5l7H5fCOXE8O1jV+c3UgrmpAoGAWjUj\ntEWwfVdUQq15Ii3drhwHOG/9RQ62Y9VeXs9iNfEVXMvHNmZPV8ThOd3vK2Y3dVPy\nnLtD6mR21uzfhVsTqJgGQ8oMco32hs7wcoZISNKmuOfIdi/O7cDd3oBv2HB+hlis\nnAUQZ6H72g7btWq0PLzcsJ31YP7YB6jcxGZGN1sCgYAI20ULuvAP3xHS9Q/aE+aq\nuGFaMgOru3yVMX11bStzK3WnEnkAVvw1M7gdSSTrLUPRVr2s0IRRIh2Q0ULHGLb6\ng4JXb7+HkjY9CEco8xsG+xki2FZ38ImNtw6Iqb1fJbjAvHhkZNhBH5USWr+OQNeb\nYD3yE7PJVVp10Bk/taMBmQ==\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@logistic-planner-72f72.iam.gserviceaccount.com",
+  "client_id": "104842567010449274281",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40logistic-planner-72f72.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
