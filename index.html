@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Logistics App Dashboard</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: white;
+    }
+
+    header {
+      padding: 20px;
+      text-align: center;
+      background: #1e293b;
+      font-size: 24px;
+      font-weight: bold;
+    }
+
+    .container {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 20px;
+      padding: 30px;
+    }
+
+    .card {
+      background: #1e293b;
+      padding: 20px;
+      border-radius: 12px;
+      text-align: center;
+      transition: 0.3s;
+      cursor: pointer;
+    }
+
+    .card:hover {
+      background: #334155;
+      transform: translateY(-5px);
+    }
+
+    .btn {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 10px 15px;
+      background: #38bdf8;
+      color: black;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: bold;
+    }
+
+    footer {
+      text-align: center;
+      padding: 20px;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+
+<body>
+
+<header>
+  🚛 Logistics AI Dashboard
+</header>
+
+<div class="container">
+
+  <div class="card">
+    <h3>AI Route Planner</h3>
+    <p>Generate optimized driver & helper routes</p>
+    <a class="btn" href="YOUR_STREAMLIT_LINK" target="_blank">Open</a>
+  </div>
+
+  <div class="card">
+    <h3>Database Management</h3>
+    <p>Manage drivers, helpers, vehicles, areas</p>
+    <a class="btn" href="YOUR_STREAMLIT_LINK" target="_blank">Open</a>
+  </div>
+
+  <div class="card">
+    <h3>Vacation System</h3>
+    <p>Plan and manage vacations smartly</p>
+    <a class="btn" href="YOUR_STREAMLIT_LINK" target="_blank">Open</a>
+  </div>
+
+  <div class="card">
+    <h3>Analytics</h3>
+    <p>Performance and history tracking</p>
+    <a class="btn" href="YOUR_STREAMLIT_LINK" target="_blank">Open</a>
+  </div>
+
+</div>
+
+<footer>
+  Built for Logistics Optimization 🚀
+</footer>
+
+</body>
+</html>
