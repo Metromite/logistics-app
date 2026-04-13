@@ -125,14 +125,24 @@ def init_db():
                     id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, 
                     driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT)''')
     
-    # Check for missing columns (Migrations for previous versions)
+    # DATABASE UPGRADE / MIGRATION FIX
+    # This prevents the crash by safely forcing the old database to add missing columns
+    try:
+        c.execute("ALTER TABLE drivers ADD COLUMN sector TEXT DEFAULT 'Pharma'")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+        
     try:
         c.execute("ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+        
+    try:
         c.execute("ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'")
-    except:
-        pass # Columns already exist
+    except sqlite3.OperationalError:
+        pass # Column already exists
     
-    # Auto-Seed Data
+    # Auto-Seed Data if empty
     c.execute("SELECT COUNT(*) FROM areas")
     if c.fetchone()[0] == 0:
         c.executemany("INSERT INTO areas (code, name) VALUES (?, ?)", SEED_AREAS)
