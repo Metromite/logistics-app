@@ -125,18 +125,19 @@ def init_db():
                     id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, 
                     driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT)''')
     
-    # DATABASE UPGRADE / MIGRATION FIX
-    try: c.execute("ALTER TABLE drivers ADD COLUMN sector TEXT DEFAULT 'Pharma'")
-    except sqlite3.OperationalError: pass
-        
-    try: c.execute("ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'")
-    except sqlite3.OperationalError: pass
-        
-    try: c.execute("ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'")
-    except sqlite3.OperationalError: pass
-        
-    try: c.execute("ALTER TABLE history ADD COLUMN end_date TEXT")
-    except sqlite3.OperationalError: pass
+    # DATABASE UPGRADE / MIGRATION FIX (Fixes KeyError and OperationalError completely)
+    migrations = [
+        "ALTER TABLE drivers ADD COLUMN sector TEXT DEFAULT 'Pharma'",
+        "ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'",
+        "ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'",
+        "ALTER TABLE history ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'",
+        "ALTER TABLE history ADD COLUMN end_date TEXT DEFAULT 'None'"
+    ]
+    for query in migrations:
+        try:
+            c.execute(query)
+        except sqlite3.OperationalError:
+            pass # Column already exists, safe to ignore
     
     # Auto-Seed Data if empty
     c.execute("SELECT COUNT(*) FROM areas")
@@ -282,8 +283,10 @@ if choice == "1. Create Route Plan":
                     if not check_restriction(d['restriction'], area_name): continue
                     
                     past_6m = (month_target - timedelta(days=180)).strftime("%Y-%m-%d")
-                    recent = history[(history['person_code'] == d['code']) & (history['date'] >= past_6m)]['area'].tolist()
-                    if area_name in recent and d['anchor_area'] == "None": continue
+                    # Safe check for history dataframe
+                    if not history.empty and 'person_code' in history.columns:
+                        recent = history[(history['person_code'] == d['code']) & (history['date'] >= past_6m)]['area'].tolist()
+                        if area_name in recent and d['anchor_area'] == "None": continue
                     
                     d_exp = get_experience_months(d['code'], area_name)
                     if d_exp < 1: 
@@ -375,7 +378,7 @@ if choice == "1. Create Route Plan":
         st.session_state.generated_plan = route_plan
         st.session_state.generated_report = report_log
         st.session_state.plan_date = month_target
-        st.success("Plan Generated! Please review below and click 'Approve & Save' to finalize.")
+        st.success("Plan Generated! Please review below and click the green button to finalize and add as 3 months experience.")
 
     if 'generated_plan' in st.session_state:
         st.info("📊 Excel Sheet Preview:")
@@ -391,10 +394,11 @@ if choice == "1. Create Route Plan":
         col_down, col_app = st.columns(2)
         col_down.download_button("📥 Download Excel", data=output, file_name=f"Generated_Plan_{st.session_state.plan_date}.xlsx")
         
-        if col_app.button("✅ Approve & Add to Experience Database"):
+        # Explicit Button to add as next 3 months experience
+        if col_app.button("✅ Approve Plan & Add as Next 3 Months Experience", type="primary"):
             run_query("DELETE FROM active_routes")
             plan_start_str = st.session_state.plan_date.strftime("%Y-%m-%d")
-            plan_end_str = (st.session_state.plan_date + timedelta(days=90)).strftime("%Y-%m-%d") # Logged as 3 months experience
+            plan_end_str = (st.session_state.plan_date + timedelta(days=90)).strftime("%Y-%m-%d") # 90 days = 3 months
             
             for r in st.session_state.generated_plan:
                 run_query("INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -407,7 +411,7 @@ if choice == "1. Create Route Plan":
                     run_query("INSERT INTO history (person_type, person_code, person_name, area, date, end_date) VALUES (?, ?, ?, ?, ?, ?)",
                               ("Helper", r['Helper Code'], r['Helper Name'], r['Area Full Name'], plan_start_str, plan_end_str))
             
-            st.success("Plan Approved! 3 months of experience successfully added to all assigned drivers and helpers.")
+            st.success("Plan Approved! The next 3 months of experience have been saved into the database for these drivers and helpers.")
             del st.session_state.generated_plan
 
 # ==========================================
