@@ -17,8 +17,14 @@ try:
     if "firebase" in st.secrets:
         if not firebase_admin._apps:
             cert_dict = dict(st.secrets["firebase"])
+            
+            # --- THE FIX IS HERE ---
+            # This forces Streamlit to read \n as actual line breaks!
+            cert_dict["private_key"] = cert_dict["private_key"].replace("\\n", "\n")
+            
             cred = credentials.Certificate(cert_dict)
             firebase_admin.initialize_app(cred)
+            
         db_fs = firestore.client()
         FIREBASE_READY = True
 
@@ -49,6 +55,7 @@ except Exception as e:
 
 # SQLite Fallback Initialization
 def init_sqlite_db():
+# ... KEEP THE REST OF YOUR CODE EXACTLY THE SAME FROM HERE DOWN ...
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
