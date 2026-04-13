@@ -125,7 +125,7 @@ def init_db():
                     id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, 
                     driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT)''')
     
-    # DATABASE UPGRADE / MIGRATION FIX (Fixes KeyError and OperationalError completely)
+    # DATABASE UPGRADE / MIGRATION FIX
     migrations = [
         "ALTER TABLE drivers ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'",
@@ -137,7 +137,7 @@ def init_db():
         try:
             c.execute(query)
         except sqlite3.OperationalError:
-            pass # Column already exists, safe to ignore
+            pass
     
     # Auto-Seed Data if empty
     c.execute("SELECT COUNT(*) FROM areas")
@@ -200,11 +200,18 @@ def get_experience_months(person_code, area_name):
             if end_str and end_str != "None":
                 end = datetime.strptime(end_str, "%Y-%m-%d").date()
             else:
-                end = start + timedelta(days=30) # Default to 1 month if old data
+                end = start + timedelta(days=30)
             total_days += max(0, (end - start).days)
         except:
             pass
     return total_days / 30.0
+
+# Helper to safely parse dates for editing
+def safe_parse_date(date_str):
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except:
+        return date.today()
 
 # --- 3. UI SETUP ---
 st.set_page_config(page_title="Logistics Route Planner", layout="wide")
@@ -257,14 +264,13 @@ if choice == "1. Create Route Plan":
             
             prev_assignment = active_routes[active_routes['area_name'] == area_name]
             
-            # --- Determine if this area needs a Helper ---
             needs_helper = True
             area_lower = area_name.lower()
             if any(kw in area_lower for kw in ["2-8", "urgent", "gov", "substitute"]):
                 needs_helper = False
             
             if rot_type == "Drivers":
-                # KEEP HELPER (if needed)
+                # KEEP HELPER
                 if needs_helper:
                     if not prev_assignment.empty and prev_assignment.iloc[0]['helper_code'] != "N/A":
                         assigned_h_code = prev_assignment.iloc[0]['helper_code']
@@ -283,7 +289,6 @@ if choice == "1. Create Route Plan":
                     if not check_restriction(d['restriction'], area_name): continue
                     
                     past_6m = (month_target - timedelta(days=180)).strftime("%Y-%m-%d")
-                    # Safe check for history dataframe
                     if not history.empty and 'person_code' in history.columns:
                         recent = history[(history['person_code'] == d['code']) & (history['date'] >= past_6m)]['area'].tolist()
                         if area_name in recent and d['anchor_area'] == "None": continue
@@ -298,7 +303,6 @@ if choice == "1. Create Route Plan":
                     log_reason = "Driver rotated. Helper kept."
                     used_drivers.add(d['code'])
                     
-                    # Double check if assigned driver uses a BUS, then no helper needed
                     if d['veh_type'] == "BUS": needs_helper = False
                     break
                     
@@ -307,7 +311,6 @@ if choice == "1. Create Route Plan":
                 if not prev_assignment.empty:
                     assigned_d_code = prev_assignment.iloc[0]['driver_code']
                     assigned_d_name = prev_assignment.iloc[0]['driver_name']
-                    # Check if driver uses a BUS
                     d_type_check = drivers[drivers['code'] == assigned_d_code]['veh_type'].values
                     if len(d_type_check) > 0 and d_type_check[0] == "BUS":
                         needs_helper = False
@@ -334,7 +337,6 @@ if choice == "1. Create Route Plan":
                         used_helpers.add(h['code'])
                         break
 
-            # Process NO HELPER
             if not needs_helper:
                 assigned_h_code = "N/A"
                 assigned_h_name = "NO HELPER REQUIRED"
@@ -394,11 +396,10 @@ if choice == "1. Create Route Plan":
         col_down, col_app = st.columns(2)
         col_down.download_button("📥 Download Excel", data=output, file_name=f"Generated_Plan_{st.session_state.plan_date}.xlsx")
         
-        # Explicit Button to add as next 3 months experience
         if col_app.button("✅ Approve Plan & Add as Next 3 Months Experience", type="primary"):
             run_query("DELETE FROM active_routes")
             plan_start_str = st.session_state.plan_date.strftime("%Y-%m-%d")
-            plan_end_str = (st.session_state.plan_date + timedelta(days=90)).strftime("%Y-%m-%d") # 90 days = 3 months
+            plan_end_str = (st.session_state.plan_date + timedelta(days=90)).strftime("%Y-%m-%d") 
             
             for r in st.session_state.generated_plan:
                 run_query("INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -411,8 +412,9 @@ if choice == "1. Create Route Plan":
                     run_query("INSERT INTO history (person_type, person_code, person_name, area, date, end_date) VALUES (?, ?, ?, ?, ?, ?)",
                               ("Helper", r['Helper Code'], r['Helper Name'], r['Area Full Name'], plan_start_str, plan_end_str))
             
-            st.success("Plan Approved! The next 3 months of experience have been saved into the database for these drivers and helpers.")
+            st.success("Plan Approved! The next 3 months of experience have been saved into the database.")
             del st.session_state.generated_plan
+
 
 # ==========================================
 # SCREEN 2: DATABASE MANAGEMENT (Add/Edit/Delete)
@@ -425,12 +427,11 @@ elif choice == "2. Database Management":
     
     tab1, tab2, tab3, tab4 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles"])
 
-    # --- DRIVERS ---
+    # DRIVERS
     with tab1:
         st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
         st.dataframe(drivers_df, use_container_width=True, height=250)
-        
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
@@ -445,10 +446,9 @@ elif choice == "2. Database Management":
                           (d_name, d_code, d_type, "Pharma", d_restr, d_anchor))
                 st.success("Added!")
                 st.rerun()
-
         with c_edit:
             st.subheader("✏️ Edit / Delete Driver")
-            sel_d_code = st.selectbox("Select Driver to Edit/Delete", drivers_df['code'].tolist())
+            sel_d_code = st.selectbox("Select Driver to Edit/Delete", drivers_df['code'].tolist() if not drivers_df.empty else [])
             if sel_d_code:
                 d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
                 e_name = st.text_input("Edit Name", d_data['name'])
@@ -468,12 +468,11 @@ elif choice == "2. Database Management":
                     st.warning("Deleted!")
                     st.rerun()
 
-    # --- HELPERS ---
+    # HELPERS
     with tab2:
         st.subheader("📋 Full Helpers List")
         helpers_df = load_table('helpers')
         st.dataframe(helpers_df, use_container_width=True, height=250)
-        
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
@@ -486,10 +485,9 @@ elif choice == "2. Database Management":
                 run_query("INSERT INTO helpers (name, code, restriction, anchor_area) VALUES (?, ?, ?, ?)", (h_name, h_code, h_restr, h_anchor))
                 st.success("Added!")
                 st.rerun()
-
         with c_edit:
             st.subheader("✏️ Edit / Delete Helper")
-            sel_h_code = st.selectbox("Select Helper to Edit/Delete", helpers_df['code'].tolist())
+            sel_h_code = st.selectbox("Select Helper to Edit/Delete", helpers_df['code'].tolist() if not helpers_df.empty else [])
             if sel_h_code:
                 h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
                 e_hname = st.text_input("Edit Name", h_data['name'], key="eh_name")
@@ -508,12 +506,11 @@ elif choice == "2. Database Management":
                     st.warning("Deleted!")
                     st.rerun()
 
-    # --- AREAS ---
+    # AREAS
     with tab3:
         st.subheader("📋 Full Areas List")
         a_df = load_table('areas')
         st.dataframe(a_df, use_container_width=True, height=250)
-        
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
@@ -526,18 +523,17 @@ elif choice == "2. Database Management":
                 st.rerun()
         with c_edit:
             st.subheader("🗑️ Delete Area")
-            sel_a = st.selectbox("Select Area to Delete", a_df['name'].tolist())
-            if st.button("Delete Selected Area", use_container_width=True):
+            sel_a = st.selectbox("Select Area to Delete", a_df['name'].tolist() if not a_df.empty else [])
+            if st.button("Delete Selected Area", use_container_width=True) and sel_a:
                 run_query("DELETE FROM areas WHERE name=?", (sel_a,))
                 st.warning("Deleted!")
                 st.rerun()
 
-    # --- VEHICLES ---
+    # VEHICLES
     with tab4:
         st.subheader("📋 Full Vehicles List")
         v_df = load_table('vehicles')
         st.dataframe(v_df, use_container_width=True, height=250)
-        
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
@@ -550,83 +546,163 @@ elif choice == "2. Database Management":
                 st.rerun()
         with c_edit:
             st.subheader("🗑️ Delete Vehicle")
-            sel_v = st.selectbox("Select Vehicle to Delete", v_df['number'].tolist())
-            if st.button("Delete Selected Vehicle", use_container_width=True):
+            sel_v = st.selectbox("Select Vehicle to Delete", v_df['number'].tolist() if not v_df.empty else [])
+            if st.button("Delete Selected Vehicle", use_container_width=True) and sel_v:
                 run_query("DELETE FROM vehicles WHERE number=?", (sel_v,))
                 st.warning("Deleted!")
                 st.rerun()
 
 
 # ==========================================
-# SCREEN 3: PAST EXPERIENCE BUILDER
+# SCREEN 3: PAST EXPERIENCE BUILDER (Add/Edit/Delete)
 # ==========================================
 elif choice == "3. Past Experience Builder":
-    st.header("🕰️ Manually Add Past Experience")
-    st.write("Add history for drivers/helpers with accurate dates. The system calculates how many months they worked in that area based on the Start and End Date.")
+    st.header("🕰️ Manage Past Experience")
     
-    col1, col2, col3 = st.columns(3)
-    p_type = col1.selectbox("Role", ["Driver", "Helper"])
+    st.subheader("📋 Current Experience Log")
+    history_df = load_table('history')
+    st.dataframe(history_df.sort_values(by="id", ascending=False), use_container_width=True, height=250)
+    st.divider()
     
-    df_names = load_table('drivers') if p_type == "Driver" else load_table('helpers')
-    person_list = [f"{row['code']} - {row['name']}" for _, row in df_names.iterrows()] if not df_names.empty else []
+    c_add, c_edit = st.columns(2)
     
-    p_person = col2.selectbox("Select Person", person_list)
     areas_df = load_table('areas')
     area_list = areas_df['name'].tolist() if not areas_df.empty else []
-    p_area = col3.selectbox("Area Experienced In", area_list)
     
-    d1, d2 = st.columns(2)
-    p_start_date = d1.date_input("From Date (Start)")
-    p_end_date = d2.date_input("To Date (End)")
-    
-    if st.button("➕ Add Past Experience", use_container_width=True):
-        if p_start_date > p_end_date:
-            st.error("Start Date cannot be after End Date.")
-        else:
-            p_code = p_person.split(" - ")[0]
-            p_name = p_person.split(" - ")[1]
-            run_query("INSERT INTO history (person_type, person_code, person_name, area, date, end_date) VALUES (?, ?, ?, ?, ?, ?)",
-                      (p_type, p_code, p_name, p_area, p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")))
-            st.success(f"Experience logically calculated and added for {p_name} in {p_area}!")
+    with c_add:
+        st.subheader("➕ Add Experience")
+        p_type = st.selectbox("Role", ["Driver", "Helper"])
+        df_names = load_table('drivers') if p_type == "Driver" else load_table('helpers')
+        person_list = [f"{row['code']} - {row['name']}" for _, row in df_names.iterrows()] if not df_names.empty else []
         
-    st.divider()
-    st.subheader("Current Experience Log")
-    history_df = load_table('history')
-    st.dataframe(history_df.sort_values(by="id", ascending=False), use_container_width=True)
+        p_person = st.selectbox("Select Person", person_list)
+        p_area = st.selectbox("Area Experienced In", area_list)
+        
+        d1, d2 = st.columns(2)
+        p_start_date = d1.date_input("From Date (Start)")
+        p_end_date = d2.date_input("To Date (End)")
+        
+        if st.button("➕ Add Past Experience", use_container_width=True):
+            if p_start_date > p_end_date:
+                st.error("Start Date cannot be after End Date.")
+            else:
+                p_code = p_person.split(" - ")[0]
+                p_name = p_person.split(" - ")[1]
+                run_query("INSERT INTO history (person_type, person_code, person_name, area, date, end_date) VALUES (?, ?, ?, ?, ?, ?)",
+                          (p_type, p_code, p_name, p_area, p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")))
+                st.success("Experience logically calculated and added!")
+                st.rerun()
+
+    with c_edit:
+        st.subheader("✏️ Edit / Delete Experience")
+        if not history_df.empty:
+            history_list = [f"{row['id']} - {row['person_name']} ({row['area']})" for _, row in history_df.iterrows()]
+            sel_hist_str = st.selectbox("Select Record to Edit/Delete", history_list)
+            
+            if sel_hist_str:
+                hist_id = int(sel_hist_str.split(" - ")[0])
+                hist_data = history_df[history_df['id'] == hist_id].iloc[0]
+                
+                a_idx = area_list.index(hist_data['area']) if hist_data['area'] in area_list else 0
+                e_area = st.selectbox("Edit Area", area_list, index=a_idx, key=f"e_area_{hist_id}")
+                
+                ed1, ed2 = st.columns(2)
+                e_start_val = safe_parse_date(hist_data['date'])
+                e_end_val = safe_parse_date(hist_data['end_date'])
+                
+                new_start = ed1.date_input("Edit Start Date", value=e_start_val, key=f"es_{hist_id}")
+                new_end = ed2.date_input("Edit End Date", value=e_end_val, key=f"ee_{hist_id}")
+                
+                c_upd, c_del = st.columns(2)
+                if c_upd.button("💾 Update Experience", use_container_width=True):
+                    run_query("UPDATE history SET area=?, date=?, end_date=? WHERE id=?", 
+                              (e_area, new_start.strftime("%Y-%m-%d"), new_end.strftime("%Y-%m-%d"), hist_id))
+                    st.success("Updated Successfully!")
+                    st.rerun()
+                    
+                if c_del.button("🗑️ Delete Experience", use_container_width=True):
+                    run_query("DELETE FROM history WHERE id=?", (hist_id,))
+                    st.warning("Deleted!")
+                    st.rerun()
+        else:
+            st.info("No history available to edit.")
 
 
 # ==========================================
-# SCREEN 4: VACATION SCHEDULE
+# SCREEN 4: VACATION SCHEDULE (Add/Edit/Delete)
 # ==========================================
 elif choice == "4. Vacation Schedule":
-    st.header("🌴 Vacation Management")
+    st.header("🌴 Manage Vacation Schedule")
     
-    col1, col2, col3, col4 = st.columns(4)
-    v_type = col1.selectbox("Role", ["Driver", "Helper"])
+    st.subheader("📋 Current Vacations List")
+    vacs_df = load_table('vacations')
+    st.dataframe(vacs_df, use_container_width=True, height=250)
+    st.divider()
     
-    df_names = load_table('drivers') if v_type == "Driver" else load_table('helpers')
-    name_list = df_names['name'].tolist() if not df_names.empty else []
-    v_name = col2.selectbox("Name", name_list)
+    c_add, c_edit = st.columns(2)
     
-    v_start = col3.date_input("Start Date")
-    v_end = col4.date_input("End Date")
-    
-    if st.button("Add Vacation"):
-        vacs = load_table('vacations')
-        overlapping = 0
-        for _, row in vacs.iterrows():
-            if row['person_type'] == v_type:
-                exist_start = datetime.strptime(row['start_date'], "%Y-%m-%d").date()
-                exist_end = datetime.strptime(row['end_date'], "%Y-%m-%d").date()
-                if max(v_start, exist_start) <= min(v_end, exist_end):
-                    overlapping += 1
+    with c_add:
+        st.subheader("➕ Add Vacation")
+        v_type = st.selectbox("Role", ["Driver", "Helper"])
+        df_names = load_table('drivers') if v_type == "Driver" else load_table('helpers')
+        name_list = df_names['name'].tolist() if not df_names.empty else []
+        v_name = st.selectbox("Name", name_list)
         
-        if overlapping >= 3:
-            st.error(f"Cannot add! Already {overlapping} {v_type}s on vacation during these dates.")
-        else:
-            run_query("INSERT INTO vacations (person_type, person_name, start_date, end_date) VALUES (?, ?, ?, ?)",
-                      (v_type, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")))
-            st.success("Vacation scheduled successfully!")
+        d1, d2 = st.columns(2)
+        v_start = d1.date_input("Start Date")
+        v_end = d2.date_input("End Date")
+        
+        if st.button("➕ Add Vacation", use_container_width=True):
+            if v_start > v_end:
+                st.error("Start Date cannot be after End Date.")
+            else:
+                # Check overlaps (Max 3 allowed)
+                overlapping = 0
+                for _, row in vacs_df.iterrows():
+                    if row['person_type'] == v_type:
+                        e_start = safe_parse_date(row['start_date'])
+                        e_end = safe_parse_date(row['end_date'])
+                        if max(v_start, e_start) <= min(v_end, e_end):
+                            overlapping += 1
+                
+                if overlapping >= 3:
+                    st.error(f"Cannot add! Already {overlapping} {v_type}s on vacation during these dates.")
+                else:
+                    run_query("INSERT INTO vacations (person_type, person_name, start_date, end_date) VALUES (?, ?, ?, ?)",
+                              (v_type, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")))
+                    st.success("Vacation scheduled successfully!")
+                    st.rerun()
+
+    with c_edit:
+        st.subheader("✏️ Edit / Delete Vacation")
+        if not vacs_df.empty:
+            vac_list = [f"{row['id']} - {row['person_name']} ({row['start_date']} to {row['end_date']})" for _, row in vacs_df.iterrows()]
+            sel_vac_str = st.selectbox("Select Vacation to Edit/Delete", vac_list)
             
-    st.subheader("Current Vacations")
-    st.dataframe(load_table('vacations'), use_container_width=True)
+            if sel_vac_str:
+                vac_id = int(sel_vac_str.split(" - ")[0])
+                vac_data = vacs_df[vacs_df['id'] == vac_id].iloc[0]
+                
+                ed1, ed2 = st.columns(2)
+                e_vstart_val = safe_parse_date(vac_data['start_date'])
+                e_vend_val = safe_parse_date(vac_data['end_date'])
+                
+                new_vstart = ed1.date_input("Edit Start Date", value=e_vstart_val, key=f"vs_{vac_id}")
+                new_vend = ed2.date_input("Edit End Date", value=e_vend_val, key=f"ve_{vac_id}")
+                
+                c_upd, c_del = st.columns(2)
+                if c_upd.button("💾 Update Vacation", use_container_width=True):
+                    if new_vstart > new_vend:
+                        st.error("Start Date cannot be after End Date.")
+                    else:
+                        run_query("UPDATE vacations SET start_date=?, end_date=? WHERE id=?", 
+                                  (new_vstart.strftime("%Y-%m-%d"), new_vend.strftime("%Y-%m-%d"), vac_id))
+                        st.success("Updated Successfully!")
+                        st.rerun()
+                        
+                if c_del.button("🗑️ Delete Vacation", use_container_width=True):
+                    run_query("DELETE FROM vacations WHERE id=?", (vac_id,))
+                    st.warning("Deleted!")
+                    st.rerun()
+        else:
+            st.info("No vacations available to edit.")
