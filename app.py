@@ -115,7 +115,7 @@ def init_db():
     
     c.execute('''CREATE TABLE IF NOT EXISTS history (
                     id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, 
-                    area TEXT, date TEXT)''')
+                    area TEXT, date TEXT, end_date TEXT)''')
                     
     c.execute('''CREATE TABLE IF NOT EXISTS vacations (
                     id INTEGER PRIMARY KEY, person_type TEXT, person_name TEXT, 
@@ -126,21 +126,17 @@ def init_db():
                     driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT)''')
     
     # DATABASE UPGRADE / MIGRATION FIX
-    # This prevents the crash by safely forcing the old database to add missing columns
-    try:
-        c.execute("ALTER TABLE drivers ADD COLUMN sector TEXT DEFAULT 'Pharma'")
-    except sqlite3.OperationalError:
-        pass # Column already exists
+    try: c.execute("ALTER TABLE drivers ADD COLUMN sector TEXT DEFAULT 'Pharma'")
+    except sqlite3.OperationalError: pass
         
-    try:
-        c.execute("ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'")
-    except sqlite3.OperationalError:
-        pass # Column already exists
+    try: c.execute("ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'")
+    except sqlite3.OperationalError: pass
         
-    try:
-        c.execute("ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'")
-    except sqlite3.OperationalError:
-        pass # Column already exists
+    try: c.execute("ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'")
+    except sqlite3.OperationalError: pass
+        
+    try: c.execute("ALTER TABLE history ADD COLUMN end_date TEXT")
+    except sqlite3.OperationalError: pass
     
     # Auto-Seed Data if empty
     c.execute("SELECT COUNT(*) FROM areas")
@@ -189,11 +185,25 @@ def check_restriction(restriction, area_name):
         "Abu Dhabi": ["Abu Dhabi", "AUH", "MUS", "BAN", "KLF", "TCA", "KLD", "ARP", "KIZ"],
         "Al Ain": ["Al Ain", "ALN"]
     }
-    
     if restriction in mapping:
         return any(k.lower() in area_name.lower() for k in mapping[restriction])
-    
     return restriction.lower() in area_name.lower()
+
+# Function to calculate exactly how many months of experience someone has in an area
+def get_experience_months(person_code, area_name):
+    records = run_query("SELECT date, end_date FROM history WHERE person_code=? AND area=?", (person_code, area_name))
+    total_days = 0
+    for start_str, end_str in records:
+        try:
+            start = datetime.strptime(start_str, "%Y-%m-%d").date()
+            if end_str and end_str != "None":
+                end = datetime.strptime(end_str, "%Y-%m-%d").date()
+            else:
+                end = start + timedelta(days=30) # Default to 1 month if old data
+            total_days += max(0, (end - start).days)
+        except:
+            pass
+    return total_days / 30.0
 
 # --- 3. UI SETUP ---
 st.set_page_config(page_title="Logistics Route Planner", layout="wide")
@@ -218,10 +228,9 @@ if choice == "1. Create Route Plan":
         areas = load_table('areas')
         vehicles = load_table('vehicles')
         history = load_table('history')
-        vacations = load_table('vacations')
         active_routes = load_table('active_routes')
         
-        fallback_areas = ["2-8 Cars", "Urgent/Gov Order", "Pickup", "Substitute", "Second Trip", "Sample Driver"]
+        fallback_areas = ["2-8 Cars", "Urgent/Gov Order", "Pickup", "Substitute", "Second Trip", "Novo Sample"]
         all_area_names = areas['name'].tolist() + fallback_areas
         
         route_plan = []
@@ -247,17 +256,24 @@ if choice == "1. Create Route Plan":
             
             prev_assignment = active_routes[active_routes['area_name'] == area_name]
             
+            # --- Determine if this area needs a Helper ---
+            needs_helper = True
+            area_lower = area_name.lower()
+            if any(kw in area_lower for kw in ["2-8", "urgent", "gov", "substitute"]):
+                needs_helper = False
+            
             if rot_type == "Drivers":
-                # KEEP HELPER
-                if not prev_assignment.empty:
-                    assigned_h_code = prev_assignment.iloc[0]['helper_code']
-                    assigned_h_name = prev_assignment.iloc[0]['helper_name']
-                else:
-                    avail_h = helpers[~helpers['code'].isin(used_helpers)]
-                    for _, h in avail_h.iterrows():
-                        if check_restriction(h['restriction'], area_name):
-                            assigned_h_code, assigned_h_name = h['code'], h['name']
-                            break
+                # KEEP HELPER (if needed)
+                if needs_helper:
+                    if not prev_assignment.empty and prev_assignment.iloc[0]['helper_code'] != "N/A":
+                        assigned_h_code = prev_assignment.iloc[0]['helper_code']
+                        assigned_h_name = prev_assignment.iloc[0]['helper_name']
+                    else:
+                        avail_h = helpers[~helpers['code'].isin(used_helpers)]
+                        for _, h in avail_h.iterrows():
+                            if check_restriction(h['restriction'], area_name):
+                                assigned_h_code, assigned_h_name = h['code'], h['name']
+                                break
                 
                 # ROTATE DRIVER
                 avail_d = drivers[~drivers['code'].isin(used_drivers)]
@@ -269,14 +285,18 @@ if choice == "1. Create Route Plan":
                     recent = history[(history['person_code'] == d['code']) & (history['date'] >= past_6m)]['area'].tolist()
                     if area_name in recent and d['anchor_area'] == "None": continue
                     
-                    d_history = history[(history['person_code'] == d['code']) & (history['area'] == area_name)]
-                    if len(d_history) == 0: 
-                        h_history = history[(history['person_code'] == assigned_h_code) & (history['area'] == area_name)]
-                        if len(h_history) < 2 and assigned_h_code != "UNASSIGNED": continue 
+                    d_exp = get_experience_months(d['code'], area_name)
+                    if d_exp < 1: 
+                        h_exp = get_experience_months(assigned_h_code, area_name)
+                        if h_exp < 2 and assigned_h_code != "UNASSIGNED" and needs_helper: 
+                            continue 
                         
                     assigned_d_code, assigned_d_name = d['code'], d['name']
                     log_reason = "Driver rotated. Helper kept."
                     used_drivers.add(d['code'])
+                    
+                    # Double check if assigned driver uses a BUS, then no helper needed
+                    if d['veh_type'] == "BUS": needs_helper = False
                     break
                     
             elif rot_type == "Helpers":
@@ -284,26 +304,37 @@ if choice == "1. Create Route Plan":
                 if not prev_assignment.empty:
                     assigned_d_code = prev_assignment.iloc[0]['driver_code']
                     assigned_d_name = prev_assignment.iloc[0]['driver_name']
+                    # Check if driver uses a BUS
+                    d_type_check = drivers[drivers['code'] == assigned_d_code]['veh_type'].values
+                    if len(d_type_check) > 0 and d_type_check[0] == "BUS":
+                        needs_helper = False
                 else:
                     avail_d = drivers[~drivers['code'].isin(used_drivers)]
                     for _, d in avail_d.iterrows():
                         if check_restriction(d['restriction'], area_name):
                             assigned_d_code, assigned_d_name = d['code'], d['name']
+                            if d['veh_type'] == "BUS": needs_helper = False
                             break
                 
                 # ROTATE HELPER
-                avail_h = helpers[~helpers['code'].isin(used_helpers)]
-                for _, h in avail_h.iterrows():
-                    if h['anchor_area'] != "None" and h['anchor_area'] != area_name: continue
-                    if not check_restriction(h['restriction'], area_name): continue
-                    
-                    d_history = history[(history['person_code'] == assigned_d_code) & (history['area'] == area_name)]
-                    if len(d_history) < 1 and h['anchor_area'] == "None" and assigned_d_code != "UNASSIGNED": continue
-                    
-                    assigned_h_code, assigned_h_name = h['code'], h['name']
-                    log_reason = "Helper rotated. Driver kept."
-                    used_helpers.add(h['code'])
-                    break
+                if needs_helper:
+                    avail_h = helpers[~helpers['code'].isin(used_helpers)]
+                    for _, h in avail_h.iterrows():
+                        if h['anchor_area'] != "None" and h['anchor_area'] != area_name: continue
+                        if not check_restriction(h['restriction'], area_name): continue
+                        
+                        d_exp = get_experience_months(assigned_d_code, area_name)
+                        if d_exp < 1 and h['anchor_area'] == "None" and assigned_d_code != "UNASSIGNED": continue
+                        
+                        assigned_h_code, assigned_h_name = h['code'], h['name']
+                        log_reason = "Helper rotated. Driver kept."
+                        used_helpers.add(h['code'])
+                        break
+
+            # Process NO HELPER
+            if not needs_helper:
+                assigned_h_code = "N/A"
+                assigned_h_name = "NO HELPER REQUIRED"
 
             # ASSIGN VEHICLE
             if assigned_d_code != "UNASSIGNED":
@@ -337,7 +368,7 @@ if choice == "1. Create Route Plan":
                 "Area": area_name,
                 "Driver": assigned_d_name,
                 "Helper": assigned_h_name,
-                "Reason": log_reason if log_reason else "System Fallback/Missed Constraints"
+                "Reason": log_reason if log_reason else ("No Helper Needed" if not needs_helper else "System Fallback/Missed Constraints")
             })
             order_counter += 1
 
@@ -347,8 +378,9 @@ if choice == "1. Create Route Plan":
         st.success("Plan Generated! Please review below and click 'Approve & Save' to finalize.")
 
     if 'generated_plan' in st.session_state:
+        st.info("📊 Excel Sheet Preview:")
         df_route = pd.DataFrame(st.session_state.generated_plan)
-        st.dataframe(df_route)
+        st.dataframe(df_route, use_container_width=True)
         
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -357,24 +389,25 @@ if choice == "1. Create Route Plan":
         output.seek(0)
         
         col_down, col_app = st.columns(2)
-        col_down.download_button("📥 Download Excel", data=output, file_name="Generated_Plan.xlsx")
+        col_down.download_button("📥 Download Excel", data=output, file_name=f"Generated_Plan_{st.session_state.plan_date}.xlsx")
         
-        if col_app.button("✅ Approve & Save to Database"):
+        if col_app.button("✅ Approve & Add to Experience Database"):
             run_query("DELETE FROM active_routes")
+            plan_start_str = st.session_state.plan_date.strftime("%Y-%m-%d")
+            plan_end_str = (st.session_state.plan_date + timedelta(days=90)).strftime("%Y-%m-%d") # Logged as 3 months experience
+            
             for r in st.session_state.generated_plan:
                 run_query("INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                           (r['Order Number'], r['Area Code'], r['Area Full Name'], r['Driver Code'], r['Driver Name'], r['Helper Code'], r['Helper Name'], r['Vehicle Number']))
                 
-                # Append to History Database for experience
-                plan_date_str = st.session_state.plan_date.strftime("%Y-%m-%d")
                 if r['Driver Code'] != "UNASSIGNED":
-                    run_query("INSERT INTO history (person_type, person_code, person_name, area, date) VALUES (?, ?, ?, ?, ?)",
-                              ("Driver", r['Driver Code'], r['Driver Name'], r['Area Full Name'], plan_date_str))
-                if r['Helper Code'] != "UNASSIGNED":
-                    run_query("INSERT INTO history (person_type, person_code, person_name, area, date) VALUES (?, ?, ?, ?, ?)",
-                              ("Helper", r['Helper Code'], r['Helper Name'], r['Area Full Name'], plan_date_str))
+                    run_query("INSERT INTO history (person_type, person_code, person_name, area, date, end_date) VALUES (?, ?, ?, ?, ?, ?)",
+                              ("Driver", r['Driver Code'], r['Driver Name'], r['Area Full Name'], plan_start_str, plan_end_str))
+                if r['Helper Code'] not in ["UNASSIGNED", "N/A"]:
+                    run_query("INSERT INTO history (person_type, person_code, person_name, area, date, end_date) VALUES (?, ?, ?, ?, ?, ?)",
+                              ("Helper", r['Helper Code'], r['Helper Name'], r['Area Full Name'], plan_start_str, plan_end_str))
             
-            st.success("Plan Approved! Experience and active routes updated in the database.")
+            st.success("Plan Approved! 3 months of experience successfully added to all assigned drivers and helpers.")
             del st.session_state.generated_plan
 
 # ==========================================
@@ -390,116 +423,134 @@ elif choice == "2. Database Management":
 
     # --- DRIVERS ---
     with tab1:
-        st.subheader("Add Driver")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        d_name = c1.text_input("Name")
-        d_code = c2.text_input("Code")
-        d_type = c3.selectbox("Vehicle Type", ["VAN", "PICK-UP", "BUS"])
-        d_restr = c4.selectbox("Restriction/Permit", RESTRICTION_OPTIONS)
-        d_anchor = c5.selectbox("Anchor Area", area_list, key="d_add_anchor")
-        if st.button("Add New Driver"):
-            run_query("INSERT INTO drivers (name, code, veh_type, sector, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?)", 
-                      (d_name, d_code, d_type, "Pharma", d_restr, d_anchor))
-            st.success("Added!")
-            st.rerun()
-
-        st.divider()
-        st.subheader("Edit or Delete Existing Driver")
+        st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
-        sel_d_code = st.selectbox("Select Driver to Edit/Delete", drivers_df['code'].tolist())
-        if sel_d_code:
-            d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
-            ec1, ec2, ec3, ec4, ec5 = st.columns(5)
-            e_name = ec1.text_input("Edit Name", d_data['name'])
-            e_type = ec3.selectbox("Edit Veh Type", ["VAN", "PICK-UP", "BUS"], index=["VAN", "PICK-UP", "BUS"].index(d_data['veh_type']) if d_data['veh_type'] in ["VAN", "PICK-UP", "BUS"] else 0)
-            
-            r_idx = RESTRICTION_OPTIONS.index(d_data['restriction']) if d_data['restriction'] in RESTRICTION_OPTIONS else 0
-            e_restr = ec4.selectbox("Edit Restriction", RESTRICTION_OPTIONS, index=r_idx)
-            
-            a_idx = area_list.index(d_data['anchor_area']) if d_data['anchor_area'] in area_list else 0
-            e_anchor = ec5.selectbox("Edit Anchor", area_list, index=a_idx, key="d_edit_anchor")
-            
-            c_upd, c_del = st.columns(2)
-            if c_upd.button("💾 Update Driver"):
-                run_query("UPDATE drivers SET name=?, veh_type=?, restriction=?, anchor_area=? WHERE code=?", (e_name, e_type, e_restr, e_anchor, sel_d_code))
-                st.success("Updated!")
+        st.dataframe(drivers_df, use_container_width=True, height=250)
+        
+        st.divider()
+        c_add, c_edit = st.columns(2)
+        with c_add:
+            st.subheader("➕ Add Driver")
+            d_name = st.text_input("Name")
+            d_code = st.text_input("Code")
+            d_type = st.selectbox("Vehicle Type", ["VAN", "PICK-UP", "BUS"])
+            d_restr = st.selectbox("Restriction/Permit", RESTRICTION_OPTIONS)
+            d_anchor = st.selectbox("Anchor Area", area_list, key="d_add_anchor")
+            if st.button("Add New Driver", use_container_width=True):
+                run_query("INSERT INTO drivers (name, code, veh_type, sector, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?)", 
+                          (d_name, d_code, d_type, "Pharma", d_restr, d_anchor))
+                st.success("Added!")
                 st.rerun()
-            if c_del.button("🗑️ Delete Driver"):
-                run_query("DELETE FROM drivers WHERE code=?", (sel_d_code,))
-                st.warning("Deleted!")
-                st.rerun()
+
+        with c_edit:
+            st.subheader("✏️ Edit / Delete Driver")
+            sel_d_code = st.selectbox("Select Driver to Edit/Delete", drivers_df['code'].tolist())
+            if sel_d_code:
+                d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
+                e_name = st.text_input("Edit Name", d_data['name'])
+                e_type = st.selectbox("Edit Veh Type", ["VAN", "PICK-UP", "BUS"], index=["VAN", "PICK-UP", "BUS"].index(d_data['veh_type']) if d_data['veh_type'] in ["VAN", "PICK-UP", "BUS"] else 0)
+                r_idx = RESTRICTION_OPTIONS.index(d_data['restriction']) if d_data['restriction'] in RESTRICTION_OPTIONS else 0
+                e_restr = st.selectbox("Edit Restriction", RESTRICTION_OPTIONS, index=r_idx)
+                a_idx = area_list.index(d_data['anchor_area']) if d_data['anchor_area'] in area_list else 0
+                e_anchor = st.selectbox("Edit Anchor", area_list, index=a_idx, key="d_edit_anchor")
+                
+                c_upd, c_del = st.columns(2)
+                if c_upd.button("💾 Update Driver", use_container_width=True):
+                    run_query("UPDATE drivers SET name=?, veh_type=?, restriction=?, anchor_area=? WHERE code=?", (e_name, e_type, e_restr, e_anchor, sel_d_code))
+                    st.success("Updated!")
+                    st.rerun()
+                if c_del.button("🗑️ Delete Driver", use_container_width=True):
+                    run_query("DELETE FROM drivers WHERE code=?", (sel_d_code,))
+                    st.warning("Deleted!")
+                    st.rerun()
 
     # --- HELPERS ---
     with tab2:
-        st.subheader("Add Helper")
-        c1, c2, c3, c4 = st.columns(4)
-        h_name = c1.text_input("Helper Name")
-        h_code = c2.text_input("Helper Code")
-        h_restr = c3.selectbox("Restriction", RESTRICTION_OPTIONS, key="h_restr_add")
-        h_anchor = c4.selectbox("Anchor Area", area_list, key="h_anchor_add")
-        if st.button("Add New Helper"):
-            run_query("INSERT INTO helpers (name, code, restriction, anchor_area) VALUES (?, ?, ?, ?)", (h_name, h_code, h_restr, h_anchor))
-            st.success("Added!")
-            st.rerun()
-
-        st.divider()
-        st.subheader("Edit or Delete Existing Helper")
+        st.subheader("📋 Full Helpers List")
         helpers_df = load_table('helpers')
-        sel_h_code = st.selectbox("Select Helper to Edit/Delete", helpers_df['code'].tolist())
-        if sel_h_code:
-            h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
-            ec1, ec2, ec3 = st.columns(3)
-            e_hname = ec1.text_input("Edit Name", h_data['name'], key="eh_name")
-            hr_idx = RESTRICTION_OPTIONS.index(h_data['restriction']) if h_data['restriction'] in RESTRICTION_OPTIONS else 0
-            e_hrestr = ec2.selectbox("Edit Restriction", RESTRICTION_OPTIONS, index=hr_idx, key="eh_restr")
-            ha_idx = area_list.index(h_data['anchor_area']) if h_data['anchor_area'] in area_list else 0
-            e_hanchor = ec3.selectbox("Edit Anchor", area_list, index=ha_idx, key="eh_anchor")
-            
-            c_upd, c_del = st.columns(2)
-            if c_upd.button("💾 Update Helper"):
-                run_query("UPDATE helpers SET name=?, restriction=?, anchor_area=? WHERE code=?", (e_hname, e_hrestr, e_hanchor, sel_h_code))
-                st.success("Updated!")
+        st.dataframe(helpers_df, use_container_width=True, height=250)
+        
+        st.divider()
+        c_add, c_edit = st.columns(2)
+        with c_add:
+            st.subheader("➕ Add Helper")
+            h_name = st.text_input("Helper Name")
+            h_code = st.text_input("Helper Code")
+            h_restr = st.selectbox("Restriction", RESTRICTION_OPTIONS, key="h_restr_add")
+            h_anchor = st.selectbox("Anchor Area", area_list, key="h_anchor_add")
+            if st.button("Add New Helper", use_container_width=True):
+                run_query("INSERT INTO helpers (name, code, restriction, anchor_area) VALUES (?, ?, ?, ?)", (h_name, h_code, h_restr, h_anchor))
+                st.success("Added!")
                 st.rerun()
-            if c_del.button("🗑️ Delete Helper"):
-                run_query("DELETE FROM helpers WHERE code=?", (sel_h_code,))
-                st.warning("Deleted!")
-                st.rerun()
+
+        with c_edit:
+            st.subheader("✏️ Edit / Delete Helper")
+            sel_h_code = st.selectbox("Select Helper to Edit/Delete", helpers_df['code'].tolist())
+            if sel_h_code:
+                h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
+                e_hname = st.text_input("Edit Name", h_data['name'], key="eh_name")
+                hr_idx = RESTRICTION_OPTIONS.index(h_data['restriction']) if h_data['restriction'] in RESTRICTION_OPTIONS else 0
+                e_hrestr = st.selectbox("Edit Restriction", RESTRICTION_OPTIONS, index=hr_idx, key="eh_restr")
+                ha_idx = area_list.index(h_data['anchor_area']) if h_data['anchor_area'] in area_list else 0
+                e_hanchor = st.selectbox("Edit Anchor", area_list, index=ha_idx, key="eh_anchor")
+                
+                c_upd, c_del = st.columns(2)
+                if c_upd.button("💾 Update Helper", use_container_width=True):
+                    run_query("UPDATE helpers SET name=?, restriction=?, anchor_area=? WHERE code=?", (e_hname, e_hrestr, e_hanchor, sel_h_code))
+                    st.success("Updated!")
+                    st.rerun()
+                if c_del.button("🗑️ Delete Helper", use_container_width=True):
+                    run_query("DELETE FROM helpers WHERE code=?", (sel_h_code,))
+                    st.warning("Deleted!")
+                    st.rerun()
 
     # --- AREAS ---
     with tab3:
-        st.subheader("Add Area")
-        a_name = st.text_input("Area Full Name")
-        a_code = st.text_input("Area Code")
-        if st.button("Add New Area"):
-            run_query("INSERT INTO areas (name, code) VALUES (?, ?)", (a_name, a_code))
-            st.success("Added!")
-            st.rerun()
-            
-        st.divider()
+        st.subheader("📋 Full Areas List")
         a_df = load_table('areas')
-        sel_a = st.selectbox("Select Area to Delete", a_df['name'].tolist())
-        if st.button("🗑️ Delete Area"):
-            run_query("DELETE FROM areas WHERE name=?", (sel_a,))
-            st.warning("Deleted!")
-            st.rerun()
+        st.dataframe(a_df, use_container_width=True, height=250)
+        
+        st.divider()
+        c_add, c_edit = st.columns(2)
+        with c_add:
+            st.subheader("➕ Add Area")
+            a_name = st.text_input("Area Full Name")
+            a_code = st.text_input("Area Code")
+            if st.button("Add New Area", use_container_width=True):
+                run_query("INSERT INTO areas (name, code) VALUES (?, ?)", (a_name, a_code))
+                st.success("Added!")
+                st.rerun()
+        with c_edit:
+            st.subheader("🗑️ Delete Area")
+            sel_a = st.selectbox("Select Area to Delete", a_df['name'].tolist())
+            if st.button("Delete Selected Area", use_container_width=True):
+                run_query("DELETE FROM areas WHERE name=?", (sel_a,))
+                st.warning("Deleted!")
+                st.rerun()
 
     # --- VEHICLES ---
     with tab4:
-        st.subheader("Add Vehicle")
-        v_num = st.text_input("Vehicle Number")
-        v_type = st.selectbox("Type", ["VAN", "PICK-UP", "BUS"])
-        if st.button("Add New Vehicle"):
-            run_query("INSERT INTO vehicles (number, type) VALUES (?, ?)", (v_num, v_type))
-            st.success("Added!")
-            st.rerun()
-            
-        st.divider()
+        st.subheader("📋 Full Vehicles List")
         v_df = load_table('vehicles')
-        sel_v = st.selectbox("Select Vehicle to Delete", v_df['number'].tolist())
-        if st.button("🗑️ Delete Vehicle"):
-            run_query("DELETE FROM vehicles WHERE number=?", (sel_v,))
-            st.warning("Deleted!")
-            st.rerun()
+        st.dataframe(v_df, use_container_width=True, height=250)
+        
+        st.divider()
+        c_add, c_edit = st.columns(2)
+        with c_add:
+            st.subheader("➕ Add Vehicle")
+            v_num = st.text_input("Vehicle Number")
+            v_type = st.selectbox("Type", ["VAN", "PICK-UP", "BUS"])
+            if st.button("Add New Vehicle", use_container_width=True):
+                run_query("INSERT INTO vehicles (number, type) VALUES (?, ?)", (v_num, v_type))
+                st.success("Added!")
+                st.rerun()
+        with c_edit:
+            st.subheader("🗑️ Delete Vehicle")
+            sel_v = st.selectbox("Select Vehicle to Delete", v_df['number'].tolist())
+            if st.button("Delete Selected Vehicle", use_container_width=True):
+                run_query("DELETE FROM vehicles WHERE number=?", (sel_v,))
+                st.warning("Deleted!")
+                st.rerun()
 
 
 # ==========================================
@@ -507,9 +558,9 @@ elif choice == "2. Database Management":
 # ==========================================
 elif choice == "3. Past Experience Builder":
     st.header("🕰️ Manually Add Past Experience")
-    st.write("Add history for drivers/helpers so the system knows they have the required 1 or 2 months experience in an area.")
+    st.write("Add history for drivers/helpers with accurate dates. The system calculates how many months they worked in that area based on the Start and End Date.")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     p_type = col1.selectbox("Role", ["Driver", "Helper"])
     
     df_names = load_table('drivers') if p_type == "Driver" else load_table('helpers')
@@ -520,19 +571,24 @@ elif choice == "3. Past Experience Builder":
     area_list = areas_df['name'].tolist() if not areas_df.empty else []
     p_area = col3.selectbox("Area Experienced In", area_list)
     
-    p_date = col4.date_input("Date of Experience (Approx)")
+    d1, d2 = st.columns(2)
+    p_start_date = d1.date_input("From Date (Start)")
+    p_end_date = d2.date_input("To Date (End)")
     
-    if st.button("➕ Add Past Experience"):
-        p_code = p_person.split(" - ")[0]
-        p_name = p_person.split(" - ")[1]
-        run_query("INSERT INTO history (person_type, person_code, person_name, area, date) VALUES (?, ?, ?, ?, ?)",
-                  (p_type, p_code, p_name, p_area, p_date.strftime("%Y-%m-%d")))
-        st.success(f"Experience added for {p_name} in {p_area}!")
+    if st.button("➕ Add Past Experience", use_container_width=True):
+        if p_start_date > p_end_date:
+            st.error("Start Date cannot be after End Date.")
+        else:
+            p_code = p_person.split(" - ")[0]
+            p_name = p_person.split(" - ")[1]
+            run_query("INSERT INTO history (person_type, person_code, person_name, area, date, end_date) VALUES (?, ?, ?, ?, ?, ?)",
+                      (p_type, p_code, p_name, p_area, p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")))
+            st.success(f"Experience logically calculated and added for {p_name} in {p_area}!")
         
     st.divider()
     st.subheader("Current Experience Log")
     history_df = load_table('history')
-    st.dataframe(history_df.sort_values(by="id", ascending=False))
+    st.dataframe(history_df.sort_values(by="id", ascending=False), use_container_width=True)
 
 
 # ==========================================
@@ -569,4 +625,4 @@ elif choice == "4. Vacation Schedule":
             st.success("Vacation scheduled successfully!")
             
     st.subheader("Current Vacations")
-    st.dataframe(load_table('vacations'))
+    st.dataframe(load_table('vacations'), use_container_width=True)
