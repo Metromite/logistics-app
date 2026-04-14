@@ -74,6 +74,7 @@ def init_sqlite_db():
         "ALTER TABLE history ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
+        "ALTER TABLE areas ADD COLUMN sort_order INTEGER DEFAULT 99",
         "ALTER TABLE vehicles ADD COLUMN anchor_area TEXT DEFAULT 'None'"
     ]:
         try: c.execute(query)
@@ -99,11 +100,24 @@ def load_table(table_name):
         if table_name == 'drivers' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
         if table_name == 'areas' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
         if table_name == 'areas' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
+        if table_name == 'areas' and 'sort_order' not in df.columns and not df.empty: df['sort_order'] = 99
         if table_name == 'history' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
         if table_name == 'vehicles' and 'anchor_area' not in df.columns and not df.empty: df['anchor_area'] = 'None'
+        
+        # Enforce strict sort order for areas
+        if table_name == 'areas' and not df.empty:
+            df = df.sort_values(by='sort_order')
+            
+        # Clean potential NaN values from history
+        if table_name == 'history' and not df.empty:
+            df['sector'] = df['sector'].fillna('Pharma')
+            
         return df
     else:
-        return pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        if table_name == 'areas' and not df.empty: df = df.sort_values(by='sort_order')
+        if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
+        return df
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
     clear_cache()
@@ -137,29 +151,47 @@ VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 
 
-# --- PERFECT IMAGE-BASED SEED DATA ---
+# --- STRICT IMAGE-BASED ROUTE LAYOUT SEED ---
 SEED_AREAS_IMAGE = [
-    ("FUJ", "FUJAIRAH", "Pharma", "Yes"), ("RAK", "RAK / UAQ", "Pharma", "Yes"),
-    ("JAB", "JABEL ALI", "Pharma", "Yes"), ("ALQ1", "ALQOUZ-1", "Pharma", "Yes"),
-    ("ALQ2", "ALQOUZ-2", "Pharma", "Yes"), ("JUM", "JUMAIRAH", "Pharma", "Yes"),
-    ("BUR", "BURDUBAI", "Pharma", "Yes"), ("MIR", "MIRDIFF", "Pharma", "Yes"),
-    ("QUS", "QUSAIS", "Pharma", "Yes"), ("DEI", "DEIRA", "Pharma", "Yes"),
-    ("AJM", "AJMAN", "Pharma", "Yes"), ("SHJ-S", "SHJ - SANAYYA", "Pharma", "Yes"),
-    ("SHJ-B", "SHJ- BUH/ROLLA", "Pharma", "Yes"), 
-    ("CC1", "COLD CHAIN/URGENT ORDERS 1", "2-8", "No"), ("CC2", "COLD CHAIN/URGENT ORDERS 2", "2-8", "No"),
-    ("SAMP", "Sample Driver", "Pharma", "Yes"), 
-    ("2ND1", "2ND TRIP 1", "Pharma", "Yes"), ("2ND2", "2ND TRIP 2", "Pharma", "Yes"),
-    ("GOV1", "GOVT/URGENT ORDERS 1", "Govt / Urgent", "No"), ("GOV2", "GOVT/URGENT ORDERS 2", "Govt / Urgent", "No"),
-    ("GOV3", "GOVT/URGENT ORDERS 3", "Govt / Urgent", "No"), ("FLE", "FLEET SERVICE/RTA WORK", "Fleet", "No"),
-    ("SUB-P", "SUBTITUTE/PICK UP", "Substitute", "No"),
-    ("PU1", "PICK UP 1", "Bulk / Pick-Up", "Yes"), ("PU2", "PICK UP/SHJ 1", "Bulk / Pick-Up", "Yes"),
-    ("PU3", "PICK UP 2", "Bulk / Pick-Up", "Yes"), ("PU4", "PICK UP/SHJ 2", "Bulk / Pick-Up", "Yes"),
-    ("PU5", "PICK UP 3", "Bulk / Pick-Up", "Yes"), ("PU6", "PICK UP 4", "Bulk / Pick-Up", "Yes"),
-    ("ALQ-C", "ALQ", "Consumer", "Yes"), ("JA-C", "JA", "Consumer", "Yes"),
-    ("DXBO-C", "DXBO", "Consumer", "Yes"), ("BUR-C", "BUR", "Consumer", "Yes"),
-    ("RAK-C", "RAK", "Consumer", "Yes"), ("PU-C1", "PICK UP/SHJ", "Consumer", "Yes"),
-    ("PU-C2", "PICK UP", "Consumer", "Yes"), ("AJM-C", "AJM", "Consumer", "Yes"),
-    ("SHJS-C", "SHJS", "Consumer", "Yes"), ("SUB-C", "SUBTITUTE/URGENT ORDERS", "Substitute", "No")
+    ("PH-FUJ", "FUJAIRAH", "Pharma", "Yes", 1),
+    ("PH-RAK", "RAK", "Pharma", "Yes", 2),
+    ("PH-ALQ1", "ALQOUZ-1", "Pharma", "Yes", 3),
+    ("PH-ALQ2", "ALQOUZ-2", "Pharma", "Yes", 4),
+    ("PH-JUM", "JUMAIRAH", "Pharma", "Yes", 5),
+    ("PH-BUR", "BURDUBAI", "Pharma", "Yes", 6),
+    ("PH-MIR", "MIRDIFF", "Pharma", "Yes", 7),
+    ("PH-QUS", "QUSAIS", "Pharma", "Yes", 8),
+    ("PH-DEI", "DEIRA", "Pharma", "Yes", 9),
+    ("PH-AJM", "AJMAN", "Pharma", "Yes", 10),
+    ("PH-BUH", "BUHAIRAH", "Pharma", "Yes", 11),
+    ("PH-SHJS", "SHJ - SANAYYA", "Pharma", "Yes", 12),
+    ("PH-JAB", "JABEL ALI", "Pharma", "Yes", 13),
+    ("28-CC1", "COLD CHAIN/URGENT 1", "2-8", "No", 14),
+    ("28-CC2", "COLD CHAIN/URGENT 2", "2-8", "No", 15),
+    ("PH-2ND1", "2ND TRIP 1", "Pharma", "Yes", 16),
+    ("PH-2ND2", "2ND TRIP 2", "Pharma", "Yes", 17),
+    ("PH-SAMP", "SAMPLE DRIVER", "Pharma", "Yes", 18),
+    ("GOV-1", "GOVT/URGENT 1", "Govt", "No", 19),
+    ("GOV-2", "GOVT/URGENT 2", "Govt", "No", 20),
+    ("GOV-3", "GOVT/URGENT 3", "Govt", "No", 21),
+    ("FLE-1", "FLEET SERVICE", "Fleet", "No", 22),
+    ("PU-1", "PHARMA PICK UP 1", "Pick-Up", "Yes", 23),
+    ("PU-2", "PHARMA PICK UP 2", "Pick-Up", "Yes", 24),
+    ("PU-3", "PHARMA PICK UP 3", "Pick-Up", "Yes", 25),
+    ("PU-4", "PHARMA PICK UP 4", "Pick-Up", "Yes", 26),
+    ("PU-5", "PHARMA PICK UP 5", "Pick-Up", "Yes", 27),
+    ("PU-6", "PHARMA PICK UP 6", "Pick-Up", "Yes", 28),
+    ("PU-SUB", "PHARMA PICK UP SUB", "Pick-Up", "No", 29),
+    ("CON-ALQ", "ALQOUZ (C)", "Consumer", "Yes", 30),
+    ("CON-JAB", "JABAL ALI (C)", "Consumer", "Yes", 31),
+    ("CON-MIR", "MIRDIFF (C)", "Consumer", "Yes", 32),
+    ("CON-BUR", "BURDUBAI (C)", "Consumer", "Yes", 33),
+    ("CON-RAK", "RAK (C)", "Consumer", "Yes", 34),
+    ("CON-AJM", "AJMAN (C)", "Consumer", "Yes", 35),
+    ("CON-SHJS", "SHJ & SANAIYA (C)", "Consumer", "Yes", 36),
+    ("CON-PU1", "CONSUMER PICK UP 1", "Consumer", "Yes", 37),
+    ("CON-PU2", "CONSUMER PICK UP 2", "Consumer", "Yes", 38),
+    ("CON-SUB", "CONSUMER SUB", "Consumer", "No", 39)
 ]
 
 def auto_seed_database(force=False):
@@ -167,15 +199,15 @@ def auto_seed_database(force=False):
     if FIREBASE_READY:
         if force or len(list(db_fs.collection("areas").limit(1).stream())) == 0:
             if force: run_query(None, table_name="areas", action="CLEAR_TABLE")
-            for code, name, sector, nh in SEED_AREAS_IMAGE: 
-                db_fs.collection("areas").add({"code": code, "name": name, "sector": sector, "needs_helper": nh})
+            for code, name, sector, nh, order in SEED_AREAS_IMAGE: 
+                db_fs.collection("areas").add({"code": code, "name": name, "sector": sector, "needs_helper": nh, "sort_order": order})
             seeded = True
     else:
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM areas")
         if force or c.fetchone()[0] == 0:
             if force: c.execute("DELETE FROM areas")
-            c.executemany("INSERT INTO areas (code, name, sector, needs_helper) VALUES (?, ?, ?, ?)", SEED_AREAS_IMAGE)
+            c.executemany("INSERT INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
             conn.commit()
             seeded = True
     if seeded: clear_cache()
@@ -211,7 +243,12 @@ def is_on_vacation(vacations_df, person_name, target_date):
 
 def select_best_candidate(candidates_df, area_name, req_sector, target_date, history_df, vacations_df, role="Driver"):
     best_candidate, best_score, best_reason = None, -99999, "No valid candidates left"
-    req_veh = "2-8 VAN" if "2-8" in req_sector else ("BUS" if "Govt" in req_sector else ("PICK-UP" if "Pick-Up" in req_sector else "VAN"))
+    
+    # Strictly define required vehicles based on Sector / Area Name
+    req_veh = "VAN"
+    if "2-8" in req_sector or "2-8" in area_name: req_veh = "2-8 VAN"
+    elif "Govt" in req_sector or "GOVT" in area_name: req_veh = "BUS"
+    elif "Pick-Up" in req_sector or "PICK UP" in area_name: req_veh = "PICK-UP"
 
     for _, person in candidates_df.iterrows():
         if is_on_vacation(vacations_df, person['name'], target_date): continue
@@ -222,7 +259,6 @@ def select_best_candidate(candidates_df, area_name, req_sector, target_date, his
             p_veh = person.get('veh_type', 'None')
             p_sec = person.get('sector', 'None')
             
-            # Flexible Vehicle or Exact Match
             if p_veh in [req_veh, "None"]:
                 score += 300
                 reasons.append(f"Veh Match ({p_veh}) (+300)")
@@ -230,7 +266,6 @@ def select_best_candidate(candidates_df, area_name, req_sector, target_date, his
                 score -= 600
                 reasons.append(f"Wrong Veh (-600)")
 
-            # Flexible Sector or Exact Match
             if p_sec in [req_sector, "None"]:
                 score += 200
                 reasons.append(f"Sector Match ({p_sec}) (+200)")
@@ -239,13 +274,15 @@ def select_best_candidate(candidates_df, area_name, req_sector, target_date, his
                 reasons.append(f"Wrong Sector (-400)")
 
         if role == "Helper":
-            if req_sector == "Consumer":
+            # If area is Consumer, heavily favor Health Card
+            if "Consumer" in req_sector:
                 if person.get('health_card') == 'Yes':
                     score += 1500
                     reasons.append("Health Card for Consumer (+1500)")
                 else:
                     score -= 1500
                     reasons.append("No Health Card for Consumer (-1500)")
+            # If area is Pharma, penalize wasting a Health Card
             elif person.get('health_card') == 'Yes':
                 score -= 1000
                 reasons.append("Waste of Health Card in Pharma (-1000)")
@@ -285,9 +322,7 @@ def select_best_candidate(candidates_df, area_name, req_sector, target_date, his
     return best_candidate, best_reason
 
 
-# --- NAVIGATION & APP ---
-st.title("🚛 Smart Logistics Route Planner")
-
+# --- APP ROUTING ---
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
 choice = st.sidebar.radio("Navigate", menu)
 
@@ -297,14 +332,13 @@ choice = st.sidebar.radio("Navigate", menu)
 # ==========================================
 if choice == "1. AI Route Planner":
     
-    # --- LIVE DASHBOARD WITH POPOVERS ---
+    # --- SCROLLABLE DASHBOARD ---
     st.subheader("📊 Today's Availability Dashboard")
     today = date.today()
     all_d = load_table('drivers')
     all_h = load_table('helpers')
     vacs = load_table('vacations')
     
-    # Pre-calculate lists
     vac_d_names = [r['name'] for _, r in all_d.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
     avail_d_names = [r['name'] for _, r in all_d.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
     solo_d_names = [r['name'] for _, r in all_d.iterrows() if (not is_on_vacation(vacs, r['name'], today)) and ((r.get('needs_helper', 'Yes') == 'No') or (r.get('veh_type', '') in ['BUS', '2-8 VAN']))] if not all_d.empty else []
@@ -320,39 +354,41 @@ if choice == "1. AI Route Planner":
     with col_a:
         st.metric("🚛 Total Drivers Available", f"{len(avail_d_names)} / {len(all_d)}")
         with st.popover("🔍 View Drivers"):
-            st.write(f"**Available ({len(avail_d_names)}):**", ", ".join(avail_d_names) if avail_d_names else "None")
-            st.divider()
-            st.write(f"**On Vacation ({len(vac_d_names)}):**", ", ".join(vac_d_names) if vac_d_names else "None")
+            st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
+            if avail_d_names: st.markdown("**Available:**<ol>" + "".join([f"<li>{n}</li>" for n in avail_d_names]) + "</ol>", unsafe_allow_html=True)
+            if vac_d_names: st.markdown("**On Vacation:**<ol>" + "".join([f"<li>{n}</li>" for n in vac_d_names]) + "</ol>", unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
     with col_b:
         st.metric("👤 Total Helpers Available", f"{len(avail_h_names)} / {len(all_h)}")
         with st.popover("🔍 View Helpers"):
-            st.write(f"**Available ({len(avail_h_names)}):**", ", ".join(avail_h_names) if avail_h_names else "None")
-            st.divider()
-            st.write(f"**On Vacation ({len(vac_h_names)}):**", ", ".join(vac_h_names) if vac_h_names else "None")
+            st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
+            if avail_h_names: st.markdown("**Available:**<ol>" + "".join([f"<li>{n}</li>" for n in avail_h_names]) + "</ol>", unsafe_allow_html=True)
+            if vac_h_names: st.markdown("**On Vacation:**<ol>" + "".join([f"<li>{n}</li>" for n in vac_h_names]) + "</ol>", unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
     with col_c:
         st.metric("⚡ Solo Drivers (No Helper)", len(solo_d_names))
         with st.popover("🔍 View Solo Drivers"):
-            st.write(f"**Solo Drivers ({len(solo_d_names)}):**", ", ".join(solo_d_names) if solo_d_names else "None")
-            st.caption("These drivers do not require a helper because of their vehicle type or settings.")
+            st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
+            st.caption("Drivers active today who do not need a helper.")
+            if solo_d_names: st.markdown("<ol>" + "".join([f"<li>{n}</li>" for n in solo_d_names]) + "</ol>", unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
     with col_d:
         if shortage > 0: 
             st.metric("⚠️ Helper Shortage", f"-{shortage}", delta_color="inverse")
             with st.popover("🚨 View Shortage Details"):
                 st.error(f"**Shortage of {shortage} Helpers!**")
-                st.write(f"You have **{len(avail_d_names)}** active drivers.")
-                st.write(f"Minus **{len(solo_d_names)}** solo drivers = **{req_helpers}** helpers needed today.")
-                st.write(f"But you only have **{len(avail_h_names)}** helpers available.")
-                st.info("The AI will assign the available helpers to the highest priority routes, and the remaining routes will show as 'UNASSIGNED'.")
+                st.write(f"Active Drivers: **{len(avail_d_names)}**")
+                st.write(f"Minus Solo Drivers: **{len(solo_d_names)}**")
+                st.write(f"Helpers Needed: **{req_helpers}**")
+                st.write(f"Helpers Available: **{len(avail_h_names)}**")
+                st.info("AI will assign available helpers to priority routes. Remaining will be 'UNASSIGNED'.")
         else: 
             st.metric("✅ Helper Status", "Sufficient Surplus", delta_color="normal")
-            with st.popover("✅ View Status"):
-                st.success("You have enough helpers for all active drivers today.")
 
     st.divider()
-
 
     st.header("🧠 AI Route Generation")
     col1, col2 = st.columns(2)
@@ -361,7 +397,7 @@ if choice == "1. AI Route Planner":
     st.info(f"💡 Note: You are rotating **{rot_type}**. The system will KEEP the currently assigned **{'Helpers' if rot_type == 'Drivers' else 'Drivers'}** so they can train the incoming staff for one month.")
     
     if st.button("Generate Smart AI Route Plan", type="primary"):
-        with st.spinner("Calculating learning opportunities, health cards, and strict 6-month penalties..."):
+        with st.spinner("Calculating 0-Experience priorities, health cards, and strict 6-month penalties..."):
             drivers = load_table('drivers')
             helpers = load_table('helpers')
             areas = load_table('areas')
@@ -413,7 +449,7 @@ if choice == "1. AI Route Planner":
 
                 if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                     d_type = drivers[drivers['code'] == a_d_code]['veh_type'].values[0] if not drivers[drivers['code'] == a_d_code].empty else "VAN"
-                    tvt = "2-8 VAN" if "2-8" in req_sector else ("BUS" if "Govt" in req_sector else ("PICK-UP" if "Pick-Up" in req_sector else d_type))
+                    tvt = "2-8 VAN" if "2-8" in req_sector else ("BUS" if "Govt" in req_sector else ("PICK-UP" if "Pick-Up" in req_sector or "PICK UP" in area_name else d_type))
                     
                     avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['anchor_area'] == area_name)]
                     if avail_v.empty: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['type'] == tvt) & (vehicles['anchor_area'] == "None")]
@@ -430,7 +466,7 @@ if choice == "1. AI Route Planner":
             st.session_state.plan_date = month_target
 
     if 'generated_plan' in st.session_state:
-        st.success("✨ AI Plan Generated! You can double-click any cell below to MANUALLY EDIT the route before saving.")
+        st.success("✨ AI Plan Generated! Double-click any cell below to MANUALLY EDIT the route before saving.")
         
         df_r = pd.DataFrame(st.session_state.generated_plan)
         df_log = pd.DataFrame(st.session_state.generated_report)
@@ -438,7 +474,6 @@ if choice == "1. AI Route Planner":
         if 'S/N' not in df_r.columns: df_r.insert(0, 'S/N', range(1, 1 + len(df_r)))
         if 'S/N' not in df_log.columns: df_log.insert(0, 'S/N', range(1, 1 + len(df_log)))
         
-        # INTERACTIVE MANUAL EDITING
         edited_df = st.data_editor(df_r, use_container_width=True, hide_index=True, key="route_editor")
         
         with st.expander("Show AI Logic Report (Why the AI chose these people)"):
@@ -568,7 +603,8 @@ elif choice == "2. Database Management":
             a_sec = col_s.selectbox("Area Sector", SECTOR_OPTIONS)
             a_needs = col_n.selectbox("Needs Helper for this Route?", ["Yes", "No"])
             if st.button("➕ Add Area", use_container_width=True):
-                run_query("INSERT INTO areas (name, code, sector, needs_helper) VALUES (?, ?, ?, ?)", (a_name, a_code, a_sec, a_needs), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":a_sec, "needs_helper":a_needs})
+                new_order = len(a_df) + 1
+                run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", (a_name, a_code, a_sec, a_needs, new_order), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":a_sec, "needs_helper":a_needs, "sort_order":new_order})
                 st.rerun()
         with c_edit:
             sel_a = st.selectbox("Select Area to Edit/Delete", a_df['name'].tolist() if not a_df.empty else [])
@@ -718,10 +754,18 @@ elif choice == "3. Past Experience Builder":
     with c_edit:
         st.subheader("✏️ Edit / Delete Experience")
         if not history_df.empty:
-            history_list = [f"{row['id']} - {row['person_name']} ({row['area']} / {row['sector']})" for _, row in history_df.iterrows()]
-            sel_hist_str = st.selectbox("Select Record to Edit/Delete", history_list)
+            hist_options = []
+            hist_map = {}
+            for idx, row in history_df.iterrows():
+                sec = row.get('sector', 'Pharma')
+                if pd.isna(sec) or sec == "nan": sec = "Pharma"
+                label = f"[{idx+1}] {row['person_name']} - {row['area']} ({sec})"
+                hist_options.append(label)
+                hist_map[label] = str(row['id'])
+
+            sel_hist_str = st.selectbox("Select Record to Edit/Delete", hist_options)
             if sel_hist_str:
-                hist_id = sel_hist_str.split(" - ")[0]
+                hist_id = hist_map[sel_hist_str]
                 hist_data = history_df[history_df['id'].astype(str) == hist_id].iloc[0]
                 a_idx = area_list.index(hist_data['area']) if hist_data['area'] in area_list else 0
                 e_area = st.selectbox("Edit Area", area_list, index=a_idx, key=f"he_area_{hist_id}")
@@ -746,7 +790,6 @@ elif choice == "3. Past Experience Builder":
 elif choice == "4. Vacation Schedule":
     st.header("🌴 Manage Vacation Schedule")
     vacs_df = load_table('vacations')
-    history_df = load_table('history')
 
     st.subheader("📊 Active Vacations Overview")
     today = date.today()
