@@ -91,6 +91,7 @@ if not FIREBASE_READY:
 
 
 # --- SAFE DB QUERY HANDLER ---
+# Notice: Removed @st.cache_data here. This is the fix for edits not saving/refreshing!
 def load_table(table_name):
     if FIREBASE_READY:
         docs = db_fs.collection(table_name).stream()
@@ -149,7 +150,7 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 conn.commit()
         return True
     except Exception as e:
-        st.error(f"Database Operation Failed: {e}")
+        st.error(f"Database Error: {str(e)}")
         return False
 
 def generate_excel_with_sn(df_list, sheet_names):
@@ -231,6 +232,312 @@ RAW_NAME_MAP = {
     "H017": "Mujammal", "H126": "Subin Kovammal"
 }
 
+# --- PDF HISTORICAL EXTRACT MAP ---
+PRELOAD_HISTORY = [
+    # Format: (Type, Code, Start, End, Area, Sector)
+    ("Helper", "H116", "2024-08-01", "2024-10-31", "MIRDIFF", "Pharma"),
+    ("Helper", "H116", "2024-11-01", "2025-01-31", "2ND TRIP", "Pharma"),
+    ("Helper", "H116", "2025-02-01", "2025-04-30", "ALQOUZ-2", "Pharma"),
+    ("Helper", "H116", "2025-05-01", "2025-07-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H116", "2025-08-01", "2025-10-31", "DEIRA", "Pharma"),
+    ("Helper", "H121", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H121", "2025-02-01", "2025-04-30", "JUMAIRAH", "Pharma"),
+    ("Helper", "H121", "2025-05-01", "2025-07-31", "ALQ", "Consumer"),
+    ("Helper", "H121", "2025-08-01", "2025-10-31", "RAK / UAQ", "Pharma"),
+    ("Helper", "H119", "2024-08-01", "2024-10-31", "DEIRA", "Pharma"),
+    ("Helper", "H119", "2024-11-01", "2025-01-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H119", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Helper", "H119", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"),
+    ("Helper", "H119", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H046", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H046", "2024-08-01", "2024-10-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H046", "2024-11-01", "2025-01-31", "FUJAIRAH", "Pharma"),
+    ("Helper", "H046", "2025-02-01", "2025-04-30", "FUJAIRAH", "Pharma"),
+    ("Helper", "H046", "2025-05-01", "2025-07-31", "FUJAIRAH", "Pharma"),
+    ("Helper", "H046", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
+    ("Helper", "H070", "2024-05-01", "2024-07-31", "PHARMA", "Pharma"),
+    ("Helper", "H070", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H070", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H070", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H070", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H070", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H129", "2025-08-01", "2025-10-31", "DXBO", "Consumer"),
+    ("Helper", "H113", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H113", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
+    ("Helper", "H113", "2024-11-01", "2025-01-31", "AJMAN", "Pharma"),
+    ("Helper", "H113", "2025-02-01", "2025-04-30", "SHJS", "Consumer"),
+    ("Helper", "H113", "2025-05-01", "2025-07-31", "DEIRA", "Pharma"),
+    ("Helper", "H113", "2025-08-01", "2025-10-31", "AJMAN", "Pharma"),
+    ("Helper", "H118", "2024-08-01", "2024-10-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H118", "2024-11-01", "2025-01-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H118", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
+    ("Helper", "H118", "2025-05-01", "2025-07-31", "AJMAN", "Pharma"),
+    ("Helper", "H118", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H115", "2024-05-01", "2024-07-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H115", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Helper", "H122", "2025-02-01", "2025-04-30", "QUSAIS", "Pharma"),
+    ("Helper", "H122", "2025-05-01", "2025-07-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H122", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H114", "2024-05-01", "2024-07-31", "DEIRA", "Pharma"),
+    ("Helper", "H114", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H114", "2024-11-01", "2025-01-31", "DEIRA", "Pharma"),
+    ("Helper", "H114", "2025-02-01", "2025-04-30", "JABEL ALI", "Pharma"),
+    ("Helper", "H114", "2025-05-01", "2025-07-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H114", "2025-08-01", "2025-10-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H066", "2024-05-01", "2024-07-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H066", "2024-08-01", "2024-10-31", "DXBO", "Consumer"),
+    ("Helper", "H066", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H066", "2025-02-01", "2025-04-30", "JA", "Consumer"),
+    ("Helper", "H066", "2025-05-01", "2025-07-31", "JA", "Consumer"),
+    ("Helper", "H066", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Helper", "H011", "2024-05-01", "2024-07-31", "RAK / UAQ", "Pharma"),
+    ("Helper", "H011", "2024-08-01", "2024-10-31", "QUSAIS", "Pharma"),
+    ("Helper", "H011", "2024-11-01", "2025-01-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H011", "2025-05-01", "2025-07-31", "JUMAIRAH", "Pharma"),
+    ("Helper", "H011", "2025-08-01", "2025-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H005", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H005", "2024-08-01", "2024-10-31", "ALQOUZ-2", "Pharma"),
+    ("Helper", "H005", "2024-11-01", "2025-01-31", "RAK / UAQ", "Pharma"),
+    ("Helper", "H005", "2025-05-01", "2025-07-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H005", "2025-08-01", "2025-10-31", "JUMAIRAH", "Pharma"),
+    ("Helper", "H023", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Helper", "H023", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H023", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H023", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H023", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H023", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H062", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H024", "2024-05-01", "2024-07-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H024", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
+    ("Helper", "H024", "2024-11-01", "2025-01-31", "JA", "Consumer"),
+    ("Helper", "H024", "2025-05-01", "2025-07-31", "SHJS", "Consumer"),
+    ("Helper", "H024", "2025-08-01", "2025-10-31", "RAK", "Consumer"),
+    ("Helper", "H082", "2024-05-01", "2024-07-31", "DXBO", "Consumer"),
+    ("Helper", "H082", "2024-08-01", "2024-10-31", "ALQ", "Consumer"),
+    ("Helper", "H082", "2024-11-01", "2025-01-31", "DXBO", "Consumer"),
+    ("Helper", "H082", "2025-05-01", "2025-07-31", "DXBO", "Consumer"),
+    ("Helper", "H082", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
+    ("Helper", "H026", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H026", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H026", "2024-11-01", "2025-01-31", "ALQ", "Consumer"),
+    ("Helper", "H026", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
+    ("Helper", "H026", "2025-05-01", "2025-07-31", "DXBO", "Consumer"),
+    ("Helper", "H026", "2025-08-01", "2025-10-31", "SHJS", "Consumer"),
+    ("Helper", "H109", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H109", "2024-08-01", "2024-10-31", "JA", "Consumer"),
+    ("Helper", "H109", "2024-11-01", "2025-01-31", "AJM", "Consumer"),
+    ("Helper", "H109", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Helper", "H109", "2025-05-01", "2025-07-31", "RAK", "Consumer"),
+    ("Helper", "H109", "2025-08-01", "2025-10-31", "BUR", "Consumer"),
+    ("Helper", "H013", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H013", "2024-08-01", "2024-10-31", "RAK", "Consumer"),
+    ("Helper", "H013", "2024-11-01", "2025-01-31", "SHJS", "Consumer"),
+    ("Helper", "H013", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H013", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H013", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Helper", "H034", "2024-05-01", "2024-07-31", "AJMAN", "Pharma"),
+    ("Helper", "H034", "2024-08-01", "2024-10-31", "FUJAIRAH", "Pharma"),
+    ("Helper", "H034", "2024-11-01", "2025-01-31", "AJM", "Consumer"),
+    ("Helper", "H034", "2025-05-01", "2025-07-31", "AJM", "Consumer"),
+    ("Helper", "H034", "2025-08-01", "2025-10-31", "JA", "Consumer"),
+    ("Helper", "H099", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H099", "2024-08-01", "2024-10-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H099", "2024-11-01", "2025-01-31", "MIRDIFF", "Pharma"),
+    ("Helper", "H099", "2025-05-01", "2025-07-31", "QUSAIS", "Pharma"),
+    ("Helper", "H099", "2025-08-01", "2025-10-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H017", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H017", "2024-08-01", "2024-10-31", "JUMAIRAH", "Pharma"),
+    ("Helper", "H017", "2024-11-01", "2025-01-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H017", "2025-05-01", "2025-07-31", "RAK / UAQ", "Pharma"),
+    ("Helper", "H017", "2025-08-01", "2025-10-31", "FUJAIRAH", "Pharma"),
+    ("Helper", "H051", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H051", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H051", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H051", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H051", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H104", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H104", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H104", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H104", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H112", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H112", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H112", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H112", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+
+    ("Driver", "D085", "2024-05-01", "2024-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D085", "2024-08-01", "2024-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D085", "2024-11-01", "2025-01-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D085", "2025-05-01", "2025-07-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D085", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D034", "2024-05-01", "2024-07-31", "JABEL ALI", "Pharma"),
+    ("Driver", "D034", "2024-08-01", "2024-10-31", "SHJ - SANAYYA", "Pharma"),
+    ("Driver", "D034", "2024-11-01", "2025-01-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D034", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
+    ("Driver", "D034", "2025-05-01", "2025-07-31", "QUSAIS", "Pharma"),
+    ("Driver", "D034", "2025-08-01", "2025-10-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D101", "2024-08-01", "2024-10-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D101", "2024-11-01", "2025-01-31", "QUSAIS", "Pharma"),
+    ("Driver", "D101", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Driver", "D101", "2025-05-01", "2025-07-31", "SHJ - SANAYYA", "Pharma"),
+    ("Driver", "D101", "2025-08-01", "2025-10-31", "DEIRA", "Pharma"),
+    ("Driver", "D038", "2024-05-01", "2024-07-31", "AJMAN", "Consumer"),
+    ("Driver", "D038", "2024-08-01", "2024-10-31", "QUSAIS", "Pharma"),
+    ("Driver", "D038", "2024-11-01", "2025-01-31", "ALQ", "Consumer"),
+    ("Driver", "D038", "2025-05-01", "2025-07-31", "JA", "Consumer"),
+    ("Driver", "D038", "2025-08-01", "2025-10-31", "BUR", "Consumer"),
+    ("Driver", "D048", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
+    ("Driver", "D048", "2024-11-01", "2025-01-31", "2ND TRIP", "Pharma"),
+    ("Driver", "D048", "2025-05-01", "2025-07-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D048", "2025-08-01", "2025-10-31", "MIRDIFF", "Pharma"),
+    ("Driver", "D019", "2024-05-01", "2024-07-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D019", "2024-08-01", "2024-10-31", "MIRDIFF", "Pharma"),
+    ("Driver", "D019", "2024-11-01", "2025-01-31", "DEIRA", "Pharma"),
+    ("Driver", "D019", "2025-05-01", "2025-07-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D019", "2025-08-01", "2025-10-31", "FUJAIRAH", "Pharma"),
+    ("Driver", "D064", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D064", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D064", "2024-11-01", "2025-01-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D064", "2025-05-01", "2025-07-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D064", "2025-08-01", "2025-10-31", "AJMAN", "Pharma"),
+    ("Driver", "D029", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D029", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D029", "2024-11-01", "2025-01-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D029", "2025-05-01", "2025-07-31", "JUMAIRAH", "Pharma"),
+    ("Driver", "D029", "2025-08-01", "2025-10-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D011", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D011", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D011", "2025-05-01", "2025-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D011", "2025-08-01", "2025-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D050", "2024-05-01", "2024-07-31", "FUJAIRAH", "Pharma"),
+    ("Driver", "D050", "2024-08-01", "2024-10-31", "ALQ", "Consumer"),
+    ("Driver", "D050", "2024-11-01", "2025-01-31", "DXBO", "Consumer"),
+    ("Driver", "D050", "2025-02-01", "2025-04-30", "RAK", "Consumer"),
+    ("Driver", "D050", "2025-05-01", "2025-07-31", "DXBO", "Consumer"),
+    ("Driver", "D050", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Driver", "D094", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D094", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D094", "2024-11-01", "2025-01-31", "MIRDIFF", "Pharma"),
+    ("Driver", "D094", "2025-05-01", "2025-07-31", "DEIRA", "Pharma"),
+    ("Driver", "D109", "2024-08-01", "2024-10-31", "JABEL ALI", "Pharma"),
+    ("Driver", "D010", "2024-05-01", "2024-07-31", "QUSAIS", "Pharma"),
+    ("Driver", "D010", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D010", "2025-05-01", "2025-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D098", "2024-05-01", "2024-07-31", "JUMAIRAH", "Pharma"),
+    ("Driver", "D098", "2024-08-01", "2024-10-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D098", "2024-11-01", "2025-01-31", "JABEL ALI", "Pharma"),
+    ("Driver", "D098", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"),
+    ("Driver", "D098", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
+    ("Driver", "D049", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D049", "2024-08-01", "2024-10-31", "JABEL ALI", "Pharma"),
+    ("Driver", "D049", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D049", "2025-05-01", "2025-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D049", "2025-08-01", "2025-10-31", "QUSAIS", "Pharma"),
+    ("Driver", "D046", "2024-08-01", "2024-10-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D046", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D046", "2025-05-01", "2025-07-31", "AJMAN", "Pharma"),
+    ("Driver", "D046", "2025-08-01", "2025-10-31", "JUMAIRAH", "Pharma"),
+    ("Driver", "D040", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D040", "2024-08-01", "2024-10-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D040", "2024-11-01", "2025-01-31", "JUMAIRAH", "Pharma"),
+    ("Driver", "D040", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D040", "2025-05-01", "2025-07-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D040", "2025-08-01", "2025-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D037", "2024-05-01", "2024-07-31", "RAK", "Consumer"),
+    ("Driver", "D037", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D037", "2024-11-01", "2025-01-31", "AJM", "Consumer"),
+    ("Driver", "D037", "2025-02-01", "2025-04-30", "SHJS", "Consumer"),
+    ("Driver", "D037", "2025-05-01", "2025-07-31", "FUJAIRAH", "Pharma"),
+    ("Driver", "D037", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Driver", "D026", "2024-05-01", "2024-07-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D026", "2024-08-01", "2024-10-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D026", "2024-11-01", "2025-01-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D026", "2025-05-01", "2025-07-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D026", "2025-08-01", "2025-10-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D024", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D024", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D024", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D024", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D024", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D047", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D047", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D047", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D047", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D047", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D089", "2024-05-01", "2024-07-31", "DXBO", "Consumer"),
+    ("Driver", "D089", "2024-08-01", "2024-10-31", "RAK", "Consumer"),
+    ("Driver", "D089", "2025-05-01", "2025-07-31", "ALQ", "Consumer"),
+    ("Driver", "D089", "2025-08-01", "2025-10-31", "SHJS", "Consumer"),
+    ("Driver", "D036", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D036", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D036", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D036", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D036", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D088", "2024-05-01", "2024-07-31", "ALQ", "Consumer"),
+    ("Driver", "D088", "2024-08-01", "2024-10-31", "SHJS", "Consumer"),
+    ("Driver", "D088", "2024-11-01", "2025-01-31", "JA", "Consumer"),
+    ("Driver", "D088", "2025-05-01", "2025-07-31", "BUR", "Consumer"),
+    ("Driver", "D088", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
+    ("Driver", "D023", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D023", "2024-08-01", "2024-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D023", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D023", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D104", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D104", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D104", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D104", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D107", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D027", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D027", "2024-08-01", "2024-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D027", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D027", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D103", "2024-08-01", "2024-10-31", "DXBO", "Consumer"),
+    ("Driver", "D103", "2024-11-01", "2025-01-31", "RAK", "Consumer"),
+    ("Driver", "D103", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D103", "2025-05-01", "2025-07-31", "SHJS", "Consumer"),
+    ("Driver", "D103", "2025-08-01", "2025-10-31", "DXBO", "Consumer"),
+    ("Driver", "D042", "2024-05-01", "2024-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D042", "2024-08-01", "2024-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D042", "2024-11-01", "2025-01-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D042", "2025-05-01", "2025-07-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D042", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D033", "2024-05-01", "2024-07-31", "AJMAN", "Pharma"),
+    ("Driver", "D033", "2024-08-01", "2024-10-31", "JA", "Consumer"),
+    ("Driver", "D033", "2024-11-01", "2025-01-31", "SHJS", "Consumer"),
+    ("Driver", "D033", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Driver", "D033", "2025-05-01", "2025-07-31", "RAK", "Consumer"),
+    ("Driver", "D033", "2025-08-01", "2025-10-31", "JA", "Consumer")
+]
+
 def auto_seed_database(force=False):
     current_areas = load_table("areas")
     if len(current_areas) != 39: force = True
@@ -246,6 +553,9 @@ def auto_seed_database(force=False):
             for code in KEEP_DRIVERS: db_fs.collection("drivers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "Yes", "restriction": "None", "anchor_area": "None"})
         if len(list(db_fs.collection("helpers").limit(1).stream())) == 0:
             for code in KEEP_HELPERS: db_fs.collection("helpers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "None", "health_card": "No", "anchor_area": "None"})
+        if len(list(db_fs.collection("history").limit(1).stream())) == 0:
+            for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY:
+                db_fs.collection("history").add({"person_type": ptype, "person_code": pcode, "person_name": RAW_NAME_MAP.get(pcode, "Unknown"), "area": parea, "sector": psec, "date": pstart, "end_date": pend})
     else:
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM areas")
@@ -261,25 +571,12 @@ def auto_seed_database(force=False):
             h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
             c.executemany("INSERT INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
             conn.commit()
+        c.execute("SELECT COUNT(*) FROM history")
+        if c.fetchone()[0] == 0:
+            h_seed_full = [(ptype, pcode, RAW_NAME_MAP.get(pcode, "Unknown"), parea, psec, pstart, pend) for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY]
+            c.executemany("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", h_seed_full)
+            conn.commit()
 auto_seed_database()
-
-def clean_legacy_codes():
-    try:
-        d_df = load_table('drivers')
-        if not d_df.empty:
-            for _, r in d_df.iterrows():
-                code = str(r.get('code', ''))
-                if code not in KEEP_DRIVERS:
-                    run_query("DELETE FROM drivers WHERE id=?", (r['id'],), "drivers", "DELETE_DOC", r['id'])
-        h_df = load_table('helpers')
-        if not h_df.empty:
-            for _, r in h_df.iterrows():
-                code = str(r.get('code', ''))
-                if code not in KEEP_HELPERS:
-                    run_query("DELETE FROM helpers WHERE id=?", (r['id'],), "helpers", "DELETE_DOC", r['id'])
-    except Exception:
-        pass
-clean_legacy_codes()
 
 
 # --- SMART SCORING LOGIC ---
@@ -866,6 +1163,15 @@ elif choice == "2. Database Management":
                     else:
                         run_query(None, table_name=sheet, action="INSERT", data=data_dict)
             st.success("Database synchronized successfully!")
+            
+        st.divider()
+        st.subheader("🚨 Emergency Route Template Restore")
+        st.warning("If your Areas got messed up, click this to reset the Route Template exactly to your Image Layout.")
+        if st.button("♻️ Restore 39-Row Route Layout", type="primary"):
+            with st.spinner("Restoring layout..."):
+                auto_seed_database(force=True)
+            st.success("Layout restored successfully!")
+            st.rerun()
 
 
 # ==========================================
