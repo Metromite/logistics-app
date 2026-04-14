@@ -42,16 +42,17 @@ try:
             list(db_fs.collection("_system_ping").limit(1).stream())
         except Exception:
             FIREBASE_READY = False
+
 except Exception as e:
     FIREBASE_READY = False
 
+# Sleek Native Dot Indicator for Connection
 if FIREBASE_READY:
     st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢</div>", unsafe_allow_html=True)
 else:
     st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴</div>", unsafe_allow_html=True)
 
-
-# --- SQLITE FALLBACK & MIGRATIONS ---
+# SQLite Fallback Initialization
 def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
@@ -64,7 +65,7 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS active_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS performance (id INTEGER PRIMARY KEY, person_code TEXT, area TEXT, success_rate REAL, delay_count INTEGER)''')
     
-    # Advanced Migrations for Cross-Rotation & Health Cards
+    # Migrations for new features (Helper Health Cards, Vehicle Anchors)
     for query in [
         "ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'",
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
@@ -199,7 +200,7 @@ def get_last_assignment(history_df, person_code, area_name):
 
 @st.cache_data
 def is_on_vacation(vacations_df, person_name, target_date):
-    if vacations_df.empty: return False
+    if vacations_df.empty or 'person_name' not in vacations_df.columns: return False
     for _, row in vacations_df.iterrows():
         if row['person_name'] == person_name:
             if safe_parse_date(row['start_date']) <= target_date <= safe_parse_date(row['end_date']):
@@ -298,7 +299,7 @@ if choice == "1. AI Route Planner":
     
     avail_d = len(all_d) - sum(1 for _, r in all_d.iterrows() if is_on_vacation(vacs, r['name'], today)) if not all_d.empty else 0
     avail_h = len(all_h) - sum(1 for _, r in all_h.iterrows() if is_on_vacation(vacs, r['name'], today)) if not all_h.empty else 0
-    solo_d = len(all_d[(all_d['needs_helper'] == 'No') | (all_d['veh_type'].isin(['BUS', '2-8 VAN']))]) if not all_d.empty else 0
+    solo_d = len(all_d[(all_d.get('needs_helper', 'Yes') == 'No') | (all_d.get('veh_type', '') .isin(['BUS', '2-8 VAN']))]) if not all_d.empty else 0
     
     req_helpers = avail_d - solo_d
     shortage = req_helpers - avail_h
@@ -658,25 +659,26 @@ elif choice == "3. Past Experience Builder":
         p_type = st.selectbox("Role", ["Driver", "Helper"])
         df_names = load_table('drivers') if p_type == "Driver" else load_table('helpers')
         person_list = [f"{row['code']} - {row['name']}" for _, row in df_names.iterrows()] if not df_names.empty else []
-        p_person = st.selectbox("Select Person", person_list)
-        p_area = st.selectbox("Area Experienced In", area_list)
-        p_sec = st.selectbox("Which Sector was this in?", SECTOR_OPTIONS)
-        d1, d2 = st.columns(2)
-        p_start_date = d1.date_input("From Date (Start)")
-        p_end_date = d2.date_input("To Date (End)")
-        
-        if st.button("➕ Add Past Experience", use_container_width=True):
-            p_code, p_name = p_person.split(" - ")[0], p_person.split(" - ")[1]
-            overlap = history_df[(history_df['person_code']==p_code) & (history_df['area']==p_area) & (history_df['date']==p_start_date.strftime("%Y-%m-%d"))]
-            if p_start_date > p_end_date: 
-                st.error("Start Date cannot be after End Date.")
-            elif not overlap.empty:
-                st.error("⚠️ This person already has an experience log for this Area on this exact Start Date!")
-            else:
-                run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                          (p_type, p_code, p_name, p_area, p_sec, p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")), 
-                          table_name="history", action="INSERT", data={"person_type":p_type, "person_code":p_code, "person_name":p_name, "area":p_area, "sector":p_sec, "date":p_start_date.strftime("%Y-%m-%d"), "end_date":p_end_date.strftime("%Y-%m-%d")})
-                st.rerun()
+        if person_list:
+            p_person = st.selectbox("Select Person", person_list)
+            p_area = st.selectbox("Area Experienced In", area_list)
+            p_sec = st.selectbox("Which Sector was this in?", SECTOR_OPTIONS)
+            d1, d2 = st.columns(2)
+            p_start_date = d1.date_input("From Date (Start)")
+            p_end_date = d2.date_input("To Date (End)")
+            
+            if st.button("➕ Add Past Experience", use_container_width=True):
+                p_code, p_name = p_person.split(" - ")[0], p_person.split(" - ")[1]
+                overlap = history_df[(history_df['person_code']==p_code) & (history_df['area']==p_area) & (history_df['date']==p_start_date.strftime("%Y-%m-%d"))]
+                if p_start_date > p_end_date: 
+                    st.error("Start Date cannot be after End Date.")
+                elif not overlap.empty:
+                    st.error("⚠️ This person already has an experience log for this Area on this exact Start Date!")
+                else:
+                    run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (p_type, p_code, p_name, p_area, p_sec, p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")), 
+                              table_name="history", action="INSERT", data={"person_type":p_type, "person_code":p_code, "person_name":p_name, "area":p_area, "sector":p_sec, "date":p_start_date.strftime("%Y-%m-%d"), "end_date":p_end_date.strftime("%Y-%m-%d")})
+                    st.rerun()
 
     with c_edit:
         st.subheader("✏️ Edit / Delete Experience")
@@ -715,16 +717,17 @@ elif choice == "4. Vacation Schedule":
     st.subheader("📊 Active Vacations Overview")
     today = date.today()
     active_vacs = []
-    for _, row in vacs_df.iterrows():
-        sd = safe_parse_date(row['start_date'])
-        ed = safe_parse_date(row['end_date'])
-        if sd <= today <= ed:
-            active_vacs.append({
-                "Role": row['person_type'],
-                "Name": row['person_name'],
-                "Return Date": ed.strftime("%b %d, %Y"),
-                "Days Left": (ed - today).days
-            })
+    if not vacs_df.empty and 'person_name' in vacs_df.columns:
+        for _, row in vacs_df.iterrows():
+            sd = safe_parse_date(row['start_date'])
+            ed = safe_parse_date(row['end_date'])
+            if sd <= today <= ed:
+                active_vacs.append({
+                    "Role": row['person_type'],
+                    "Name": row['person_name'],
+                    "Return Date": ed.strftime("%b %d, %Y"),
+                    "Days Left": (ed - today).days
+                })
     if active_vacs:
         dash_df = pd.DataFrame(active_vacs).sort_values(by="Days Left")
         dash_df.insert(0, 'S/N', range(1, 1 + len(dash_df)))
@@ -736,7 +739,11 @@ elif choice == "4. Vacation Schedule":
         due_list = []
         for df, role in [(load_table('drivers'), "Driver"), (load_table('helpers'), "Helper")]:
             for _, p in df.iterrows():
-                last_vac = vacs_df[vacs_df['person_name'] == p['name']]
+                if vacs_df.empty or 'person_name' not in vacs_df.columns:
+                    last_vac = pd.DataFrame()
+                else:
+                    last_vac = vacs_df[vacs_df['person_name'] == p['name']]
+                    
                 if last_vac.empty:
                     due_list.append({"Name": p['name'], "Role": role, "Status": "NEVER Taken a Vacation!"})
                 else:
@@ -784,20 +791,25 @@ elif choice == "4. Vacation Schedule":
         v_type = st.selectbox("Role", ["Driver", "Helper"])
         df_names = load_table('drivers') if v_type == "Driver" else load_table('helpers')
         name_list = df_names['name'].tolist() if not df_names.empty else []
-        v_name = st.selectbox("Name", name_list)
-        d1, d2 = st.columns(2)
-        v_start = d1.date_input("Start Date (Leave)")
-        v_end = d2.date_input("End Date (Return)", value=date.today() + timedelta(days=30))
-        
-        if st.button("➕ Add Vacation", use_container_width=True):
-            overlap = vacs_df[(vacs_df['person_name'] == v_name) & (vacs_df['start_date'] == v_start.strftime("%Y-%m-%d"))]
-            if v_start > v_end: 
-                st.error("Start Date cannot be after End Date.")
-            elif not overlap.empty:
-                st.error(f"⚠️ {v_name} already has a vacation logged starting exactly on {v_start.strftime('%Y-%m-%d')}!")
-            else:
-                run_query("INSERT INTO vacations (person_type, person_name, start_date, end_date) VALUES (?, ?, ?, ?)", (v_type, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")), table_name="vacations", action="INSERT", data={"person_type":v_type, "person_name":v_name, "start_date":v_start.strftime("%Y-%m-%d"), "end_date":v_end.strftime("%Y-%m-%d")})
-                st.rerun()
+        if name_list:
+            v_name = st.selectbox("Name", name_list)
+            d1, d2 = st.columns(2)
+            v_start = d1.date_input("Start Date (Leave)")
+            v_end = d2.date_input("End Date (Return)", value=date.today() + timedelta(days=30))
+            
+            if st.button("➕ Add Vacation", use_container_width=True):
+                if not vacs_df.empty and 'person_name' in vacs_df.columns:
+                    overlap = vacs_df[(vacs_df['person_name'] == v_name) & (vacs_df['start_date'] == v_start.strftime("%Y-%m-%d"))]
+                else:
+                    overlap = pd.DataFrame()
+                    
+                if v_start > v_end: 
+                    st.error("Start Date cannot be after End Date.")
+                elif not overlap.empty:
+                    st.error(f"⚠️ {v_name} already has a vacation logged starting exactly on {v_start.strftime('%Y-%m-%d')}!")
+                else:
+                    run_query("INSERT INTO vacations (person_type, person_name, start_date, end_date) VALUES (?, ?, ?, ?)", (v_type, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")), table_name="vacations", action="INSERT", data={"person_type":v_type, "person_name":v_name, "start_date":v_start.strftime("%Y-%m-%d"), "end_date":v_end.strftime("%Y-%m-%d")})
+                    st.rerun()
 
     with c_edit:
         st.subheader("✏️ Edit / Delete Vacation")
