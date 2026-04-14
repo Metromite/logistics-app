@@ -60,7 +60,7 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY, name TEXT, code TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY, number TEXT, type TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, area TEXT, date TEXT, end_date TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS vacations (id INTEGER PRIMARY KEY, person_type TEXT, person_name TEXT, start_date DATE, end_date DATE)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS vacations (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, start_date DATE, end_date DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS active_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT, start_date TEXT, end_date TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS draft_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT, start_date TEXT, end_date TEXT, div_cat TEXT, sector TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS performance (id INTEGER PRIMARY KEY, person_code TEXT, area TEXT, success_rate REAL, delay_count INTEGER)''')
@@ -78,7 +78,8 @@ def init_sqlite_db():
         "ALTER TABLE areas ADD COLUMN sort_order INTEGER DEFAULT 99",
         "ALTER TABLE vehicles ADD COLUMN anchor_area TEXT DEFAULT 'None'",
         "ALTER TABLE active_routes ADD COLUMN start_date TEXT DEFAULT 'None'",
-        "ALTER TABLE active_routes ADD COLUMN end_date TEXT DEFAULT 'None'"
+        "ALTER TABLE active_routes ADD COLUMN end_date TEXT DEFAULT 'None'",
+        "ALTER TABLE vacations ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'"
     ]:
         try: c.execute(query)
         except sqlite3.OperationalError: pass
@@ -90,10 +91,7 @@ if not FIREBASE_READY:
 
 
 # --- SAFE DB QUERY HANDLER ---
-def clear_cache():
-    st.cache_data.clear()
-
-@st.cache_data
+# Removed @st.cache_data to guarantee LIVE database updates
 def load_table(table_name):
     if FIREBASE_READY:
         docs = db_fs.collection(table_name).stream()
@@ -107,6 +105,7 @@ def load_table(table_name):
         if table_name == 'history' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
         if table_name == 'vehicles' and 'anchor_area' not in df.columns and not df.empty: df['anchor_area'] = 'None'
         if table_name == 'active_routes' and 'start_date' not in df.columns and not df.empty: df['start_date'] = 'None'
+        if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
         
         if table_name == 'areas' and not df.empty:
             df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
@@ -132,10 +131,10 @@ def load_table(table_name):
             df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
             df = df.sort_values(by='order_num')
         if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
+        if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
         return df
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
-    clear_cache()
     if FIREBASE_READY and table_name and action:
         if action == "INSERT": db_fs.collection(table_name).add(data)
         elif action == "UPDATE" and doc_id: db_fs.collection(table_name).document(str(doc_id)).update(data)
@@ -163,23 +162,14 @@ def generate_excel_with_sn(df_list, sheet_names):
 
 
 # --- OPTIONS ---
-VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "BUS", "2-8 VAN"]
+VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
+NEEDS_HELPER_OPTIONS = ["Yes", "No", "Optional"]
 ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Driver Name", "Area Full Name", "Helper Code", "Helper Name", "Vehicle Number", "Division Category", "Area Code", "Sector"]
 
-
 # --- STRICT HARDCODED ALLOWLISTS ---
-KEEP_HELPERS = [
-    "H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", 
-    "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", 
-    "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"
-]
-KEEP_DRIVERS = [
-    "D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", 
-    "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", 
-    "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", 
-    "D089", "D054", "D088", "D098", "D033"
-]
+KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
+KEEP_DRIVERS = ["D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", "D089", "D054", "D088", "D098", "D033"]
 
 # --- STRICT IMAGE-BASED 39-ROW ROUTE LAYOUT ---
 SEED_AREAS_IMAGE = [
@@ -218,7 +208,6 @@ SEED_VEHICLES = [
     ("W 11792", "VAN"), ("T 26701", "VAN"), ("CC 98174", "VAN"), ("CC 98175", "VAN"), ("CC 98176", "VAN")
 ]
 
-# Raw Names Dictionary for Seeding Missing Entities
 RAW_NAME_MAP = {
     "D085": "Rahul R.P", "D034": "Adil Hassan", "D101": "Tintu V Joseph", "D038": "Ismail Korokkaran", "D107": "Muneeb Hussain", 
     "D048": "Moideen Azeez", "D104": "Mahammed Ansar", "D040": "Hussain Mohammed", "D019": "Muhammed Kunji", "D064": "Shabeer Ali A.Rahman", 
@@ -238,7 +227,6 @@ RAW_NAME_MAP = {
 }
 
 def auto_seed_database(force=False):
-    seeded = False
     current_areas = load_table("areas")
     if len(current_areas) != 39: force = True
     
@@ -247,16 +235,12 @@ def auto_seed_database(force=False):
             run_query(None, table_name="areas", action="CLEAR_TABLE")
             for code, name, sector, nh, order in SEED_AREAS_IMAGE: 
                 db_fs.collection("areas").add({"code": code, "name": name, "sector": sector, "needs_helper": nh, "sort_order": order})
-            seeded = True
         if len(list(db_fs.collection("vehicles").limit(1).stream())) == 0:
             for num, vtype in SEED_VEHICLES: db_fs.collection("vehicles").add({"number": num, "type": vtype})
-            seeded = True
         if len(list(db_fs.collection("drivers").limit(1).stream())) == 0:
             for code in KEEP_DRIVERS: db_fs.collection("drivers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "Yes", "restriction": "None", "anchor_area": "None"})
-            seeded = True
         if len(list(db_fs.collection("helpers").limit(1).stream())) == 0:
             for code in KEEP_HELPERS: db_fs.collection("helpers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "None", "health_card": "No", "anchor_area": "None"})
-            seeded = True
     else:
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM areas")
@@ -264,7 +248,6 @@ def auto_seed_database(force=False):
             c.execute("DELETE FROM areas")
             c.executemany("INSERT INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
             conn.commit()
-            seeded = True
         c.execute("SELECT COUNT(*) FROM drivers")
         if c.fetchone()[0] == 0:
             c.executemany("INSERT INTO vehicles (number, type) VALUES (?, ?)", SEED_VEHICLES)
@@ -273,12 +256,8 @@ def auto_seed_database(force=False):
             h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
             c.executemany("INSERT INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
             conn.commit()
-            seeded = True
-            
-    if seeded: clear_cache()
 auto_seed_database()
 
-# --- AUTO-CLEANUP ROUTINE FOR OLD/BAD CODES ---
 def clean_legacy_codes():
     try:
         d_df = load_table('drivers')
@@ -287,7 +266,6 @@ def clean_legacy_codes():
                 code = str(r.get('code', ''))
                 if code not in KEEP_DRIVERS:
                     run_query("DELETE FROM drivers WHERE id=?", (r['id'],), "drivers", "DELETE_DOC", r['id'])
-
         h_df = load_table('helpers')
         if not h_df.empty:
             for _, r in h_df.iterrows():
@@ -304,7 +282,6 @@ def safe_parse_date(date_str):
     try: return datetime.strptime(date_str, "%Y-%m-%d").date()
     except: return date.today()
 
-@st.cache_data
 def get_experience_months(history_df, person_code, area_name, sector_name):
     if history_df.empty or 'person_code' not in history_df.columns: return 0
     records = history_df[(history_df['person_code'] == person_code) & (history_df['area'] == area_name) & (history_df['sector'] == sector_name)]
@@ -317,7 +294,6 @@ def get_last_assignment(history_df, person_code, area_name):
     if records.empty: return None
     return safe_parse_date(records.iloc[-1]['date'])
 
-@st.cache_data
 def is_on_vacation(vacations_df, person_name, target_date):
     if vacations_df.empty or 'person_name' not in vacations_df.columns: return False
     for _, row in vacations_df.iterrows():
@@ -343,7 +319,7 @@ def select_best_candidate(candidates_df, area_name, req_sector, target_date, his
             p_veh = person.get('veh_type', 'None')
             p_sec = person.get('sector', 'None')
             
-            if p_veh in [req_veh, "None"]:
+            if p_veh in [req_veh, "None"] or (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
                 score += 300
                 reasons.append(f"Veh Match ({p_veh}) (+300)")
             else:
@@ -401,7 +377,6 @@ def select_best_candidate(candidates_df, area_name, req_sector, target_date, his
     return best_candidate, best_reason
 
 
-# --- PRE-FLIGHT VALIDATION ENGINE ---
 def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vacs_df, today_date):
     errors = []
     req_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
@@ -417,14 +392,17 @@ def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vacs
     for _, v in vehicles_df.iterrows():
         vtype = v.get('type', 'VAN')
         if vtype in avail_veh: avail_veh[vtype] += 1
+        elif vtype == "VAN / PICK-UP":
+            avail_veh["VAN"] += 1
+            avail_veh["PICK-UP"] += 1
         
     for vtype, required in req_veh.items():
         if avail_veh[vtype] < required:
-            errors.append(f"🚗 Missing **{vtype}** Vehicles: Route needs **{required}**, but you only have **{avail_veh[vtype]}** total in database.")
+            errors.append(f"🚗 Missing **{vtype}** Vehicles: Route needs **{required}**, but you only have **{avail_veh[vtype]}**.")
 
     avail_d = len([1 for _, r in drivers_df.iterrows() if not is_on_vacation(vacs_df, r['name'], today_date)])
     if avail_d < len(areas_df):
-        errors.append(f"🚛 Missing Drivers: Route needs **{len(areas_df)}** active drivers, but you only have **{avail_d}** available.")
+        errors.append(f"🚛 Missing Drivers: Route needs **{len(areas_df)}** active drivers, but you only have **{avail_d}**.")
         
     return errors
 
@@ -439,19 +417,18 @@ choice = st.sidebar.radio("Navigate", menu)
 # ==========================================
 if choice == "1. AI Route Planner":
     
-    # --- SCROLLABLE NUMBERED DASHBOARD ---
     st.subheader("📊 Today's Availability Dashboard")
     today = date.today()
     all_d = load_table('drivers')
     all_h = load_table('helpers')
     vacs = load_table('vacations')
     
-    vac_d_names = [r['name'] for _, r in all_d.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
-    avail_d_names = [r['name'] for _, r in all_d.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
-    solo_d_names = [r['name'] for _, r in all_d.iterrows() if (not is_on_vacation(vacs, r['name'], today)) and ((r.get('needs_helper', 'Yes') == 'No') or (r.get('veh_type', '') in ['BUS', '2-8 VAN']))] if not all_d.empty else []
+    vac_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
+    avail_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
+    solo_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if (not is_on_vacation(vacs, r['name'], today)) and ((r.get('needs_helper', 'Yes') == 'No') or (r.get('veh_type', '') in ['BUS', '2-8 VAN']))] if not all_d.empty else []
     
-    vac_h_names = [r['name'] for _, r in all_h.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_h.empty else []
-    avail_h_names = [r['name'] for _, r in all_h.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_h.empty else []
+    vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_h.empty else []
+    avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_h.empty else []
     
     req_helpers = len(avail_d_names) - len(solo_d_names)
     shortage = req_helpers - len(avail_h_names)
@@ -463,7 +440,7 @@ if choice == "1. AI Route Planner":
         with st.popover("🔍 View Drivers"):
             st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
             if avail_d_names: st.markdown("**✅ Available:**<ol>" + "".join([f"<li>{n}</li>" for n in avail_d_names]) + "</ol>", unsafe_allow_html=True)
-            if vac_d_names: st.markdown("**🌴 On Vacation:**<ol>" + "".join([f"<li>{n}</li>" for n in vac_d_names]) + "</ol>", unsafe_allow_html=True)
+            if vac_d_names: st.markdown(f"**🌴 On Vacation ({len(vac_d_names)}):**<ol>" + "".join([f"<li>{n}</li>" for n in vac_d_names]) + "</ol>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
     with col_b:
@@ -471,7 +448,7 @@ if choice == "1. AI Route Planner":
         with st.popover("🔍 View Helpers"):
             st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
             if avail_h_names: st.markdown("**✅ Available:**<ol>" + "".join([f"<li>{n}</li>" for n in avail_h_names]) + "</ol>", unsafe_allow_html=True)
-            if vac_h_names: st.markdown("**🌴 On Vacation:**<ol>" + "".join([f"<li>{n}</li>" for n in vac_h_names]) + "</ol>", unsafe_allow_html=True)
+            if vac_h_names: st.markdown(f"**🌴 On Vacation ({len(vac_h_names)}):**<ol>" + "".join([f"<li>{n}</li>" for n in vac_h_names]) + "</ol>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
     with col_c:
@@ -494,8 +471,6 @@ if choice == "1. AI Route Planner":
                 st.info("AI will assign available helpers to priority routes. Remaining will be 'UNASSIGNED'.")
         else: 
             st.metric("✅ Helper Status", "Sufficient Surplus", delta_color="normal")
-            with st.popover("✅ View Status"):
-                st.success("You have enough helpers for all active drivers today.")
 
     st.divider()
 
@@ -506,8 +481,6 @@ if choice == "1. AI Route Planner":
     if not draft_routes.empty:
         st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then click Approve.")
         disp_draft = draft_routes.copy()
-        
-        # Enforce strict column order perfectly matching the photo requirement
         disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns]]
         
         edited_df = st.data_editor(disp_draft, use_container_width=True, hide_index=True, key="route_editor", column_order=ROUTE_COLUMN_ORDER)
@@ -550,8 +523,6 @@ if choice == "1. AI Route Planner":
         st.info(f"🗓️ **Plan Validity:** {start_dt} to {end_dt} (30 Days)")
         
         disp_active = active_routes.copy()
-        
-        # Remap database columns to visual columns for perfect display
         disp_active = disp_active.rename(columns={
             "driver_code": "Driver Code", "driver_name": "Driver Name", 
             "area_name": "Area Full Name", "helper_code": "Helper Code", 
@@ -582,21 +553,19 @@ if choice == "1. AI Route Planner":
     
     areas = load_table('areas')
     vehicles = load_table('vehicles')
-    val_errors = check_route_requirements(areas, all_d, all_h, vehicles, vacs, month_target)
-
-    if "bypass_validation" not in st.session_state:
-        st.session_state.bypass_validation = False
-        
+    
     generate_clicked = st.button("Generate Smart AI Route Plan", type="primary")
 
-    if generate_clicked or st.session_state.bypass_validation:
+    if generate_clicked or st.session_state.get('execute_generation', False):
+        val_errors = check_route_requirements(areas, all_d, all_h, vehicles, vacs, month_target)
         
-        if val_errors and not st.session_state.bypass_validation:
+        if val_errors and not st.session_state.get('bypass_validation', False):
             st.error("🚨 **ROUTE GENERATION HALTED: DATABASE SHORTAGE DETECTED**")
             for err in val_errors: st.warning(err)
             st.markdown("Cannot fulfill the 39-Route Plan with current database. Please add the missing vehicles/drivers, or bypass this warning to assign what you have.")
             if st.button("⚠️ Bypass Warnings & Force Generate"):
                 st.session_state.bypass_validation = True
+                st.session_state.execute_generation = True
                 st.rerun()
         else:
             with st.spinner("Calculating 0-Experience priorities, health cards, and strict 6-month penalties..."):
@@ -609,7 +578,8 @@ if choice == "1. AI Route Planner":
                 for area in route_targets:
                     area_name = area['name']
                     req_sector = area.get('sector', 'Pharma')
-                    needs_helper = area.get('needs_helper', 'Yes') == 'Yes'
+                    needs_helper_val = area.get('needs_helper', 'Yes')
+                    needs_helper = needs_helper_val in ['Yes', 'Optional']
                     
                     div_cat = "PHARMA DIVISION"
                     if "2-8" in req_sector or "Govt" in req_sector or "Fleet" in req_sector: div_cat = "2-8 / URGENT ORDERS"
@@ -673,12 +643,15 @@ if choice == "1. AI Route Planner":
                         
                         avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['anchor_area'] == area_name)]
                         if avail_v.empty: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['type'] == tvt) & (vehicles['anchor_area'] == "None")]
+                        # Handle combined Van/Pickup
+                        if avail_v.empty and tvt in ["VAN", "PICK-UP"]: 
+                            avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['type'] == "VAN / PICK-UP") & (vehicles['anchor_area'] == "None")]
                         if avail_v.empty: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['anchor_area'] == "None")]
+                        
                         if not avail_v.empty:
                             a_v_num = avail_v.iloc[0]['number']
                             used_vehicles.add(a_v_num)
 
-                    # Export in exact column arrangement to match the Photo visually
                     route_plan.append({
                         "Driver Code": a_d_code, "Driver Name": a_d_name, 
                         "Area Full Name": area_name, "Helper Code": a_h_code, "Helper Name": a_h_name, 
@@ -686,13 +659,13 @@ if choice == "1. AI Route Planner":
                     })
                     report_log.append({"Area": area_name, "Driver": a_d_name, "Helper": a_h_name, "AI Logic Reason": log_reason})
 
-                # Clear old drafts and save new draft
                 run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
                 for index, r in enumerate(route_plan):
                     q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     run_query(q_dr, (index+1, r['Area Code'], r['Area Full Name'], r['Sector'], r['Driver Code'], r['Driver Name'], r['Helper Code'], r['Helper Name'], r['Vehicle Number'], r['Division Category']), table_name="draft_routes", action="INSERT", data={"order_num":index+1, "area_code":r['Area Code'], "area_name":r['Area Full Name'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Driver Name'], "helper_code":r['Helper Code'], "helper_name":r['Helper Name'], "veh_num":r['Vehicle Number'], "div_cat":r['Division Category']})
                 
                 st.session_state.bypass_validation = False
+                st.session_state.execute_generation = False
                 st.rerun()
 
 
@@ -721,7 +694,7 @@ elif choice == "2. Database Management":
             col_t, col_s, col_h = st.columns(3)
             d_type = col_t.selectbox("Vehicle Type", VEHICLE_OPTIONS)
             d_sec = col_s.selectbox("Category / Sector", SECTOR_OPTIONS)
-            d_needs_h = col_h.selectbox("Needs Helper?", ["Yes", "No"])
+            d_needs_h = col_h.selectbox("Needs Helper?", NEEDS_HELPER_OPTIONS)
             d_anchor = st.selectbox("Anchor Area", area_list, key="d_add_anchor")
             if st.button("➕ Add Driver", use_container_width=True):
                 run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", 
@@ -736,7 +709,7 @@ elif choice == "2. Database Management":
                 ct, cs, ch = st.columns(3)
                 e_type = ct.selectbox("Edit Veh Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(d_data.get('veh_type', 'None')) if d_data.get('veh_type') in VEHICLE_OPTIONS else 0, key=f"d_veh_{d_data['id']}")
                 e_sec = cs.selectbox("Edit Category / Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(d_data.get('sector', 'None')) if d_data.get('sector') in SECTOR_OPTIONS else 0, key=f"d_sec_{d_data['id']}")
-                e_needs_h = ch.selectbox("Edit Needs Helper", ["Yes", "No"], index=1 if d_data.get('needs_helper') == "No" else 0, key=f"d_nh_{d_data['id']}")
+                e_needs_h = ch.selectbox("Edit Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(d_data.get('needs_helper', 'Yes')) if d_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 0, key=f"d_nh_{d_data['id']}")
                 
                 a_idx = area_list.index(d_data.get('anchor_area', 'None')) if d_data.get('anchor_area', 'None') in area_list else 0
                 e_anchor = st.selectbox("Edit Anchor", area_list, index=a_idx, key=f"d_anc_{d_data['id']}")
@@ -795,7 +768,7 @@ elif choice == "2. Database Management":
             a_code = st.text_input("Area Code")
             col_s, col_n = st.columns(2)
             a_sec = col_s.selectbox("Area Sector", SECTOR_OPTIONS)
-            a_needs = col_n.selectbox("Needs Helper for this Route?", ["Yes", "No"])
+            a_needs = col_n.selectbox("Needs Helper for this Route?", NEEDS_HELPER_OPTIONS)
             if st.button("➕ Add Area", use_container_width=True):
                 new_order = len(a_df) + 1
                 run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", (a_name, a_code, a_sec, a_needs, new_order), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":a_sec, "needs_helper":a_needs, "sort_order":new_order})
@@ -808,7 +781,7 @@ elif choice == "2. Database Management":
                 ea_code = st.text_input("Edit Code", a_data['code'], key=f"a_code_{a_data['id']}")
                 ecs, ecn = st.columns(2)
                 ea_sec = ecs.selectbox("Edit Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(a_data.get('sector', 'Pharma')) if a_data.get('sector') in SECTOR_OPTIONS else 0, key=f"a_sec_{a_data['id']}")
-                ea_needs = ecn.selectbox("Edit Needs Helper", ["Yes", "No"], index=1 if a_data.get('needs_helper') == "No" else 0, key=f"a_nh_{a_data['id']}")
+                ea_needs = ecn.selectbox("Edit Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(a_data.get('needs_helper', 'Yes')) if a_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 0, key=f"a_nh_{a_data['id']}")
                 
                 cu, cd = st.columns(2)
                 if cu.button("💾 Update Area", use_container_width=True, key=f"a_upd_{a_data['id']}"):
@@ -923,7 +896,7 @@ elif choice == "3. Past Experience Builder":
         st.subheader("➕ Add Experience")
         p_type = st.selectbox("Role", ["Driver", "Helper"])
         df_names = load_table('drivers') if p_type == "Driver" else load_table('helpers')
-        person_list = [f"[{idx+1}] {row['code']} - {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
+        person_list = [f"[{row['code']}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
         if person_list:
             p_person = st.selectbox("Select Person", person_list)
             p_area = st.selectbox("Area Experienced In", area_list)
@@ -933,8 +906,8 @@ elif choice == "3. Past Experience Builder":
             p_end_date = d2.date_input("To Date (End)")
             
             if st.button("➕ Add Past Experience", use_container_width=True):
-                raw_split = p_person.split("] ")[1].split(" - ")
-                p_code, p_name = raw_split[0], raw_split[1]
+                p_code = p_person.split("] ")[0].replace("[", "")
+                p_name = p_person.split("] ")[1]
                 
                 overlap = history_df[(history_df['person_code']==p_code) & (history_df['area']==p_area) & (history_df['date']==p_start_date.strftime("%Y-%m-%d"))]
                 if p_start_date > p_end_date: 
@@ -955,7 +928,7 @@ elif choice == "3. Past Experience Builder":
             for idx, row in history_df.iterrows():
                 sec = row.get('sector', 'Pharma')
                 if pd.isna(sec) or sec == "nan": sec = "Pharma"
-                label = f"[{idx+1}] {row['person_name']} - {row['area']} ({sec})"
+                label = f"[{row.get('person_code', 'UNK')}] {row['person_name']} - {row['area']} ({sec})"
                 hist_options.append(label)
                 hist_map[label] = str(row['id'])
 
@@ -998,6 +971,7 @@ elif choice == "4. Vacation Schedule":
             if sd <= today <= ed:
                 active_vacs.append({
                     "Role": row['person_type'],
+                    "Code": row.get('person_code', 'UNK'),
                     "Name": row['person_name'],
                     "Return Date": ed.strftime("%b %d, %Y"),
                     "Days Left": (ed - today).days
@@ -1019,12 +993,12 @@ elif choice == "4. Vacation Schedule":
                     last_vac = vacs_df[vacs_df['person_name'] == p['name']]
                     
                 if last_vac.empty:
-                    due_list.append({"Name": p['name'], "Role": role, "Status": "NEVER Taken a Vacation!"})
+                    due_list.append({"Code": p.get('code', ''), "Name": p['name'], "Role": role, "Status": "NEVER Taken a Vacation!"})
                 else:
                     lv_date = safe_parse_date(last_vac.iloc[-1]['end_date'])
                     days_since = (today - lv_date).days
                     if days_since > 300:
-                        due_list.append({"Name": p['name'], "Role": role, "Status": f"Overdue by {days_since - 300} days (Last: {lv_date})"})
+                        due_list.append({"Code": p.get('code', ''), "Name": p['name'], "Role": role, "Status": f"Overdue by {days_since - 300} days (Last: {lv_date})"})
         if due_list:
             st.dataframe(pd.DataFrame(due_list), use_container_width=True, hide_index=True)
         else:
@@ -1064,14 +1038,18 @@ elif choice == "4. Vacation Schedule":
         st.subheader("➕ Add Vacation")
         v_type = st.selectbox("Role", ["Driver", "Helper"])
         df_names = load_table('drivers') if v_type == "Driver" else load_table('helpers')
-        name_list = df_names['name'].tolist() if not df_names.empty else []
+        name_list = [f"[{row['code']}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
+        
         if name_list:
-            v_name = st.selectbox("Name", name_list)
+            v_person = st.selectbox("Name", name_list)
             d1, d2 = st.columns(2)
             v_start = d1.date_input("Start Date (Leave)")
             v_end = d2.date_input("End Date (Return)", value=date.today() + timedelta(days=30))
             
             if st.button("➕ Add Vacation", use_container_width=True):
+                v_code = v_person.split("] ")[0].replace("[", "")
+                v_name = v_person.split("] ")[1]
+                
                 if not vacs_df.empty and 'person_name' in vacs_df.columns:
                     overlap = vacs_df[(vacs_df['person_name'] == v_name) & (vacs_df['start_date'] == v_start.strftime("%Y-%m-%d"))]
                 else:
@@ -1082,16 +1060,22 @@ elif choice == "4. Vacation Schedule":
                 elif not overlap.empty:
                     st.error(f"⚠️ {v_name} already has a vacation logged starting exactly on {v_start.strftime('%Y-%m-%d')}!")
                 else:
-                    run_query("INSERT INTO vacations (person_type, person_name, start_date, end_date) VALUES (?, ?, ?, ?)", (v_type, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")), table_name="vacations", action="INSERT", data={"person_type":v_type, "person_name":v_name, "start_date":v_start.strftime("%Y-%m-%d"), "end_date":v_end.strftime("%Y-%m-%d")})
+                    run_query("INSERT INTO vacations (person_type, person_code, person_name, start_date, end_date) VALUES (?, ?, ?, ?, ?)", (v_type, v_code, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")), table_name="vacations", action="INSERT", data={"person_type":v_type, "person_code":v_code, "person_name":v_name, "start_date":v_start.strftime("%Y-%m-%d"), "end_date":v_end.strftime("%Y-%m-%d")})
                     st.rerun()
 
     with c_edit:
         st.subheader("✏️ Edit / Delete Vacation")
         if not vacs_df.empty:
-            vac_list = [f"{row['id']} - {row['person_name']} ({row['start_date']} to {row['end_date']})" for _, row in vacs_df.iterrows()]
-            sel_vac_str = st.selectbox("Select Vacation to Edit/Delete", vac_list)
+            vac_options = []
+            vac_map = {}
+            for idx, row in vacs_df.iterrows():
+                label = f"[{row.get('person_code', 'UNK')}] {row['person_name']} ({row['start_date']} to {row['end_date']})"
+                vac_options.append(label)
+                vac_map[label] = str(row['id'])
+
+            sel_vac_str = st.selectbox("Select Vacation to Edit/Delete", vac_options)
             if sel_vac_str:
-                vac_id = sel_vac_str.split(" - ")[0]
+                vac_id = vac_map[sel_vac_str]
                 vac_data = vacs_df[vacs_df['id'].astype(str) == vac_id].iloc[0]
                 ed1, ed2 = st.columns(2)
                 e_vstart_val, e_vend_val = safe_parse_date(vac_data['start_date']), safe_parse_date(vac_data['end_date'])
