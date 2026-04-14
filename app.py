@@ -91,7 +91,6 @@ if not FIREBASE_READY:
 
 
 # --- SAFE DB QUERY HANDLER ---
-# Notice: Removed @st.cache_data here. This is the fix for edits not saving/refreshing!
 def load_table(table_name):
     if FIREBASE_READY:
         docs = db_fs.collection(table_name).stream()
@@ -153,6 +152,9 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
         st.error(f"Database Error: {str(e)}")
         return False
 
+def clear_cache():
+    st.cache_data.clear()
+
 def generate_excel_with_sn(df_list, sheet_names):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -170,7 +172,7 @@ def generate_excel_with_sn(df_list, sheet_names):
 # --- OPTIONS ---
 VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
-NEEDS_HELPER_OPTIONS = ["Yes", "No", "Optional"]
+NEEDS_HELPER_OPTIONS = ["Yes", "No", "None"]
 ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Driver Name", "Area Full Name", "Helper Code", "Helper Name", "Vehicle Number", "Division Category", "Area Code", "Sector"]
 
 # --- STRICT HARDCODED ALLOWLISTS ---
@@ -234,7 +236,6 @@ RAW_NAME_MAP = {
 
 # --- PDF HISTORICAL EXTRACT MAP ---
 PRELOAD_HISTORY = [
-    # Format: (Type, Code, Start, End, Area, Sector)
     ("Helper", "H116", "2024-08-01", "2024-10-31", "MIRDIFF", "Pharma"),
     ("Helper", "H116", "2024-11-01", "2025-01-31", "2ND TRIP", "Pharma"),
     ("Helper", "H116", "2025-02-01", "2025-04-30", "ALQOUZ-2", "Pharma"),
@@ -538,8 +539,9 @@ PRELOAD_HISTORY = [
     ("Driver", "D033", "2025-08-01", "2025-10-31", "JA", "Consumer")
 ]
 
-def auto_seed_database(force=False):
+def auto_seed_database():
     current_areas = load_table("areas")
+    force = False
     if len(current_areas) != 39: force = True
     
     if FIREBASE_READY:
@@ -550,12 +552,9 @@ def auto_seed_database(force=False):
         if len(list(db_fs.collection("vehicles").limit(1).stream())) == 0:
             for num, vtype in SEED_VEHICLES: db_fs.collection("vehicles").add({"number": num, "type": vtype})
         if len(list(db_fs.collection("drivers").limit(1).stream())) == 0:
-            for code in KEEP_DRIVERS: db_fs.collection("drivers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "Yes", "restriction": "None", "anchor_area": "None"})
+            for code in KEEP_DRIVERS: db_fs.collection("drivers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "None", "restriction": "None", "anchor_area": "None"})
         if len(list(db_fs.collection("helpers").limit(1).stream())) == 0:
             for code in KEEP_HELPERS: db_fs.collection("helpers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "None", "health_card": "No", "anchor_area": "None"})
-        if len(list(db_fs.collection("history").limit(1).stream())) == 0:
-            for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY:
-                db_fs.collection("history").add({"person_type": ptype, "person_code": pcode, "person_name": RAW_NAME_MAP.get(pcode, "Unknown"), "area": parea, "sector": psec, "date": pstart, "end_date": pend})
     else:
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM areas")
@@ -566,17 +565,36 @@ def auto_seed_database(force=False):
         c.execute("SELECT COUNT(*) FROM drivers")
         if c.fetchone()[0] == 0:
             c.executemany("INSERT INTO vehicles (number, type) VALUES (?, ?)", SEED_VEHICLES)
-            d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "None", "Yes", "None", "None") for code in KEEP_DRIVERS]
+            d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "None", "None", "None", "None") for code in KEEP_DRIVERS]
             c.executemany("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed)
             h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
             c.executemany("INSERT INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
             conn.commit()
-        c.execute("SELECT COUNT(*) FROM history")
-        if c.fetchone()[0] == 0:
-            h_seed_full = [(ptype, pcode, RAW_NAME_MAP.get(pcode, "Unknown"), parea, psec, pstart, pend) for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY]
-            c.executemany("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", h_seed_full)
-            conn.commit()
 auto_seed_database()
+
+def clean_legacy_codes():
+    try:
+        d_df = load_table('drivers')
+        if not d_df.empty:
+            for _, r in d_df.iterrows():
+                code = str(r.get('code', ''))
+                if code not in KEEP_DRIVERS:
+                    run_query(None, None, "drivers", "DELETE_DOC", r['id'])
+        h_df = load_table('helpers')
+        if not h_df.empty:
+            for _, r in h_df.iterrows():
+                code = str(r.get('code', ''))
+                if code not in KEEP_HELPERS:
+                    run_query(None, None, "helpers", "DELETE_DOC", r['id'])
+        hist_df = load_table('history')
+        if not hist_df.empty:
+            for _, r in hist_df.iterrows():
+                code = str(r.get('person_code', ''))
+                if code not in KEEP_DRIVERS and code not in KEEP_HELPERS:
+                    run_query(None, None, "history", "DELETE_DOC", r['id'])
+    except Exception:
+        pass
+clean_legacy_codes()
 
 
 # --- SMART SCORING LOGIC ---
@@ -861,7 +879,9 @@ if choice == "1. AI Route Planner":
     if "bypass_val" not in st.session_state:
         st.session_state.bypass_val = False
 
-    if st.button("Generate Smart AI Route Plan", type="primary"):
+    generate_clicked = st.button("Generate Smart AI Route Plan", type="primary")
+
+    if generate_clicked:
         st.session_state.attempt_generate = True
         st.session_state.bypass_val = False
 
@@ -1000,7 +1020,7 @@ elif choice == "2. Database Management":
             col_t, col_s, col_h = st.columns(3)
             d_type = col_t.selectbox("New Driver Veh Type", VEHICLE_OPTIONS)
             d_sec = col_s.selectbox("New Driver Sector", SECTOR_OPTIONS)
-            d_needs_h = col_h.selectbox("New Driver Needs Helper?", NEEDS_HELPER_OPTIONS)
+            d_needs_h = col_h.selectbox("New Driver Needs Helper?", NEEDS_HELPER_OPTIONS, index=2)
             d_anchor = st.selectbox("New Driver Anchor Area", area_list)
             if st.button("➕ Add Driver", use_container_width=True):
                 if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", 
@@ -1016,7 +1036,7 @@ elif choice == "2. Database Management":
                 ct, cs, ch = st.columns(3)
                 e_type = ct.selectbox("Edit Driver Veh Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(d_data.get('veh_type', 'None')) if d_data.get('veh_type') in VEHICLE_OPTIONS else 0)
                 e_sec = cs.selectbox("Edit Driver Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(d_data.get('sector', 'None')) if d_data.get('sector') in SECTOR_OPTIONS else 0)
-                e_needs_h = ch.selectbox("Edit Driver Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(d_data.get('needs_helper', 'Yes')) if d_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 0)
+                e_needs_h = ch.selectbox("Edit Driver Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(d_data.get('needs_helper', 'None')) if d_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 2)
                 
                 a_idx = area_list.index(d_data.get('anchor_area', 'None')) if d_data.get('anchor_area', 'None') in area_list else 0
                 e_anchor = st.selectbox("Edit Driver Anchor", area_list, index=a_idx)
@@ -1189,24 +1209,22 @@ elif choice == "3. Past Experience Builder":
     if not disp_hist.empty: disp_hist.insert(0, 'S/N', range(1, 1 + len(disp_hist)))
     st.dataframe(disp_hist, use_container_width=True, height=250, hide_index=True)
     
-    with st.expander("📥 Export / 📤 Import History Data"):
-        output = generate_excel_with_sn([history_df], ['history'])
-        st.download_button("📥 Download History Data", data=output, file_name="History_Data.xlsx")
-        
-        up_hist = st.file_uploader("Upload History Excel", type=['xlsx'], key="up_hist")
-        if up_hist and st.button("Sync History Database"):
-            df = pd.read_excel(up_hist)
-            if not FIREBASE_READY: run_query("DELETE FROM history")
-            else: run_query(None, table_name="history", action="CLEAR_TABLE")
-            
-            for _, row in df.iterrows():
-                data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N']}
-                if not FIREBASE_READY:
-                    cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
-                    qmarks = ', '.join(['?'] * len(data_dict))
-                    run_query(f"INSERT INTO history ({cols}) VALUES ({qmarks})", vals)
+    with st.expander("🚨 Emergency Data Restore"):
+        st.warning("If your Past Experience data is empty or incorrect, click below to wipe current records and load the exact PDF data.")
+        if st.button("♻️ Restore PDF Past Experience Data", type="primary"):
+            with st.spinner("Wiping old history and loading PDF data..."):
+                if FIREBASE_READY:
+                    run_query(None, table_name="history", action="CLEAR_TABLE")
+                    for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY:
+                        db_fs.collection("history").add({"person_type": ptype, "person_code": pcode, "person_name": RAW_NAME_MAP.get(pcode, "Unknown"), "area": parea, "sector": psec, "date": pstart, "end_date": pend})
                 else:
-                    run_query(None, table_name="history", action="INSERT", data=data_dict)
+                    c = conn.cursor()
+                    c.execute("DELETE FROM history")
+                    h_seed_full = [(ptype, pcode, RAW_NAME_MAP.get(pcode, "Unknown"), parea, psec, pstart, pend) for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY]
+                    c.executemany("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", h_seed_full)
+                    conn.commit()
+                clear_cache()
+            st.success("Past Experience data fully restored to PDF specifications!")
             st.rerun()
 
     st.divider()
@@ -1218,7 +1236,7 @@ elif choice == "3. Past Experience Builder":
         st.subheader("➕ Add Experience")
         p_type = st.selectbox("Role", ["Driver", "Helper"])
         df_names = load_table('drivers') if p_type == "Driver" else load_table('helpers')
-        person_list = [f"[{row['code']}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
+        person_list = [f"[{row.get('code', '')}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
         if person_list:
             p_person = st.selectbox("Select Person", person_list)
             p_area = st.selectbox("Area Experienced In", area_list)
@@ -1368,7 +1386,7 @@ elif choice == "4. Vacation Schedule":
         st.subheader("➕ Add Vacation")
         v_type = st.selectbox("Role", ["Driver", "Helper"])
         df_names = load_table('drivers') if v_type == "Driver" else load_table('helpers')
-        name_list = [f"[{row['code']}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
+        name_list = [f"[{row.get('code', '')}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
         
         if name_list:
             v_person = st.selectbox("Select Person Name", name_list)
