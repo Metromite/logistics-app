@@ -8,7 +8,7 @@ import textwrap
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- UI CONFIGURATION (Native Streamlit Light/Dark Mode) ---
+# --- UI CONFIGURATION ---
 st.set_page_config(page_title="Logistics AI Planner", layout="wide")
 
 # --- FIREBASE INITIALIZATION & DB ADAPTER ---
@@ -46,7 +46,6 @@ try:
 except Exception as e:
     FIREBASE_READY = False
 
-# Sleek Native Dot Indicator for Connection
 if FIREBASE_READY:
     st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢</div>", unsafe_allow_html=True)
 else:
@@ -65,7 +64,6 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS active_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS performance (id INTEGER PRIMARY KEY, person_code TEXT, area TEXT, success_rate REAL, delay_count INTEGER)''')
     
-    # Migrations for new features (Helper Health Cards, Vehicle Anchors)
     for query in [
         "ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'",
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
@@ -97,7 +95,6 @@ def load_table(table_name):
         docs = db_fs.collection(table_name).stream()
         data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
         df = pd.DataFrame(data)
-        # Ensure new columns exist natively to prevent breaking UI
         if table_name == 'helpers' and 'health_card' not in df.columns and not df.empty: df['health_card'] = 'No'
         if table_name == 'drivers' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
         if table_name == 'areas' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
@@ -135,6 +132,11 @@ def generate_excel_with_sn(df_list, sheet_names):
     return output
 
 
+# --- OPTIONS ---
+VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "BUS", "2-8 VAN"]
+SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
+
+
 # --- PERFECT IMAGE-BASED SEED DATA ---
 SEED_AREAS_IMAGE = [
     ("FUJ", "FUJAIRAH", "Pharma", "Yes"), ("RAK", "RAK / UAQ", "Pharma", "Yes"),
@@ -147,17 +149,17 @@ SEED_AREAS_IMAGE = [
     ("CC1", "COLD CHAIN/URGENT ORDERS 1", "2-8", "No"), ("CC2", "COLD CHAIN/URGENT ORDERS 2", "2-8", "No"),
     ("SAMP", "Sample Driver", "Pharma", "Yes"), 
     ("2ND1", "2ND TRIP 1", "Pharma", "Yes"), ("2ND2", "2ND TRIP 2", "Pharma", "Yes"),
-    ("GOV1", "GOVT/URGENT ORDERS 1", "Govt", "No"), ("GOV2", "GOVT/URGENT ORDERS 2", "Govt", "No"),
-    ("GOV3", "GOVT/URGENT ORDERS 3", "Govt", "No"), ("FLE", "FLEET SERVICE/RTA WORK", "Fleet", "No"),
-    ("SUB-P", "SUBTITUTE/PICK UP", "Pick-Up", "No"),
-    ("PU1", "PICK UP 1", "Pick-Up", "Yes"), ("PU2", "PICK UP/SHJ 1", "Pick-Up", "Yes"),
-    ("PU3", "PICK UP 2", "Pick-Up", "Yes"), ("PU4", "PICK UP/SHJ 2", "Pick-Up", "Yes"),
-    ("PU5", "PICK UP 3", "Pick-Up", "Yes"), ("PU6", "PICK UP 4", "Pick-Up", "Yes"),
+    ("GOV1", "GOVT/URGENT ORDERS 1", "Govt / Urgent", "No"), ("GOV2", "GOVT/URGENT ORDERS 2", "Govt / Urgent", "No"),
+    ("GOV3", "GOVT/URGENT ORDERS 3", "Govt / Urgent", "No"), ("FLE", "FLEET SERVICE/RTA WORK", "Fleet", "No"),
+    ("SUB-P", "SUBTITUTE/PICK UP", "Substitute", "No"),
+    ("PU1", "PICK UP 1", "Bulk / Pick-Up", "Yes"), ("PU2", "PICK UP/SHJ 1", "Bulk / Pick-Up", "Yes"),
+    ("PU3", "PICK UP 2", "Bulk / Pick-Up", "Yes"), ("PU4", "PICK UP/SHJ 2", "Bulk / Pick-Up", "Yes"),
+    ("PU5", "PICK UP 3", "Bulk / Pick-Up", "Yes"), ("PU6", "PICK UP 4", "Bulk / Pick-Up", "Yes"),
     ("ALQ-C", "ALQ", "Consumer", "Yes"), ("JA-C", "JA", "Consumer", "Yes"),
     ("DXBO-C", "DXBO", "Consumer", "Yes"), ("BUR-C", "BUR", "Consumer", "Yes"),
     ("RAK-C", "RAK", "Consumer", "Yes"), ("PU-C1", "PICK UP/SHJ", "Consumer", "Yes"),
     ("PU-C2", "PICK UP", "Consumer", "Yes"), ("AJM-C", "AJM", "Consumer", "Yes"),
-    ("SHJS-C", "SHJS", "Consumer", "Yes"), ("SUB-C", "SUBTITUTE/URGENT ORDERS", "Consumer", "No")
+    ("SHJS-C", "SHJS", "Consumer", "Yes"), ("SUB-C", "SUBTITUTE/URGENT ORDERS", "Substitute", "No")
 ]
 
 def auto_seed_database(force=False):
@@ -180,7 +182,7 @@ def auto_seed_database(force=False):
 auto_seed_database()
 
 
-# --- SMART SCORING LOGIC (0-EXP PRIORITY & 6-MONTH STRICT PENALTY) ---
+# --- SMART SCORING LOGIC ---
 def safe_parse_date(date_str):
     try: return datetime.strptime(date_str, "%Y-%m-%d").date()
     except: return date.today()
@@ -217,16 +219,24 @@ def select_best_candidate(candidates_df, area_name, req_sector, target_date, his
         reasons = []
 
         if role == "Driver":
-            if person.get('veh_type') == req_veh:
+            p_veh = person.get('veh_type', 'None')
+            p_sec = person.get('sector', 'None')
+            
+            # Flexible Vehicle or Exact Match
+            if p_veh in [req_veh, "None"]:
                 score += 300
-                reasons.append(f"Veh Match: {req_veh} (+300)")
+                reasons.append(f"Veh Match ({p_veh}) (+300)")
             else:
                 score -= 600
                 reasons.append(f"Wrong Veh (-600)")
 
-            if person.get('sector') == req_sector:
+            # Flexible Sector or Exact Match
+            if p_sec in [req_sector, "None"]:
                 score += 200
-                reasons.append(f"Sector Match (+200)")
+                reasons.append(f"Sector Match ({p_sec}) (+200)")
+            else:
+                score -= 400
+                reasons.append(f"Wrong Sector (-400)")
 
         if role == "Helper":
             if req_sector == "Consumer":
@@ -280,9 +290,6 @@ st.title("🚛 Smart Logistics Route Planner")
 
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
 choice = st.sidebar.radio("Navigate", menu)
-RESTRICTION_OPTIONS = ["None", "Consumer Only", "2-8 Cars Only", "Sharjah", "Dubai", "Ajman", "Fujairah", "Ras Al Khaimah", "Abu Dhabi", "Al Ain"]
-VEHICLE_OPTIONS = ["VAN", "PICK-UP", "BUS", "2-8 VAN"]
-SECTOR_OPTIONS = ["Pharma", "Consumer", "Bulk", "2-8", "Govt", "Pick-Up", "Fleet"]
 
 
 # ==========================================
@@ -290,26 +297,60 @@ SECTOR_OPTIONS = ["Pharma", "Consumer", "Bulk", "2-8", "Govt", "Pick-Up", "Fleet
 # ==========================================
 if choice == "1. AI Route Planner":
     
-    # --- LIVE DASHBOARD ---
+    # --- LIVE DASHBOARD WITH POPOVERS ---
     st.subheader("📊 Today's Availability Dashboard")
     today = date.today()
     all_d = load_table('drivers')
     all_h = load_table('helpers')
     vacs = load_table('vacations')
     
-    avail_d = len(all_d) - sum(1 for _, r in all_d.iterrows() if is_on_vacation(vacs, r['name'], today)) if not all_d.empty else 0
-    avail_h = len(all_h) - sum(1 for _, r in all_h.iterrows() if is_on_vacation(vacs, r['name'], today)) if not all_h.empty else 0
-    solo_d = len(all_d[(all_d.get('needs_helper', 'Yes') == 'No') | (all_d.get('veh_type', '') .isin(['BUS', '2-8 VAN']))]) if not all_d.empty else 0
+    # Pre-calculate lists
+    vac_d_names = [r['name'] for _, r in all_d.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
+    avail_d_names = [r['name'] for _, r in all_d.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
+    solo_d_names = [r['name'] for _, r in all_d.iterrows() if (not is_on_vacation(vacs, r['name'], today)) and ((r.get('needs_helper', 'Yes') == 'No') or (r.get('veh_type', '') in ['BUS', '2-8 VAN']))] if not all_d.empty else []
     
-    req_helpers = avail_d - solo_d
-    shortage = req_helpers - avail_h
+    vac_h_names = [r['name'] for _, r in all_h.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_h.empty else []
+    avail_h_names = [r['name'] for _, r in all_h.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_h.empty else []
+    
+    req_helpers = len(avail_d_names) - len(solo_d_names)
+    shortage = req_helpers - len(avail_h_names)
 
     col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("🚛 Total Drivers Available", f"{avail_d} / {len(all_d)}")
-    col_b.metric("👤 Total Helpers Available", f"{avail_h} / {len(all_h)}")
-    col_c.metric("⚡ Solo Drivers (No Helper)", solo_d)
-    if shortage > 0: col_d.metric("⚠️ Helper Shortage", f"-{shortage}", delta_color="inverse")
-    else: col_d.metric("✅ Helper Status", "Sufficient Surplus", delta_color="normal")
+    
+    with col_a:
+        st.metric("🚛 Total Drivers Available", f"{len(avail_d_names)} / {len(all_d)}")
+        with st.popover("🔍 View Drivers"):
+            st.write(f"**Available ({len(avail_d_names)}):**", ", ".join(avail_d_names) if avail_d_names else "None")
+            st.divider()
+            st.write(f"**On Vacation ({len(vac_d_names)}):**", ", ".join(vac_d_names) if vac_d_names else "None")
+
+    with col_b:
+        st.metric("👤 Total Helpers Available", f"{len(avail_h_names)} / {len(all_h)}")
+        with st.popover("🔍 View Helpers"):
+            st.write(f"**Available ({len(avail_h_names)}):**", ", ".join(avail_h_names) if avail_h_names else "None")
+            st.divider()
+            st.write(f"**On Vacation ({len(vac_h_names)}):**", ", ".join(vac_h_names) if vac_h_names else "None")
+
+    with col_c:
+        st.metric("⚡ Solo Drivers (No Helper)", len(solo_d_names))
+        with st.popover("🔍 View Solo Drivers"):
+            st.write(f"**Solo Drivers ({len(solo_d_names)}):**", ", ".join(solo_d_names) if solo_d_names else "None")
+            st.caption("These drivers do not require a helper because of their vehicle type or settings.")
+
+    with col_d:
+        if shortage > 0: 
+            st.metric("⚠️ Helper Shortage", f"-{shortage}", delta_color="inverse")
+            with st.popover("🚨 View Shortage Details"):
+                st.error(f"**Shortage of {shortage} Helpers!**")
+                st.write(f"You have **{len(avail_d_names)}** active drivers.")
+                st.write(f"Minus **{len(solo_d_names)}** solo drivers = **{req_helpers}** helpers needed today.")
+                st.write(f"But you only have **{len(avail_h_names)}** helpers available.")
+                st.info("The AI will assign the available helpers to the highest priority routes, and the remaining routes will show as 'UNASSIGNED'.")
+        else: 
+            st.metric("✅ Helper Status", "Sufficient Surplus", delta_color="normal")
+            with st.popover("✅ View Status"):
+                st.success("You have enough helpers for all active drivers today.")
+
     st.divider()
 
 
@@ -440,7 +481,7 @@ elif choice == "2. Database Management":
     with tab1:
         st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
-        disp_df = drivers_df.drop(columns=['id'], errors='ignore').copy()
+        disp_df = drivers_df.drop(columns=['id', 'restriction'], errors='ignore').copy()
         if not disp_df.empty: disp_df.insert(0, 'S/N', range(1, 1 + len(disp_df)))
         st.dataframe(disp_df, use_container_width=True, height=250, hide_index=True)
         
@@ -450,42 +491,39 @@ elif choice == "2. Database Management":
             d_code = st.text_input("Code")
             col_t, col_s, col_h = st.columns(3)
             d_type = col_t.selectbox("Vehicle Type", VEHICLE_OPTIONS)
-            d_sec = col_s.selectbox("Sector", SECTOR_OPTIONS)
+            d_sec = col_s.selectbox("Category / Sector", SECTOR_OPTIONS)
             d_needs_h = col_h.selectbox("Needs Helper?", ["Yes", "No"])
-            d_restr = st.selectbox("Restriction/Permit", RESTRICTION_OPTIONS)
             d_anchor = st.selectbox("Anchor Area", area_list, key="d_add_anchor")
             if st.button("➕ Add Driver", use_container_width=True):
                 run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                          (d_name, d_code, d_type, d_sec, d_needs_h, d_restr, d_anchor), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":d_type, "sector":d_sec, "needs_helper":d_needs_h, "restriction":d_restr, "anchor_area":d_anchor})
+                          (d_name, d_code, d_type, d_sec, d_needs_h, "None", d_anchor), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":d_type, "sector":d_sec, "needs_helper":d_needs_h, "restriction":"None", "anchor_area":d_anchor})
                 st.rerun()
 
         with c_edit:
             sel_d_code = st.selectbox("Select Driver to Edit/Delete", drivers_df['code'].tolist() if not drivers_df.empty else [])
             if sel_d_code:
                 d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
-                e_name = st.text_input("Edit Name", d_data['name'])
+                e_name = st.text_input("Edit Name", d_data['name'], key=f"d_name_{d_data['id']}")
                 ct, cs, ch = st.columns(3)
-                e_type = ct.selectbox("Edit Veh Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(d_data['veh_type']) if d_data['veh_type'] in VEHICLE_OPTIONS else 0)
-                e_sec = cs.selectbox("Edit Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(d_data.get('sector', 'Pharma')) if d_data.get('sector') in SECTOR_OPTIONS else 0)
-                e_needs_h = ch.selectbox("Edit Needs Helper", ["Yes", "No"], index=1 if d_data.get('needs_helper') == "No" else 0)
+                e_type = ct.selectbox("Edit Veh Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(d_data['veh_type']) if d_data['veh_type'] in VEHICLE_OPTIONS else 0, key=f"d_veh_{d_data['id']}")
+                e_sec = cs.selectbox("Edit Category / Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(d_data.get('sector', 'None')) if d_data.get('sector') in SECTOR_OPTIONS else 0, key=f"d_sec_{d_data['id']}")
+                e_needs_h = ch.selectbox("Edit Needs Helper", ["Yes", "No"], index=1 if d_data.get('needs_helper') == "No" else 0, key=f"d_nh_{d_data['id']}")
                 
-                r_idx = RESTRICTION_OPTIONS.index(d_data['restriction']) if d_data['restriction'] in RESTRICTION_OPTIONS else 0
-                e_restr = st.selectbox("Edit Restriction", RESTRICTION_OPTIONS, index=r_idx)
                 a_idx = area_list.index(d_data.get('anchor_area', 'None')) if d_data.get('anchor_area', 'None') in area_list else 0
-                e_anchor = st.selectbox("Edit Anchor", area_list, index=a_idx, key="d_edit_anchor")
+                e_anchor = st.selectbox("Edit Anchor", area_list, index=a_idx, key=f"d_anc_{d_data['id']}")
                 
                 c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update Driver", use_container_width=True):
-                    run_query("UPDATE drivers SET name=?, veh_type=?, sector=?, needs_helper=?, restriction=?, anchor_area=? WHERE code=?", (e_name, e_type, e_sec, e_needs_h, e_restr, e_anchor, sel_d_code), table_name="drivers", action="UPDATE", doc_id=d_data['id'], data={"name":e_name, "veh_type":e_type, "sector":e_sec, "needs_helper":e_needs_h, "restriction":e_restr, "anchor_area":e_anchor})
+                if c_upd.button("💾 Update Driver", use_container_width=True, key=f"d_upd_{d_data['id']}"):
+                    run_query("UPDATE drivers SET name=?, veh_type=?, sector=?, needs_helper=?, anchor_area=? WHERE code=?", (e_name, e_type, e_sec, e_needs_h, e_anchor, sel_d_code), table_name="drivers", action="UPDATE", doc_id=d_data['id'], data={"name":e_name, "veh_type":e_type, "sector":e_sec, "needs_helper":e_needs_h, "anchor_area":e_anchor})
                     st.rerun()
-                if c_del.button("🗑️ Delete Driver", use_container_width=True):
+                if c_del.button("🗑️ Delete Driver", use_container_width=True, key=f"d_del_{d_data['id']}"):
                     run_query("DELETE FROM drivers WHERE code=?", (sel_d_code,), table_name="drivers", action="DELETE_DOC", doc_id=d_data['id'])
                     st.rerun()
 
     with tab2:
         st.subheader("📋 Full Helpers List")
         helpers_df = load_table('helpers')
-        disp_h = helpers_df.drop(columns=['id'], errors='ignore').copy()
+        disp_h = helpers_df.drop(columns=['id', 'restriction'], errors='ignore').copy()
         if not disp_h.empty: disp_h.insert(0, 'S/N', range(1, 1 + len(disp_h)))
         st.dataframe(disp_h, use_container_width=True, height=250, hide_index=True)
         
@@ -494,27 +532,24 @@ elif choice == "2. Database Management":
             h_name = st.text_input("Helper Name")
             h_code = st.text_input("Helper Code")
             h_health = st.selectbox("Has Health Card?", ["No", "Yes"])
-            h_restr = st.selectbox("Restriction", RESTRICTION_OPTIONS, key="h_restr_add")
             h_anchor = st.selectbox("Anchor Area", area_list, key="h_anchor_add")
             if st.button("➕ Add Helper", use_container_width=True):
-                run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area) VALUES (?, ?, ?, ?, ?)", (h_name, h_code, h_health, h_restr, h_anchor), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":h_restr, "anchor_area":h_anchor})
+                run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area) VALUES (?, ?, ?, ?, ?)", (h_name, h_code, h_health, "None", h_anchor), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"None", "anchor_area":h_anchor})
                 st.rerun()
         with c_edit:
             sel_h_code = st.selectbox("Select Helper to Edit/Delete", helpers_df['code'].tolist() if not helpers_df.empty else [])
             if sel_h_code:
                 h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
-                e_hname = st.text_input("Edit Name", h_data['name'], key="eh_name")
-                e_hhealth = st.selectbox("Edit Health Card", ["No", "Yes"], index=1 if h_data.get('health_card') == "Yes" else 0)
-                hr_idx = RESTRICTION_OPTIONS.index(h_data['restriction']) if h_data['restriction'] in RESTRICTION_OPTIONS else 0
-                e_hrestr = st.selectbox("Edit Restriction", RESTRICTION_OPTIONS, index=hr_idx, key="eh_restr")
+                e_hname = st.text_input("Edit Name", h_data['name'], key=f"h_name_{h_data['id']}")
+                e_hhealth = st.selectbox("Edit Health Card", ["No", "Yes"], index=1 if h_data.get('health_card') == "Yes" else 0, key=f"h_hc_{h_data['id']}")
                 ha_idx = area_list.index(h_data.get('anchor_area', 'None')) if h_data.get('anchor_area', 'None') in area_list else 0
-                e_hanchor = st.selectbox("Edit Anchor", area_list, index=ha_idx, key="eh_anchor")
+                e_hanchor = st.selectbox("Edit Anchor", area_list, index=ha_idx, key=f"h_anc_{h_data['id']}")
                 
                 c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update Helper", use_container_width=True):
-                    run_query("UPDATE helpers SET name=?, health_card=?, restriction=?, anchor_area=? WHERE code=?", (e_hname, e_hhealth, e_hrestr, e_hanchor, sel_h_code), table_name="helpers", action="UPDATE", doc_id=h_data['id'], data={"name":e_hname, "health_card":e_hhealth, "restriction":e_hrestr, "anchor_area":e_hanchor})
+                if c_upd.button("💾 Update Helper", use_container_width=True, key=f"h_upd_{h_data['id']}"):
+                    run_query("UPDATE helpers SET name=?, health_card=?, anchor_area=? WHERE code=?", (e_hname, e_hhealth, e_hanchor, sel_h_code), table_name="helpers", action="UPDATE", doc_id=h_data['id'], data={"name":e_hname, "health_card":e_hhealth, "anchor_area":e_hanchor})
                     st.rerun()
-                if c_del.button("🗑️ Delete Helper", use_container_width=True):
+                if c_del.button("🗑️ Delete Helper", use_container_width=True, key=f"h_del_{h_data['id']}"):
                     run_query("DELETE FROM helpers WHERE code=?", (sel_h_code,), table_name="helpers", action="DELETE_DOC", doc_id=h_data['id'])
                     st.rerun()
 
@@ -539,17 +574,17 @@ elif choice == "2. Database Management":
             sel_a = st.selectbox("Select Area to Edit/Delete", a_df['name'].tolist() if not a_df.empty else [])
             if sel_a:
                 a_data = a_df[a_df['name'] == sel_a].iloc[0]
-                ea_name = st.text_input("Edit Name", a_data['name'])
-                ea_code = st.text_input("Edit Code", a_data['code'])
+                ea_name = st.text_input("Edit Name", a_data['name'], key=f"a_name_{a_data['id']}")
+                ea_code = st.text_input("Edit Code", a_data['code'], key=f"a_code_{a_data['id']}")
                 ecs, ecn = st.columns(2)
-                ea_sec = ecs.selectbox("Edit Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(a_data.get('sector', 'Pharma')) if a_data.get('sector') in SECTOR_OPTIONS else 0)
-                ea_needs = ecn.selectbox("Edit Needs Helper", ["Yes", "No"], index=1 if a_data.get('needs_helper') == "No" else 0)
+                ea_sec = ecs.selectbox("Edit Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(a_data.get('sector', 'Pharma')) if a_data.get('sector') in SECTOR_OPTIONS else 0, key=f"a_sec_{a_data['id']}")
+                ea_needs = ecn.selectbox("Edit Needs Helper", ["Yes", "No"], index=1 if a_data.get('needs_helper') == "No" else 0, key=f"a_nh_{a_data['id']}")
                 
                 cu, cd = st.columns(2)
-                if cu.button("💾 Update Area", use_container_width=True):
+                if cu.button("💾 Update Area", use_container_width=True, key=f"a_upd_{a_data['id']}"):
                     run_query("UPDATE areas SET name=?, code=?, sector=?, needs_helper=? WHERE name=?", (ea_name, ea_code, ea_sec, ea_needs, sel_a), table_name="areas", action="UPDATE", doc_id=a_data['id'], data={"name":ea_name, "code":ea_code, "sector":ea_sec, "needs_helper":ea_needs})
                     st.rerun()
-                if cd.button("🗑️ Delete Area", use_container_width=True):
+                if cd.button("🗑️ Delete Area", use_container_width=True, key=f"a_del_{a_data['id']}"):
                     run_query("DELETE FROM areas WHERE name=?", (sel_a,), table_name="areas", action="DELETE_DOC", doc_id=a_data['id'])
                     st.rerun()
 
@@ -572,15 +607,15 @@ elif choice == "2. Database Management":
             sel_v = st.selectbox("Select Vehicle to Edit/Delete", v_df['number'].tolist() if not v_df.empty else [])
             if sel_v:
                 v_data = v_df[v_df['number'] == sel_v].iloc[0]
-                ev_type = st.selectbox("Edit Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(v_data['type']) if v_data['type'] in VEHICLE_OPTIONS else 0)
+                ev_type = st.selectbox("Edit Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(v_data['type']) if v_data['type'] in VEHICLE_OPTIONS else 0, key=f"v_type_{v_data['id']}")
                 va_idx = area_list.index(v_data.get('anchor_area', 'None')) if v_data.get('anchor_area', 'None') in area_list else 0
-                ev_anchor = st.selectbox("Edit Anchor Area", area_list, index=va_idx)
+                ev_anchor = st.selectbox("Edit Anchor Area", area_list, index=va_idx, key=f"v_anc_{v_data['id']}")
                 
                 cu, cd = st.columns(2)
-                if cu.button("💾 Update Veh", use_container_width=True):
+                if cu.button("💾 Update Veh", use_container_width=True, key=f"v_upd_{v_data['id']}"):
                     run_query("UPDATE vehicles SET type=?, anchor_area=? WHERE number=?", (ev_type, ev_anchor, sel_v), table_name="vehicles", action="UPDATE", doc_id=v_data['id'], data={"type":ev_type, "anchor_area":ev_anchor})
                     st.rerun()
-                if cd.button("🗑️ Delete Veh", use_container_width=True):
+                if cd.button("🗑️ Delete Veh", use_container_width=True, key=f"v_del_{v_data['id']}"):
                     run_query("DELETE FROM vehicles WHERE number=?", (sel_v,), table_name="vehicles", action="DELETE_DOC", doc_id=v_data['id'])
                     st.rerun()
                 
@@ -689,18 +724,18 @@ elif choice == "3. Past Experience Builder":
                 hist_id = sel_hist_str.split(" - ")[0]
                 hist_data = history_df[history_df['id'].astype(str) == hist_id].iloc[0]
                 a_idx = area_list.index(hist_data['area']) if hist_data['area'] in area_list else 0
-                e_area = st.selectbox("Edit Area", area_list, index=a_idx, key=f"e_area_{hist_id}")
-                e_sec = st.selectbox("Edit Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(hist_data.get('sector', 'Pharma')) if hist_data.get('sector') in SECTOR_OPTIONS else 0)
+                e_area = st.selectbox("Edit Area", area_list, index=a_idx, key=f"he_area_{hist_id}")
+                e_sec = st.selectbox("Edit Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(hist_data.get('sector', 'Pharma')) if hist_data.get('sector') in SECTOR_OPTIONS else 0, key=f"he_sec_{hist_id}")
                 ed1, ed2 = st.columns(2)
                 e_start_val, e_end_val = safe_parse_date(hist_data['date']), safe_parse_date(hist_data['end_date'])
-                new_start = ed1.date_input("Edit Start Date", value=e_start_val, key=f"es_{hist_id}")
-                new_end = ed2.date_input("Edit End Date", value=e_end_val, key=f"ee_{hist_id}")
+                new_start = ed1.date_input("Edit Start Date", value=e_start_val, key=f"he_es_{hist_id}")
+                new_end = ed2.date_input("Edit End Date", value=e_end_val, key=f"he_ee_{hist_id}")
                 
                 c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update Experience", use_container_width=True):
+                if c_upd.button("💾 Update Experience", use_container_width=True, key=f"he_upd_{hist_id}"):
                     run_query("UPDATE history SET area=?, sector=?, date=?, end_date=? WHERE id=?", (e_area, e_sec, new_start.strftime("%Y-%m-%d"), new_end.strftime("%Y-%m-%d"), hist_id), table_name="history", action="UPDATE", doc_id=hist_id, data={"area":e_area, "sector":e_sec, "date":new_start.strftime("%Y-%m-%d"), "end_date":new_end.strftime("%Y-%m-%d")})
                     st.rerun()
-                if c_del.button("🗑️ Delete Experience", use_container_width=True):
+                if c_del.button("🗑️ Delete Experience", use_container_width=True, key=f"he_del_{hist_id}"):
                     run_query("DELETE FROM history WHERE id=?", (hist_id,), table_name="history", action="DELETE_DOC", doc_id=hist_id)
                     st.rerun()
 
@@ -713,7 +748,6 @@ elif choice == "4. Vacation Schedule":
     vacs_df = load_table('vacations')
     history_df = load_table('history')
 
-    # --- REAL-TIME VACATION DASHBOARD ---
     st.subheader("📊 Active Vacations Overview")
     today = date.today()
     active_vacs = []
@@ -821,16 +855,16 @@ elif choice == "4. Vacation Schedule":
                 vac_data = vacs_df[vacs_df['id'].astype(str) == vac_id].iloc[0]
                 ed1, ed2 = st.columns(2)
                 e_vstart_val, e_vend_val = safe_parse_date(vac_data['start_date']), safe_parse_date(vac_data['end_date'])
-                new_vstart = ed1.date_input("Edit Start Date", value=e_vstart_val, key=f"vs_{vac_id}")
-                new_vend = ed2.date_input("Edit End Date", value=e_vend_val, key=f"ve_{vac_id}")
+                new_vstart = ed1.date_input("Edit Start Date", value=e_vstart_val, key=f"vac_es_{vac_id}")
+                new_vend = ed2.date_input("Edit End Date", value=e_vend_val, key=f"vac_ee_{vac_id}")
                 
                 c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update Vacation", use_container_width=True):
+                if c_upd.button("💾 Update Vacation", use_container_width=True, key=f"vac_upd_{vac_id}"):
                     if new_vstart > new_vend: st.error("Start Date cannot be after End Date.")
                     else:
                         run_query("UPDATE vacations SET start_date=?, end_date=? WHERE id=?", (new_vstart.strftime("%Y-%m-%d"), new_vend.strftime("%Y-%m-%d"), vac_id), table_name="vacations", action="UPDATE", doc_id=vac_id, data={"start_date":new_vstart.strftime("%Y-%m-%d"), "end_date":new_vend.strftime("%Y-%m-%d")})
                         st.rerun()
                         
-                if c_del.button("🗑️ Delete Vacation", use_container_width=True):
+                if c_del.button("🗑️ Delete Vacation", use_container_width=True, key=f"vac_del_{vac_id}"):
                     run_query("DELETE FROM vacations WHERE id=?", (vac_id,), table_name="vacations", action="DELETE_DOC", doc_id=vac_id)
                     st.rerun()
