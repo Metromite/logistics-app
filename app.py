@@ -111,6 +111,12 @@ def load_table(table_name):
         if table_name == 'areas' and not df.empty:
             df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
             df = df.sort_values(by='sort_order')
+        if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
+        if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
             
         if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
         return df
@@ -119,6 +125,12 @@ def load_table(table_name):
         if table_name == 'areas' and not df.empty: 
             df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
             df = df.sort_values(by='sort_order')
+        if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
+        if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
         if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
         return df
 
@@ -153,16 +165,31 @@ def generate_excel_with_sn(df_list, sheet_names):
 # --- OPTIONS ---
 VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
+ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Driver Name", "Area Full Name", "Helper Code", "Helper Name", "Vehicle Number", "Division Category", "Area Code", "Sector"]
+
+
+# --- STRICT HARDCODED ALLOWLISTS ---
+KEEP_HELPERS = [
+    "H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", 
+    "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", 
+    "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"
+]
+KEEP_DRIVERS = [
+    "D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", 
+    "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", 
+    "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", 
+    "D089", "D054", "D088", "D098", "D033"
+]
 
 # --- STRICT IMAGE-BASED 39-ROW ROUTE LAYOUT ---
 SEED_AREAS_IMAGE = [
     ("PH-FUJ", "FUJAIRAH", "Pharma", "Yes", 1), ("PH-RAK", "RAK / UAQ", "Pharma", "Yes", 2),
-    ("PH-ALQ1", "ALQOUZ-1", "Pharma", "Yes", 3), ("PH-ALQ2", "ALQOUZ-2", "Pharma", "Yes", 4),
-    ("PH-JUM", "JUMAIRAH", "Pharma", "Yes", 5), ("PH-BUR", "BURDUBAI", "Pharma", "Yes", 6),
-    ("PH-MIR", "MIRDIFF", "Pharma", "Yes", 7), ("PH-QUS", "QUSAIS", "Pharma", "Yes", 8),
-    ("PH-DEI", "DEIRA", "Pharma", "Yes", 9), ("PH-AJM", "AJMAN", "Pharma", "Yes", 10),
-    ("PH-BUH", "BUHAIRAH", "Pharma", "Yes", 11), ("PH-SHJS", "SHJ - SANAYYA", "Pharma", "Yes", 12),
-    ("PH-JAB", "JABEL ALI", "Pharma", "Yes", 13), 
+    ("PH-JAB", "JABEL ALI", "Pharma", "Yes", 3), ("PH-ALQ1", "ALQOUZ-1", "Pharma", "Yes", 4),
+    ("PH-ALQ2", "ALQOUZ-2", "Pharma", "Yes", 5), ("PH-JUM", "JUMAIRAH", "Pharma", "Yes", 6),
+    ("PH-BUR", "BURDUBAI", "Pharma", "Yes", 7), ("PH-MIR", "MIRDIFF", "Pharma", "Yes", 8),
+    ("PH-QUS", "QUSAIS", "Pharma", "Yes", 9), ("PH-DEI", "DEIRA", "Pharma", "Yes", 10),
+    ("PH-AJM", "AJMAN", "Pharma", "Yes", 11), ("PH-SHJS", "SHJ - SANAYYA", "Pharma", "Yes", 12),
+    ("PH-SHJB", "SHJ- BUH/ROLLA", "Pharma", "Yes", 13), 
     ("28-CC1", "COLD CHAIN/URGENT ORDERS", "2-8", "No", 14), ("28-CC2", "COLD CHAIN/URGENT ORDERS", "2-8", "No", 15),
     ("PH-SAMP", "Sample Driver", "Pharma", "Yes", 16), ("PH-2ND1", "2ND TRIP", "Pharma", "Yes", 17),
     ("PH-2ND2", "2ND TRIP", "Pharma", "Yes", 18), 
@@ -191,70 +218,24 @@ SEED_VEHICLES = [
     ("W 11792", "VAN"), ("T 26701", "VAN"), ("CC 98174", "VAN"), ("CC 98175", "VAN"), ("CC 98176", "VAN")
 ]
 
-# Raw Data -> Filtered automatically so bad legacy codes never enter the system
-SEED_DRIVERS_RAW = [
-    ("AD056", "NAUSHAD ALI"), ("AD060", "TINTU JOSEPH"), ("AD054", "VIJU NAIR"), ("AD067", "SREEKANTH"),
-    ("AD038", "RAHAMATULLAH"), ("AD063", "MOHAMMED SHEREEF"), ("AD055", "AHAMAD JAN"), ("AD068", "MOHAMED ANSAR"),
-    ("AD047", "Michael De Torres"), ("AD066", "ANSARI"), ("AD062", "NIJAVUDEEN"), ("AD065", "SABIR SHAH"),
-    ("AD039", "H. SAGUL AMEED"), ("AD053", "Mohamed Shefeeq"), ("AD046", "MUSTHAFA . KA"), ("AD061", "YASAR ARAFATH"),
-    ("SH003", "RAHUL RAJENDRAN"), ("AD045", "ESLAM SABRI"), ("AD050", "SHAHID ALI"), ("AD041", "MOHD. MUSTHAFA"),
-    ("AD051", "ABDUL JALEEL"), ("AD064", "FAYAZ KHAN"), ("AD057", "SHEKKEER PH"), ("AD021", "CUSTOMER"),
-    ("AD004", "ADIL SHAH GULAM"), ("AD006", "ABDUL NAEEM"), ("AD010", "RAHMATH BUNAIRY"), ("AD013", "FAZAL NAEM"),
-    ("AD014", "NISAAR AHMED"), ("AD023", "FAISAL"), ("AD025", "ALI AHAMAD"), ("AD026", "NADAR SHAH"),
-    ("AD022", "MOHAMMED GHANI"), ("AD029", "ABDUL AZIZ"), ("AD033", "RASHID"), ("D106", "Mohammed Shereef K V"),
-    ("D081", "Musthafa Kadangod"), ("D094", "Shuhaib Mullantakath"), ("D083", "Asaf Khan Fazal"), ("SBP1", "SEBA MED PROMOTION"),
-    ("D076", "Rahmatullah Mohammed"), ("D067", "Shebin Kabeer"), ("D096", "Ahmad Jan Mughal"), ("SRV", "Service Dept BUH"),
-    ("D100", "Adil Ghulam"), ("D104", "Mahammed Ansar"), ("D086", "Abdul Jaleel Nadakkavu"), ("D105", "Fayaz Khan RS"),
-    ("D087", "Abdul Naeem"), ("D108", "Ansari Ithayathullah"), ("D103", "Jamseer PV Ibrahim"), ("D080", "Shahid Ali khan"),
-    ("D107", "Muneeb Hussain"), ("D085", "Rahul R.P"), ("D095", "Islam Sabri"), ("D089", "Jisam K Saleem"),
-    ("SLM", "SALAMA PACKING"), ("D072", "Rahmat Bunairy"), ("D073", "Mohamed Mustafa Kummalil"), ("D063", "Ajmal Ali Akbar"),
-    ("D097", "Shekkeer P Hamza"), ("D059", "Jeham Sher AUH"), ("D099", "Muhammed Noushad P"), ("CPC001", "Danish Mohammed"),
-    ("BUH002", "Mohamed Khaled"), ("D078", "Mahammad Arif"), ("D075", "Michael DE Torres"), ("D061", "Said Alavy"),
-    ("D082", "Rashid Meethal"), ("D088", "Saheer Ali V Z"), ("D079", "Nadar Shah Shah"), ("D102", "Mohammed Nasiruddeen"),
-    ("D098", "Muhammed Aslam K"), ("D071", "Fazal Naeem Abdur Rahim"), ("D101", "Tintu V Joseph"), ("D058", "Nazeer Khan AUH"),
-    ("D074", "Nisar Ahamed Shah"), ("D090", "Faisal Mahmood"), ("MED1", "Kathleen Grace"), ("D070", "Mohamed Ghani"),
-    ("D092", "Mohamed Shefeeq.MP"), ("D093", "Viju Nair"), ("D068", "Ali Ahamed"), ("D049", "Abdul Jabbar"),
-    ("D051", "Mohammed Ibrahim"), ("D052", "Noushad Ali"), ("D050", "Abdul Mansoor"), ("D047", "Ahmed Faraj"),
-    ("D048", "Moideen Azeez"), ("C001", "Collected By Customer"), ("D010", "Nasar"), ("D011", "Imran Khan"),
-    ("D019", "Muhammed Kunji"), ("D023", "Sabir Shah"), ("D024", "Sadiq Shah"), ("D026", "Jahaberudheen"),
-    ("D029", "Baderudheen"), ("SLPO", "Delivered by LPO Dept"), ("D033", "Naeem Fazal"), ("D037", "Nijavudeen"),
-    ("D038", "Ismail Korokkaran"), ("D035", "Shaul Hameed"), ("D036", "Rashid Baderzaman"), ("D040", "Hussain Mohammed"),
-    ("D042", "Gulam Khan Mohammad"), ("D044", "Zainul Abid"), ("D032", "Sayd Mubarak"), ("D034", "Adil Hassan"),
-    ("D046", "Azeez Abdulla"), ("D054", "Sameer Zakariyah"), ("SH002", "GULAM KHAN"), ("SH001", "SADIQ SHA"),
-    ("SH004", "Zainulabid"), ("AD069", "MOH KUNHI"), ("C002", "OTHERS"), ("D027", "Sultan"), ("D064", "Shabeer Ali A.Rahman"),
-    ("D109", "Yousuf Nobi Shakib")
-]
-SEED_DRIVERS = [d for d in SEED_DRIVERS_RAW if str(d[0]).startswith('D')]
-
-SEED_HELPERS_RAW = [
-    ("AH039", "RABIYA"), ("AH031", "HAJA MOIDEEN"), ("AH036", "SYED MAISAM"), ("AH037", "RASHEED"),
-    ("AH038", "AUREL"), ("AH033", "JOSEPH"), ("AH034", "MUBARAK"), ("AH042", "LORLDWINE"), ("AH044", "ISMAIL"),
-    ("AH041", "ABBAS"), ("AH040", "AMANULLHA"), ("AH043", "CHARL-VINCE"), ("AH002", "RAFEEQ"), ("AH012", "SAYED ALI"),
-    ("AH020", "LATHIF"), ("AH021", "RAMSHEED"), ("AH022", "NAIK"), ("AH025", "FAZAL HADI"), ("AH027", "REJITHA"),
-    ("AH030", "SHAHID"), ("AH40", "RAJESH"), ("H117", "Mahammad Nawaz PM"), ("H115", "Omar AlSaeed"),
-    ("H111", "Muhammed Saif VS"), ("H130", "Javed Akhtar"), ("H077", "Ihab Mohamad Kaddour"), ("H107", "Abdul Razak"),
-    ("H123", "Sheik Abdul Malik"), ("H097", "Mahdi"), ("H125", "Kadar Moideen"), ("H082", "Hassan Mohammed"),
-    ("H083", "Shakeer"), ("H091", "Mohammed Sameem"), ("H095", "Noushad Ali"), ("H104", "Mohammed Shakeer"),
-    ("H069", "Muhammed Shajahan"), ("H070", "A. Harshad"), ("H075", "Mohamed Hassan"), ("H116", "Munawir P Kabeer"),
-    ("H119", "Muhammed Janees P"), ("H118", "Muhammed Shamil P"), ("H127", "Rafsal Rafeek"), ("H112", "Abbas Mohamed MA"),
-    ("H113", "Chadi Otmani"), ("H073", "Jose John"), ("H066", "Christopherlov Brian"), ("H124", "Nethaniel Fernandez M"),
-    ("H067", "Jansher"), ("H100", "Mohammed Sajeer"), ("H120", "Abdul Karim AS"), ("H080", "Muhammed Saleh"),
-    ("H084", "Housine EL Amri"), ("H129", "Pratik Bista"), ("H121", "Afreen Salam"), ("H122", "Mohamed Arsath"),
-    ("H126", "Subin Kovammal"), ("H078", "Abdul Rahman Ayyuob"), ("H079", "Dilip Siwakoti"), ("H101", "Jeffrey Gumban"),
-    ("H109", "AL Ameen"), ("H110", "Mohammed Fameem"), ("H102", "Shameer Manikkunnummal"), ("H128", "Manil Dilusha"),
-    ("H074", "Abdullah Leppa"), ("H098", "Caleb Manaois"), ("H099", "Muhammed Rajas"), ("H103", "Ali Akbar Hassan"),
-    ("H087", "Elmer Flores"), ("H114", "Abdul Khader"), ("H054", "Siddik Abdulla"), ("H062", "Rakshith.p"),
-    ("H059", "Rekhil Kodakka"), ("H063", "Janeesh mullappally"), ("H023", "Adil"), ("H024", "Mohd Musthafa"),
-    ("H005", "Aboobacker Aliyar"), ("H011", "Sudhakaran"), ("H013", "Haris K"), ("H017", "Mujammal"),
-    ("H021", "Saifudheen"), ("H022", "Jose Patibo"), ("H026", "Riyas Ahmed"), ("H034", "Riyasudheen Khuthubudheen"),
-    ("H055", "Shaji"), ("H046", "Shihabudeen"), ("H049", "Shobith"), ("H050", "Ranjith. P"), ("H051", "Shar Bahadar"),
-    ("H053", "Sabeer Ali Chemban"), ("H039", "Ranjith"), ("H041", "Axel Flores"), ("H058", "Sheik Kareem"),
-    ("H064", "Shahul C"), ("H065", "Juancho"), ("H068", "Muhammed Shafiq"), ("H072", "Mohammed Haseeb"),
-    ("H081", "M. Ziaudeen"), ("H085", "Afreed Mahmood"), ("H088", "Shafneed Nazar"), ("H089", "Mohamed Saleh Ibrahem Saleh"),
-    ("H092", "Mohammed Saddam"), ("H131", "Said Ahmed Ibrahim"), ("H105", "Yousaf Nobi"), ("H132", "Ahmed Younis")
-]
-SEED_HELPERS = [h for h in SEED_HELPERS_RAW if str(h[0]).startswith('H')]
-
+# Raw Names Dictionary for Seeding Missing Entities
+RAW_NAME_MAP = {
+    "D085": "Rahul R.P", "D034": "Adil Hassan", "D101": "Tintu V Joseph", "D038": "Ismail Korokkaran", "D107": "Muneeb Hussain", 
+    "D048": "Moideen Azeez", "D104": "Mahammed Ansar", "D040": "Hussain Mohammed", "D019": "Muhammed Kunji", "D064": "Shabeer Ali A.Rahman", 
+    "D029": "Baderudheen", "D036": "Rashid Baderzaman", "D011": "Imran Khan", "D050": "Abdul Mansoor", "D094": "Shuhaib Mullantakath", 
+    "D109": "Yousuf Nobi Shakib", "D010": "Nasar", "D102": "Mohammed Nasiruddeen", "D027": "Sultan", "D024": "Sadiq Shah", 
+    "D023": "Sabir Shah", "D026": "Jahaberudheen", "D032": "Sayd Mubarak", "D047": "Ahmed Faraj", "D061": "Said Alavy", 
+    "D044": "Zainul Abid", "D052": "Noushad Ali", "D099": "Muhammed Noushad P", "D042": "Gulam Khan Mohammad", "D103": "Jamseer PV Ibrahim", 
+    "D037": "Nijavudeen", "D046": "Azeez Abdulla", "D049": "Abdul Jabbar", "D089": "Jisam K Saleem", "D054": "Sameer Zakariyah", 
+    "D088": "Saheer Ali V Z", "D098": "Muhammed Aslam K", "D033": "Naeem Fazal",
+    "H116": "Munawir P Kabeer", "H131": "Said Ahmed Ibrahim", "H121": "Afreen Salam", "H119": "Muhammed Janees P", "H046": "Shihabudeen", 
+    "H070": "A. Harshad", "H129": "Pratik Bista", "H113": "Chadi Otmani", "H132": "Ahmed Younis", "H118": "Muhammed Shamil P", 
+    "H115": "Omar AlSaeed", "H122": "Mohamed Arsath", "H114": "Abdul Khader", "H066": "Christopherlov Brian", "H011": "Sudhakaran", 
+    "H005": "Aboobacker Aliyar", "H023": "Adil", "H050": "Ranjith. P", "H062": "Rakshith.p", "H051": "Shar Bahadar", 
+    "H104": "Mohammed Shakeer", "H130": "Javed Akhtar", "H034": "Riyasudheen Khuthubudheen", "H013": "Haris K", "H109": "AL Ameen", 
+    "H024": "Mohd Musthafa", "H026": "Riyas Ahmed", "H049": "Shobith", "H099": "Muhammed Rajas", "H082": "Hassan Mohammed", 
+    "H017": "Mujammal", "H126": "Subin Kovammal"
+}
 
 def auto_seed_database(force=False):
     seeded = False
@@ -271,10 +252,10 @@ def auto_seed_database(force=False):
             for num, vtype in SEED_VEHICLES: db_fs.collection("vehicles").add({"number": num, "type": vtype})
             seeded = True
         if len(list(db_fs.collection("drivers").limit(1).stream())) == 0:
-            for code, name in SEED_DRIVERS: db_fs.collection("drivers").add({"name": name, "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "Yes", "restriction": "None", "anchor_area": "None"})
+            for code in KEEP_DRIVERS: db_fs.collection("drivers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "Yes", "restriction": "None", "anchor_area": "None"})
             seeded = True
         if len(list(db_fs.collection("helpers").limit(1).stream())) == 0:
-            for code, name in SEED_HELPERS: db_fs.collection("helpers").add({"name": name, "code": code, "restriction": "None", "health_card": "No", "anchor_area": "None"})
+            for code in KEEP_HELPERS: db_fs.collection("helpers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "None", "health_card": "No", "anchor_area": "None"})
             seeded = True
     else:
         c = conn.cursor()
@@ -287,15 +268,14 @@ def auto_seed_database(force=False):
         c.execute("SELECT COUNT(*) FROM drivers")
         if c.fetchone()[0] == 0:
             c.executemany("INSERT INTO vehicles (number, type) VALUES (?, ?)", SEED_VEHICLES)
-            d_seed = [(name, code, "VAN", "None", "Yes", "None", "None") for code, name in SEED_DRIVERS]
+            d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "None", "Yes", "None", "None") for code in KEEP_DRIVERS]
             c.executemany("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed)
-            h_seed = [(name, code, "None", "No", "None") for code, name in SEED_HELPERS]
+            h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
             c.executemany("INSERT INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
             conn.commit()
             seeded = True
             
     if seeded: clear_cache()
-    
 auto_seed_database()
 
 # --- AUTO-CLEANUP ROUTINE FOR OLD/BAD CODES ---
@@ -305,15 +285,15 @@ def clean_legacy_codes():
         if not d_df.empty:
             for _, r in d_df.iterrows():
                 code = str(r.get('code', ''))
-                if not code.startswith('D'):
-                    run_query("DELETE FROM drivers WHERE code=?", (code,), "drivers", "DELETE_DOC", r['id'])
+                if code not in KEEP_DRIVERS:
+                    run_query("DELETE FROM drivers WHERE id=?", (r['id'],), "drivers", "DELETE_DOC", r['id'])
 
         h_df = load_table('helpers')
         if not h_df.empty:
             for _, r in h_df.iterrows():
                 code = str(r.get('code', ''))
-                if not code.startswith('H'):
-                    run_query("DELETE FROM helpers WHERE code=?", (code,), "helpers", "DELETE_DOC", r['id'])
+                if code not in KEEP_HELPERS:
+                    run_query("DELETE FROM helpers WHERE id=?", (r['id'],), "helpers", "DELETE_DOC", r['id'])
     except Exception:
         pass
 clean_legacy_codes()
@@ -519,7 +499,82 @@ if choice == "1. AI Route Planner":
 
     st.divider()
 
-    st.header("⚙️ Generate AI Route Plan")
+    # --- ALWAYS-ON PERSISTENT ROUTE PLANS ---
+    draft_routes = load_table('draft_routes')
+    active_routes = load_table('active_routes')
+    
+    if not draft_routes.empty:
+        st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then click Approve.")
+        disp_draft = draft_routes.copy()
+        
+        # Enforce strict column order perfectly matching the photo requirement
+        disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns]]
+        
+        edited_df = st.data_editor(disp_draft, use_container_width=True, hide_index=True, key="route_editor", column_order=ROUTE_COLUMN_ORDER)
+        
+        col_down, col_app, col_can = st.columns([1, 1, 1])
+        output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
+        col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
+        
+        if col_app.button("✅ Confirm Plan & Save Experiences", type="primary"):
+            run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE") 
+            p_s = today.strftime("%Y-%m-%d")
+            p_e = (today + timedelta(days=30)).strftime("%Y-%m-%d")
+            
+            for index, r in edited_df.iterrows():
+                q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                data_dict = {"order_num":r['S/N'], "area_code":r.get('Area Code', ''), "area_name":r.get('Area Full Name', ''), "driver_code":r.get('Driver Code', ''), "driver_name":r.get('Driver Name', ''), "helper_code":r.get('Helper Code', ''), "helper_name":r.get('Helper Name', ''), "veh_num":r.get('Vehicle Number', ''), "start_date":p_s, "end_date":p_e}
+                run_query(q_ar, (r['S/N'], r.get('Area Code', ''), r.get('Area Full Name', ''), r.get('Driver Code', ''), r.get('Driver Name', ''), r.get('Helper Code', ''), r.get('Helper Name', ''), r.get('Vehicle Number', ''), p_s, p_e), table_name="active_routes", action="INSERT", data=data_dict)
+                
+                for code, name, ptype in [(r.get('Driver Code', ''), r.get('Driver Name', ''), "Driver"), (r.get('Helper Code', ''), r.get('Helper Name', ''), "Helper")]:
+                    if code not in ["UNASSIGNED", "N/A", ""]:
+                        hist_chk = load_table('history')
+                        if hist_chk.empty or len(hist_chk[(hist_chk['person_code']==code) & (hist_chk['area']==r.get('Area Full Name', '')) & (hist_chk['date']==p_s)]) == 0:
+                            run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", (ptype, code, name, r.get('Area Full Name', ''), r.get('Sector', ''), p_s, p_e), table_name="history", action="INSERT", data={"person_type":ptype, "person_code":code, "person_name":name, "area":r.get('Area Full Name', ''), "sector":r.get('Sector', ''), "date":p_s, "end_date":p_e})
+            
+            run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
+            st.success("Plan Approved & Saved! System will remember these sector experiences for next month.")
+            st.rerun()
+            
+        if col_can.button("❌ Cancel Draft", type="secondary"):
+            run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
+            st.rerun()
+            
+        st.divider()
+
+    elif not active_routes.empty:
+        st.subheader("📋 Current Active Route Plan")
+        
+        start_dt = active_routes.iloc[0].get('start_date', 'Unknown')
+        end_dt = active_routes.iloc[0].get('end_date', 'Unknown')
+        st.info(f"🗓️ **Plan Validity:** {start_dt} to {end_dt} (30 Days)")
+        
+        disp_active = active_routes.copy()
+        
+        # Remap database columns to visual columns for perfect display
+        disp_active = disp_active.rename(columns={
+            "driver_code": "Driver Code", "driver_name": "Driver Name", 
+            "area_name": "Area Full Name", "helper_code": "Helper Code", 
+            "helper_name": "Helper Name", "veh_num": "Vehicle Number",
+            "area_code": "Area Code"
+        })
+        disp_active = disp_active[[c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]]
+        if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
+        
+        st.dataframe(disp_active, use_container_width=True, hide_index=True, column_order=ROUTE_COLUMN_ORDER)
+        
+        col_dl, col_rm = st.columns(2)
+        output = generate_excel_with_sn([disp_active], ['Active Route Plan'])
+        col_dl.download_button("📥 Download Active Plan Excel", data=output, file_name=f"Active_Plan_{start_dt}.xlsx")
+        
+        if col_rm.button("🗑️ Remove Current Plan", type="secondary"):
+            run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE")
+            st.rerun()
+            
+        st.divider()
+
+    # --- GENERATE NEW ROUTE ---
+    st.header("⚙️ Generate New AI Route Plan")
     col1, col2 = st.columns(2)
     month_target = col1.date_input("Target Rotation Date", value=today)
     rot_type = col2.radio("Who is rotating this month?", ["Drivers", "Helpers"])
@@ -546,10 +601,9 @@ if choice == "1. AI Route Planner":
         else:
             with st.spinner("Calculating 0-Experience priorities, health cards, and strict 6-month penalties..."):
                 history = load_table('history')
-                active_routes = load_table('active_routes')
                 
                 route_targets = areas.to_dict('records') if not areas.empty else []
-                route_plan = []
+                route_plan, report_log = [], []
                 used_drivers, used_helpers, used_vehicles = set(), set(), set()
 
                 for area in route_targets:
@@ -563,7 +617,7 @@ if choice == "1. AI Route Planner":
                     elif "Consumer" in req_sector: div_cat = "CONSUMER DIVISION"
                         
                     prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
-                    a_d_code, a_d_name, a_h_code, a_h_name, a_v_num = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED"
+                    a_d_code, a_d_name, a_h_code, a_h_name, a_v_num, log_reason = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "No pool left"
 
                     if rot_type == "Drivers":
                         if needs_helper and not prev_assignment.empty and prev_assignment.iloc[0].get('helper_code') not in ["N/A", "UNASSIGNED", None]:
@@ -581,9 +635,9 @@ if choice == "1. AI Route Planner":
                             used_vehicles.add(a_v_num)
 
                         avail_dr = all_d[~all_d['code'].isin(used_drivers)]
-                        best_d, _ = select_best_candidate(avail_dr, area_name, req_sector, month_target, history, vacs, role="Driver")
+                        best_d, d_reason = select_best_candidate(avail_dr, area_name, req_sector, month_target, history, vacs, role="Driver")
                         if best_d is not None:
-                            a_d_code, a_d_name = best_d['code'], best_d['name']
+                            a_d_code, a_d_name, log_reason = best_d['code'], best_d['name'], f"DRIVER -> {d_reason}"
                             used_drivers.add(a_d_code)
                             if best_d.get('needs_helper') == 'No': needs_helper = False
                             
@@ -606,9 +660,9 @@ if choice == "1. AI Route Planner":
                             
                         if needs_helper:
                             avail_hl = all_h[~all_h['code'].isin(used_helpers)]
-                            best_h, _ = select_best_candidate(avail_hl, area_name, req_sector, month_target, history, vacs, role="Helper")
+                            best_h, h_reason = select_best_candidate(avail_hl, area_name, req_sector, month_target, history, vacs, role="Helper")
                             if best_h is not None:
-                                a_h_code, a_h_name = best_h['code'], best_h['name']
+                                a_h_code, a_h_name, log_reason = best_h['code'], best_h['name'], f"HELPER -> {h_reason}"
                                 used_helpers.add(a_h_code)
 
                     if not needs_helper: a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
@@ -624,71 +678,22 @@ if choice == "1. AI Route Planner":
                             a_v_num = avail_v.iloc[0]['number']
                             used_vehicles.add(a_v_num)
 
-                    # DIRECTLY SAVE TO DRAFT DATABASE
-                    q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                    run_query(q_dr, (len(route_plan)+1, area['code'], area_name, req_sector, a_d_code, a_d_name, a_h_code, a_h_name, a_v_num, div_cat), table_name="draft_routes", action="INSERT", data={"order_num":len(route_plan)+1, "area_code":area['code'], "area_name":area_name, "sector":req_sector, "driver_code":a_d_code, "driver_name":a_d_name, "helper_code":a_h_code, "helper_name":a_h_name, "veh_num":a_v_num, "div_cat":div_cat})
-                    route_plan.append({"div": div_cat})
+                    # Export in exact column arrangement to match the Photo visually
+                    route_plan.append({
+                        "Driver Code": a_d_code, "Driver Name": a_d_name, 
+                        "Area Full Name": area_name, "Helper Code": a_h_code, "Helper Name": a_h_name, 
+                        "Vehicle Number": a_v_num, "Division Category": div_cat, "Area Code": area['code'], "Sector": req_sector
+                    })
+                    report_log.append({"Area": area_name, "Driver": a_d_name, "Helper": a_h_name, "AI Logic Reason": log_reason})
 
+                # Clear old drafts and save new draft
+                run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
+                for index, r in enumerate(route_plan):
+                    q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    run_query(q_dr, (index+1, r['Area Code'], r['Area Full Name'], r['Sector'], r['Driver Code'], r['Driver Name'], r['Helper Code'], r['Helper Name'], r['Vehicle Number'], r['Division Category']), table_name="draft_routes", action="INSERT", data={"order_num":index+1, "area_code":r['Area Code'], "area_name":r['Area Full Name'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Driver Name'], "helper_code":r['Helper Code'], "helper_name":r['Helper Name'], "veh_num":r['Vehicle Number'], "div_cat":r['Division Category']})
+                
                 st.session_state.bypass_validation = False
                 st.rerun()
-
-    # --- ALWAYS-ON PERSISTENT ROUTE PLAN ---
-    draft_routes = load_table('draft_routes')
-    active_routes = load_table('active_routes')
-    
-    if not draft_routes.empty:
-        st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then click Approve.")
-        disp_draft = draft_routes.drop(columns=['id', 'start_date', 'end_date'], errors='ignore').copy()
-        if 'S/N' not in disp_draft.columns: disp_draft.insert(0, 'S/N', range(1, 1 + len(disp_draft)))
-        
-        edited_df = st.data_editor(disp_draft, use_container_width=True, hide_index=True, key="route_editor")
-        
-        col_down, col_app, col_can = st.columns([1, 1, 1])
-        output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
-        col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
-        
-        if col_app.button("✅ Confirm Plan & Save Experiences", type="primary"):
-            run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE") 
-            p_s = today.strftime("%Y-%m-%d")
-            p_e = (today + timedelta(days=30)).strftime("%Y-%m-%d")
-            
-            for index, r in edited_df.iterrows():
-                q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                data_dict = {"order_num":r['S/N'], "area_code":r.get('area_code', ''), "area_name":r.get('area_name', ''), "driver_code":r.get('driver_code', ''), "driver_name":r.get('driver_name', ''), "helper_code":r.get('helper_code', ''), "helper_name":r.get('helper_name', ''), "veh_num":r.get('veh_num', ''), "start_date":p_s, "end_date":p_e}
-                run_query(q_ar, (r['S/N'], r.get('area_code', ''), r.get('area_name', ''), r.get('driver_code', ''), r.get('driver_name', ''), r.get('helper_code', ''), r.get('helper_name', ''), r.get('veh_num', ''), p_s, p_e), table_name="active_routes", action="INSERT", data=data_dict)
-                
-                for code, name, ptype in [(r.get('driver_code', ''), r.get('driver_name', ''), "Driver"), (r.get('helper_code', ''), r.get('helper_name', ''), "Helper")]:
-                    if code not in ["UNASSIGNED", "N/A", ""]:
-                        hist_chk = load_table('history')
-                        if hist_chk.empty or len(hist_chk[(hist_chk['person_code']==code) & (hist_chk['area']==r.get('area_name', '')) & (hist_chk['date']==p_s)]) == 0:
-                            run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", (ptype, code, name, r.get('area_name', ''), r.get('sector', ''), p_s, p_e), table_name="history", action="INSERT", data={"person_type":ptype, "person_code":code, "person_name":name, "area":r.get('area_name', ''), "sector":r.get('sector', ''), "date":p_s, "end_date":p_e})
-            
-            run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
-            st.success("Plan Approved & Saved! System will remember these sector experiences for next month.")
-            st.rerun()
-            
-        if col_can.button("❌ Cancel Draft", type="secondary"):
-            run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
-            st.rerun()
-
-    elif not active_routes.empty:
-        st.subheader("📋 Current Active Route Plan")
-        
-        start_dt = active_routes.iloc[0].get('start_date', 'Unknown')
-        end_dt = active_routes.iloc[0].get('end_date', 'Unknown')
-        st.info(f"🗓️ **Plan Validity:** {start_dt} to {end_dt} (30 Days)")
-        
-        disp_active = active_routes.drop(columns=['id', 'start_date', 'end_date'], errors='ignore').copy()
-        if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
-        st.dataframe(disp_active, use_container_width=True, hide_index=True)
-        
-        col_dl, col_rm = st.columns(2)
-        output = generate_excel_with_sn([disp_active], ['Active Route Plan'])
-        col_dl.download_button("📥 Download Active Plan Excel", data=output, file_name=f"Active_Plan_{start_dt}.xlsx")
-        
-        if col_rm.button("🗑️ Remove Current Plan", type="secondary"):
-            run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE")
-            st.rerun()
 
 
 # ==========================================
@@ -928,7 +933,6 @@ elif choice == "3. Past Experience Builder":
             p_end_date = d2.date_input("To Date (End)")
             
             if st.button("➕ Add Past Experience", use_container_width=True):
-                # Clean up extraction
                 raw_split = p_person.split("] ")[1].split(" - ")
                 p_code, p_name = raw_split[0], raw_split[1]
                 
