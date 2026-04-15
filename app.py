@@ -18,38 +18,52 @@ conn = None
 try:
     if "firebase" in st.secrets:
         if not firebase_admin._apps:
+            # Securely parse Streamlit secrets into standard dictionary
             cert_dict = dict(st.secrets["firebase"])
+            
+            # Bulletproof PEM reconstruction to prevent any formatting crashes
             raw_key = str(cert_dict.get("private_key", ""))
             clean_key = raw_key.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "")
             clean_key = clean_key.replace("\\n", "").replace("\n", "").replace("\r", "").replace(" ", "").replace('"', "").replace("'", "").strip()
             wrapped_key = '\n'.join(textwrap.wrap(clean_key, 64))
             cert_dict["private_key"] = f"-----BEGIN PRIVATE KEY-----\n{wrapped_key}\n-----END PRIVATE KEY-----\n"
+            
             cred = credentials.Certificate(cert_dict)
             firebase_admin.initialize_app(cred)
+            
         db_fs = firestore.client()
         FIREBASE_READY = True
+        
     elif os.path.exists("firebase-key.json"):
         if not firebase_admin._apps:
             cred = credentials.Certificate("firebase-key.json")
             firebase_admin.initialize_app(cred)
+            
         db_fs = firestore.client()
         FIREBASE_READY = True
     else:
+        st.sidebar.error("⚠️ No Firebase configuration found in Streamlit Secrets.")
         FIREBASE_READY = False
 
+    # Connection Ping Test
     if FIREBASE_READY:
         try:
             list(db_fs.collection("_system_ping").limit(1).stream())
-        except Exception:
+        except Exception as ping_error:
+            if "429" in str(ping_error) or "Quota" in str(ping_error) or "ResourceExhausted" in str(ping_error):
+                st.sidebar.error("🚨 Firebase Daily Free Quota Exceeded! Firebase is temporarily paused. Please check Google Cloud Console.")
+            else:
+                st.sidebar.error(f"⚠️ Firebase Database is unreachable: {ping_error}")
             FIREBASE_READY = False
 
 except Exception as e:
+    st.sidebar.error(f"Firebase Config Error: {str(e)}")
     FIREBASE_READY = False
 
 if FIREBASE_READY:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢</div>", unsafe_allow_html=True)
+    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢 Firebase Connected</div>", unsafe_allow_html=True)
 else:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴</div>", unsafe_allow_html=True)
+    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴 Firebase Disconnected</div>", unsafe_allow_html=True)
 
 # SQLite Fallback Initialization
 def init_sqlite_db():
@@ -90,11 +104,15 @@ if not FIREBASE_READY:
     conn = init_sqlite_db()
 
 
-# --- SMART DB QUERY HANDLER (FIXED FOR QUOTA & EDITING) ---
-@st.cache_data(show_spinner=False)
+# --- SMART DB QUERY HANDLER (CACHE PROTECTS FIREBASE QUOTA) ---
+def clear_cache():
+    st.cache_data.clear()
+
+# IMPORTANT: The cache blocks Streamlit from spamming Firebase on every keypress!
+@st.cache_data(show_spinner=False, ttl=600)
 def load_table(table_name):
-    try:
-        if FIREBASE_READY:
+    if FIREBASE_READY:
+        try:
             docs = db_fs.collection(table_name).stream()
             data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
             df = pd.DataFrame(data)
@@ -120,24 +138,23 @@ def load_table(table_name):
                 
             if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
             return df
-        else:
-            df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-            if table_name == 'areas' and not df.empty: 
-                df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
-                df = df.sort_values(by='sort_order')
-            if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
-                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-                df = df.sort_values(by='order_num')
-            if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
-                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-                df = df.sort_values(by='order_num')
-            if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
-            if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
-            return df
-    except Exception as e:
-        if "ResourceExhausted" in str(e) or "429" in str(e):
-            st.error("🚨 Firebase Free Quota Exceeded for today! Data cannot be loaded right now.")
-        return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Error reading from Firebase: {e}")
+            return pd.DataFrame()
+    else:
+        df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        if table_name == 'areas' and not df.empty: 
+            df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
+            df = df.sort_values(by='sort_order')
+        if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
+        if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
+        if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
+        if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
+        return df
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
     try:
@@ -154,11 +171,11 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 c.execute(query, params)
                 conn.commit()
                 
-        # CLEAR CACHE IMMEDIATELY UPON SUCCESS (Allows real-time editing without quota drain)
+        # Instantly wipe memory so the next screen shows the new data!
         st.cache_data.clear()
         return True
     except Exception as e:
-        st.error(f"Database Error: {str(e)}")
+        st.error(f"Database Edit Failed: {str(e)}")
         return False
 
 def generate_excel_with_sn(df_list, sheet_names):
@@ -178,7 +195,7 @@ def generate_excel_with_sn(df_list, sheet_names):
 # --- OPTIONS ---
 VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
-NEEDS_HELPER_OPTIONS = ["Yes", "No", "Optional"]
+NEEDS_HELPER_OPTIONS = ["Yes", "No", "None"]
 ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Driver Name", "Area Full Name", "Helper Code", "Helper Name", "Vehicle Number", "Division Category", "Area Code", "Sector"]
 
 # --- STRICT HARDCODED ALLOWLISTS ---
@@ -397,7 +414,6 @@ PRELOAD_HISTORY = [
 if "db_initialized" not in st.session_state:
     def execute_global_init():
         try:
-            # Seed Areas
             current_areas = load_table("areas")
             if len(current_areas) != 39:
                 if FIREBASE_READY:
@@ -410,7 +426,6 @@ if "db_initialized" not in st.session_state:
                     c.executemany("INSERT INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
                     conn.commit()
             
-            # Seed Missing Drivers/Helpers
             d_df = load_table('drivers')
             if len(d_df) == 0:
                 if FIREBASE_READY:
@@ -713,21 +728,21 @@ if choice == "1. AI Route Planner":
     
     areas = load_table('areas')
     vehicles = load_table('vehicles')
-
-    if "bypass_val" not in st.session_state:
-        st.session_state.bypass_val = False
+    
+    if "force_bypass" not in st.session_state:
+        st.session_state.force_bypass = False
 
     generate_clicked = st.button("Generate Smart AI Route Plan", type="primary")
 
-    if generate_clicked or st.session_state.bypass_val:
+    if generate_clicked or st.session_state.force_bypass:
         val_errors = check_route_requirements(areas, all_d, all_h, vehicles, vacs, month_target)
         
-        if val_errors and not st.session_state.bypass_val:
+        if val_errors and not st.session_state.force_bypass:
             st.error("🚨 **ROUTE GENERATION HALTED: DATABASE SHORTAGE DETECTED**")
             for err in val_errors: st.warning(err)
             st.markdown("Cannot fulfill the 39-Route Plan with current database. Please add the missing vehicles/drivers, or bypass this warning to assign what you have.")
             if st.button("⚠️ Bypass Warnings & Force Generate"):
-                st.session_state.bypass_val = True
+                st.session_state.force_bypass = True
                 st.rerun()
         else:
             with st.spinner("Calculating 0-Experience priorities, health cards, and strict 6-month penalties..."):
@@ -824,7 +839,7 @@ if choice == "1. AI Route Planner":
                     q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     run_query(q_dr, (index+1, r['Area Code'], r['Area Full Name'], r['Sector'], r['Driver Code'], r['Driver Name'], r['Helper Code'], r['Helper Name'], r['Vehicle Number'], r['Division Category']), table_name="draft_routes", action="INSERT", data={"order_num":index+1, "area_code":r['Area Code'], "area_name":r['Area Full Name'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Driver Name'], "helper_code":r['Helper Code'], "helper_name":r['Helper Name'], "veh_num":r['Vehicle Number'], "div_cat":r['Division Category']})
                 
-                st.session_state.bypass_val = False
+                st.session_state.force_bypass = False
                 st.rerun()
 
 
