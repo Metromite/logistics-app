@@ -1,15 +1,4 @@
-This update restores the absolute stability of the previous version while carefully layering your new features. All pages will open instantly, the database will save perfectly, and no functionality is lost.
 
-Here is how the new requirements are seamlessly integrated:
-1. **Empty Table Fix:** I added deep database migrations. Your system now perfectly stores `div_cat` and `sector` in the background tables so the AI Route Planner will never show an empty table again.
-2. **Drafts Survive Refreshes:** The generated plan saves safely to a Draft Database. If you accidentally refresh the page, close your browser, or lose internet, your draft will be waiting for you.
-3. **Live Search Bars Everywhere:** Every single tab (Drivers, Helpers, Areas, Vehicles, History, Vacations) now has its own dedicated search bar. 
-4. **Deep Date Search:** In Past Experiences, you can now search by `2024`, `05`, `2024-05`, or the exact day.
-5. **Inline Double-Click Editing:** Every table across the app is now interactive. Double-click any cell to edit it manually (like Excel), and click the "💾 Save Inline Edits" button below it to instantly sync to the database.
-6. **"None" for Helpers:** Drivers and Areas now use `None` instead of `Optional` in the Needs Helper dropdown.
-7. **Bypass Button Repaired:** The bypass sequence is now properly hooked into Streamlit's internal memory. Clicking it will force the AI to build the route with whatever staff is available.
-
-### Copy & Paste this entire code into `app.py`:
 
 ```python
 import streamlit as st
