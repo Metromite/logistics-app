@@ -1,12 +1,3 @@
-This update completely resolves the **Empty Table** bug during route generation, introduces **Live Search Bars** for every single database table, adds deep **Date Searching** for Past Experiences, and unlocks powerful **Inline Double-Click Editing** across the entire application!
-
-Here is the technical breakdown of the fixes and features:
-1. **Empty Route Table Fixed:** Your local SQLite database was missing the new `div_cat` and `sector` columns for the draft tables. When the AI tried to save the route, the database crashed invisibly, resulting in an empty screen. I wrote a background migration that instantly upgrades your database to support these columns.
-2. **Inline Double-Click Editing:** You can now double-click *any cell* in *any table* (Drivers, Helpers, Areas, Vehicles, History, Vacations) to edit it directly. Click the new **"💾 Save Inline Edits"** button below the table, and it will instantly update the database. *(Since native data tables don't support custom drop-downs, you can type manually directly in the cell, OR use the guided drop-down forms at the bottom of the page!)*
-3. **Advanced Live Search:** Every tab now features a Search Bar. For the **Past Experience** tab, I added a dedicated **Date Search Bar**. You can type `2024`, `05`, or `2024-05` and it will instantly filter the exact dates you are looking for.
-
-### Copy & Paste this entire code into `app.py`:
-
 ```python
 import streamlit as st
 import sqlite3
