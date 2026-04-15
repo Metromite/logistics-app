@@ -65,7 +65,6 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS draft_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT, start_date TEXT, end_date TEXT, div_cat TEXT, sector TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS performance (id INTEGER PRIMARY KEY, person_code TEXT, area TEXT, success_rate REAL, delay_count INTEGER)''')
     
-    # Advanced Migrations to fix "Empty Generation Table" Bugs
     for query in [
         "ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'",
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
@@ -80,10 +79,6 @@ def init_sqlite_db():
         "ALTER TABLE vehicles ADD COLUMN anchor_area TEXT DEFAULT 'None'",
         "ALTER TABLE active_routes ADD COLUMN start_date TEXT DEFAULT 'None'",
         "ALTER TABLE active_routes ADD COLUMN end_date TEXT DEFAULT 'None'",
-        "ALTER TABLE active_routes ADD COLUMN div_cat TEXT DEFAULT 'PHARMA DIVISION'",
-        "ALTER TABLE active_routes ADD COLUMN sector TEXT DEFAULT 'Pharma'",
-        "ALTER TABLE draft_routes ADD COLUMN div_cat TEXT DEFAULT 'PHARMA DIVISION'",
-        "ALTER TABLE draft_routes ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE vacations ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'"
     ]:
         try: c.execute(query)
@@ -95,39 +90,34 @@ if not FIREBASE_READY:
     conn = init_sqlite_db()
 
 
-# --- SMART DB QUERY HANDLER ---
-@st.cache_data(show_spinner=False, ttl=600)
+# --- SAFE DB QUERY HANDLER ---
 def load_table(table_name):
     if FIREBASE_READY:
-        try:
-            docs = db_fs.collection(table_name).stream()
-            data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
-            df = pd.DataFrame(data)
-            if table_name == 'helpers' and 'health_card' not in df.columns and not df.empty: df['health_card'] = 'No'
-            if table_name == 'drivers' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
-            if table_name == 'areas' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
-            if table_name == 'areas' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
-            if table_name == 'areas' and 'sort_order' not in df.columns and not df.empty: df['sort_order'] = 99
-            if table_name == 'history' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
-            if table_name == 'vehicles' and 'anchor_area' not in df.columns and not df.empty: df['anchor_area'] = 'None'
-            if table_name == 'active_routes' and 'start_date' not in df.columns and not df.empty: df['start_date'] = 'None'
-            if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
+        docs = db_fs.collection(table_name).stream()
+        data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
+        df = pd.DataFrame(data)
+        if table_name == 'helpers' and 'health_card' not in df.columns and not df.empty: df['health_card'] = 'No'
+        if table_name == 'drivers' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
+        if table_name == 'areas' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
+        if table_name == 'areas' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
+        if table_name == 'areas' and 'sort_order' not in df.columns and not df.empty: df['sort_order'] = 99
+        if table_name == 'history' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
+        if table_name == 'vehicles' and 'anchor_area' not in df.columns and not df.empty: df['anchor_area'] = 'None'
+        if table_name == 'active_routes' and 'start_date' not in df.columns and not df.empty: df['start_date'] = 'None'
+        if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
+        
+        if table_name == 'areas' and not df.empty:
+            df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
+            df = df.sort_values(by='sort_order')
+        if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
+        if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
             
-            if table_name == 'areas' and not df.empty:
-                df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
-                df = df.sort_values(by='sort_order')
-            if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
-                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-                df = df.sort_values(by='order_num')
-            if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
-                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-                df = df.sort_values(by='order_num')
-                
-            if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
-            return df
-        except Exception as e:
-            st.error(f"Error reading from Firebase: {e}")
-            return pd.DataFrame()
+        if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
+        return df
     else:
         df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
         if table_name == 'areas' and not df.empty: 
@@ -157,8 +147,6 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 c = conn.cursor()
                 c.execute(query, params)
                 conn.commit()
-                
-        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"Database Error: {str(e)}")
@@ -600,7 +588,7 @@ if choice == "1. AI Route Planner":
     active_routes = load_table('active_routes')
     
     if not draft_routes.empty:
-        st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then click Approve.")
+        st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then click Confirm.")
         disp_draft = draft_routes.copy()
         disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns]]
         
@@ -676,23 +664,20 @@ if choice == "1. AI Route Planner":
     areas = load_table('areas')
     vehicles = load_table('vehicles')
     
-    if "attempt_gen" not in st.session_state: st.session_state.attempt_gen = False
-    if "bypass_val" not in st.session_state: st.session_state.bypass_val = False
+    if "force_bypass" not in st.session_state:
+        st.session_state.force_bypass = False
 
-    col_g, col_b = st.columns(2)
-    if col_g.button("Generate Smart AI Route Plan", type="primary"):
-        st.session_state.attempt_gen = True
-        st.session_state.bypass_val = False
+    generate_clicked = st.button("Generate Smart AI Route Plan", type="primary")
 
-    if st.session_state.attempt_gen:
+    if generate_clicked or st.session_state.force_bypass:
         val_errors = check_route_requirements(areas, all_d, all_h, vehicles, vacs, month_target)
         
-        if val_errors and not st.session_state.bypass_val:
+        if val_errors and not st.session_state.force_bypass:
             st.error("🚨 **ROUTE GENERATION HALTED: DATABASE SHORTAGE DETECTED**")
             for err in val_errors: st.warning(err)
             st.markdown("Cannot fulfill the 39-Route Plan with current database. Please add the missing vehicles/drivers, or bypass this warning to assign what you have.")
-            if col_b.button("⚠️ Bypass Warnings & Force Generate"):
-                st.session_state.bypass_val = True
+            if st.button("⚠️ Bypass Warnings & Force Generate"):
+                st.session_state.force_bypass = True
                 st.rerun()
         else:
             with st.spinner("Calculating 0-Experience priorities, health cards, and strict 6-month penalties..."):
@@ -789,574 +774,5 @@ if choice == "1. AI Route Planner":
                     q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     run_query(q_dr, (index+1, r['Area Code'], r['Area Full Name'], r['Sector'], r['Driver Code'], r['Driver Name'], r['Helper Code'], r['Helper Name'], r['Vehicle Number'], r['Division Category']), table_name="draft_routes", action="INSERT", data={"order_num":index+1, "area_code":r['Area Code'], "area_name":r['Area Full Name'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Driver Name'], "helper_code":r['Helper Code'], "helper_name":r['Helper Name'], "veh_num":r['Vehicle Number'], "div_cat":r['Division Category']})
                 
-                st.session_state.attempt_gen = False
-                st.session_state.bypass_val = False
+                st.session_state.force_bypass = False
                 st.rerun()
-
-
-# ==========================================
-# SCREEN 2: DATABASE MANAGEMENT
-# ==========================================
-elif choice == "2. Database Management":
-    st.header("🗄️ Manage Database")
-    
-    areas_df = load_table('areas')
-    area_list = ["None"] + (areas_df['name'].tolist() if not areas_df.empty else [])
-    
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Bulk Excel Sync"])
-
-    with tab1:
-        st.subheader("📋 Full Drivers List")
-        drivers_df = load_table('drivers')
-        
-        search_d = st.text_input("🔍 Search Drivers by Code or Name", "")
-        disp_df = drivers_df.drop(columns=['restriction'], errors='ignore').copy()
-        if search_d:
-            disp_df = disp_df[disp_df['code'].astype(str).str.contains(search_d, case=False, na=False) | disp_df['name'].astype(str).str.contains(search_d, case=False, na=False)]
-        
-        if not disp_df.empty: disp_df.insert(0, 'S/N', range(1, 1 + len(disp_df)))
-        
-        st.info("💡 **Tip:** Double-click any cell below to edit text directly! Use the bottom form if you want guided dropdowns.")
-        edited_drivers = st.data_editor(disp_df, use_container_width=True, hide_index=True, key="ed_drv", column_config={"id": st.column_config.Column(disabled=True), "S/N": st.column_config.Column(disabled=True)})
-        
-        if st.button("💾 Save Inline Driver Edits"):
-            for orig, mod in zip(disp_df.to_dict('records'), edited_drivers.to_dict('records')):
-                if orig != mod:
-                    run_query("UPDATE drivers SET name=?, code=?, veh_type=?, sector=?, needs_helper=?, anchor_area=? WHERE id=?", 
-                              (mod['name'], mod['code'], mod['veh_type'], mod['sector'], mod['needs_helper'], mod['anchor_area'], mod['id']), 
-                              table_name="drivers", action="UPDATE", doc_id=mod['id'], data=mod)
-            st.success("Driver Edits Saved!")
-            st.rerun()
-            
-        st.divider()
-        c_add, c_edit = st.columns(2)
-        with c_add:
-            d_name = st.text_input("New Driver Name", key="add_d_name")
-            d_code = st.text_input("New Driver Code", key="add_d_code")
-            col_t, col_s, col_h = st.columns(3)
-            d_type = col_t.selectbox("New Driver Veh Type", VEHICLE_OPTIONS, key="add_d_type")
-            d_sec = col_s.selectbox("New Driver Sector", SECTOR_OPTIONS, key="add_d_sec")
-            d_needs_h = col_h.selectbox("New Driver Needs Helper?", NEEDS_HELPER_OPTIONS, index=2, key="add_d_nh")
-            d_anchor = st.selectbox("New Driver Anchor Area", area_list, key="add_d_anchor")
-            if st.button("➕ Add Driver", use_container_width=True):
-                if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                          (d_name, d_code, d_type, d_sec, d_needs_h, "None", d_anchor), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":d_type, "sector":d_sec, "needs_helper":d_needs_h, "restriction":"None", "anchor_area":d_anchor}):
-                    st.success("Driver Added!")
-                    st.rerun()
-
-        with c_edit:
-            sel_d_code = st.selectbox("Select Driver to Delete/Edit from Dropdowns", drivers_df['code'].tolist() if not drivers_df.empty else [])
-            if sel_d_code:
-                d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
-                e_name = st.text_input("Edit Driver Name", d_data['name'], key=f"edit_d_name_{d_data['id']}")
-                ct, cs, ch = st.columns(3)
-                e_type = ct.selectbox("Edit Driver Veh Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(d_data.get('veh_type', 'None')) if d_data.get('veh_type') in VEHICLE_OPTIONS else 0, key=f"edit_d_veh_{d_data['id']}")
-                e_sec = cs.selectbox("Edit Driver Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(d_data.get('sector', 'None')) if d_data.get('sector') in SECTOR_OPTIONS else 0, key=f"edit_d_sec_{d_data['id']}")
-                e_needs_h = ch.selectbox("Edit Driver Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(d_data.get('needs_helper', 'None')) if d_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 2, key=f"edit_d_nh_{d_data['id']}")
-                
-                a_idx = area_list.index(d_data.get('anchor_area', 'None')) if d_data.get('anchor_area', 'None') in area_list else 0
-                e_anchor = st.selectbox("Edit Driver Anchor", area_list, index=a_idx, key=f"edit_d_anc_{d_data['id']}")
-                
-                c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update via Dropdown", use_container_width=True, key=f"btn_d_upd_{d_data['id']}"):
-                    if run_query("UPDATE drivers SET name=?, veh_type=?, sector=?, needs_helper=?, anchor_area=? WHERE code=?", (e_name, e_type, e_sec, e_needs_h, e_anchor, sel_d_code), table_name="drivers", action="UPDATE", doc_id=d_data['id'], data={"name":e_name, "veh_type":e_type, "sector":e_sec, "needs_helper":e_needs_h, "anchor_area":e_anchor}):
-                        st.success("Driver Updated!")
-                        st.rerun()
-                if c_del.button("🗑️ Delete Driver", use_container_width=True, key=f"btn_d_del_{d_data['id']}"):
-                    if run_query("DELETE FROM drivers WHERE code=?", (sel_d_code,), table_name="drivers", action="DELETE_DOC", doc_id=d_data['id']):
-                        st.success("Driver Deleted!")
-                        st.rerun()
-
-    with tab2:
-        st.subheader("📋 Full Helpers List")
-        helpers_df = load_table('helpers')
-        
-        search_h = st.text_input("🔍 Search Helpers by Code or Name", "")
-        disp_h = helpers_df.drop(columns=['restriction'], errors='ignore').copy()
-        if search_h:
-            disp_h = disp_h[disp_h['code'].astype(str).str.contains(search_h, case=False, na=False) | disp_h['name'].astype(str).str.contains(search_h, case=False, na=False)]
-            
-        if not disp_h.empty: disp_h.insert(0, 'S/N', range(1, 1 + len(disp_h)))
-        
-        st.info("💡 **Tip:** Double-click any cell below to edit text directly! Use the bottom form if you want guided dropdowns.")
-        edited_helpers = st.data_editor(disp_h, use_container_width=True, hide_index=True, key="ed_hlp", column_config={"id": st.column_config.Column(disabled=True), "S/N": st.column_config.Column(disabled=True)})
-        
-        if st.button("💾 Save Inline Helper Edits"):
-            for orig, mod in zip(disp_h.to_dict('records'), edited_helpers.to_dict('records')):
-                if orig != mod:
-                    run_query("UPDATE helpers SET name=?, code=?, health_card=?, anchor_area=? WHERE id=?", 
-                              (mod['name'], mod['code'], mod['health_card'], mod['anchor_area'], mod['id']), 
-                              table_name="helpers", action="UPDATE", doc_id=mod['id'], data=mod)
-            st.success("Helper Edits Saved!")
-            st.rerun()
-            
-        st.divider()
-        c_add, c_edit = st.columns(2)
-        with c_add:
-            h_name = st.text_input("New Helper Name", key="add_h_name")
-            h_code = st.text_input("New Helper Code", key="add_h_code")
-            h_health = st.selectbox("New Helper Health Card?", ["No", "Yes"], key="add_h_hc")
-            h_anchor = st.selectbox("New Helper Anchor Area", area_list, key="add_h_anc")
-            if st.button("➕ Add Helper", use_container_width=True):
-                if run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area) VALUES (?, ?, ?, ?, ?)", (h_name, h_code, h_health, "None", h_anchor), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"None", "anchor_area":h_anchor}):
-                    st.success("Helper Added!")
-                    st.rerun()
-        with c_edit:
-            sel_h_code = st.selectbox("Select Helper to Delete/Edit from Dropdowns", helpers_df['code'].tolist() if not helpers_df.empty else [])
-            if sel_h_code:
-                h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
-                e_hname = st.text_input("Edit Helper Name", h_data['name'], key=f"edit_h_name_{h_data['id']}")
-                e_hhealth = st.selectbox("Edit Helper Health Card", ["No", "Yes"], index=1 if h_data.get('health_card') == "Yes" else 0, key=f"edit_h_hc_{h_data['id']}")
-                ha_idx = area_list.index(h_data.get('anchor_area', 'None')) if h_data.get('anchor_area', 'None') in area_list else 0
-                e_hanchor = st.selectbox("Edit Helper Anchor", area_list, index=ha_idx, key=f"edit_h_anc_{h_data['id']}")
-                
-                c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update via Dropdown", use_container_width=True, key=f"btn_h_upd_{h_data['id']}"):
-                    if run_query("UPDATE helpers SET name=?, health_card=?, anchor_area=? WHERE code=?", (e_hname, e_hhealth, e_hanchor, sel_h_code), table_name="helpers", action="UPDATE", doc_id=h_data['id'], data={"name":e_hname, "health_card":e_hhealth, "anchor_area":e_hanchor}):
-                        st.success("Helper Updated!")
-                        st.rerun()
-                if c_del.button("🗑️ Delete Helper", use_container_width=True, key=f"btn_h_del_{h_data['id']}"):
-                    if run_query("DELETE FROM helpers WHERE code=?", (sel_h_code,), table_name="helpers", action="DELETE_DOC", doc_id=h_data['id']):
-                        st.success("Helper Deleted!")
-                        st.rerun()
-
-    with tab3:
-        st.subheader("📋 Full Areas Route Template")
-        a_df = load_table('areas')
-        
-        search_a = st.text_input("🔍 Search Area by Name or Code", "")
-        disp_a = a_df.drop(columns=['sort_order'], errors='ignore').copy()
-        if search_a:
-            disp_a = disp_a[disp_a['code'].astype(str).str.contains(search_a, case=False, na=False) | disp_a['name'].astype(str).str.contains(search_a, case=False, na=False)]
-            
-        if not disp_a.empty: disp_a.insert(0, 'S/N', range(1, 1 + len(disp_a)))
-        
-        st.info("💡 **Tip:** Double-click any cell below to edit text directly! Use the bottom form if you want guided dropdowns.")
-        edited_areas = st.data_editor(disp_a, use_container_width=True, hide_index=True, key="ed_area", column_config={"id": st.column_config.Column(disabled=True), "S/N": st.column_config.Column(disabled=True)})
-        
-        if st.button("💾 Save Inline Area Edits"):
-            for orig, mod in zip(disp_a.to_dict('records'), edited_areas.to_dict('records')):
-                if orig != mod:
-                    run_query("UPDATE areas SET name=?, code=?, sector=?, needs_helper=? WHERE id=?", 
-                              (mod['name'], mod['code'], mod['sector'], mod['needs_helper'], mod['id']), 
-                              table_name="areas", action="UPDATE", doc_id=mod['id'], data=mod)
-            st.success("Area Edits Saved!")
-            st.rerun()
-
-        st.divider()
-        c_add, c_edit = st.columns(2)
-        with c_add:
-            a_name = st.text_input("New Area Name", key="add_a_name")
-            a_code = st.text_input("New Area Code", key="add_a_code")
-            col_s, col_n = st.columns(2)
-            a_sec = col_s.selectbox("New Area Sector", SECTOR_OPTIONS, key="add_a_sec")
-            a_needs = col_n.selectbox("New Area Needs Helper?", NEEDS_HELPER_OPTIONS, key="add_a_nh")
-            if st.button("➕ Add Area", use_container_width=True):
-                new_order = len(a_df) + 1
-                if run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", (a_name, a_code, a_sec, a_needs, new_order), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":a_sec, "needs_helper":a_needs, "sort_order":new_order}):
-                    st.success("Area Added!")
-                    st.rerun()
-        with c_edit:
-            sel_a = st.selectbox("Select Area to Delete/Edit from Dropdowns", a_df['name'].tolist() if not a_df.empty else [])
-            if sel_a:
-                a_data = a_df[a_df['name'] == sel_a].iloc[0]
-                ea_name = st.text_input("Edit Area Name", a_data['name'], key=f"edit_a_name_{a_data['id']}")
-                ea_code = st.text_input("Edit Area Code", a_data['code'], key=f"edit_a_code_{a_data['id']}")
-                ecs, ecn = st.columns(2)
-                ea_sec = ecs.selectbox("Edit Area Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(a_data.get('sector', 'Pharma')) if a_data.get('sector') in SECTOR_OPTIONS else 0, key=f"edit_a_sec_{a_data['id']}")
-                ea_needs = ecn.selectbox("Edit Area Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(a_data.get('needs_helper', 'Yes')) if a_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 0, key=f"edit_a_nh_{a_data['id']}")
-                
-                cu, cd = st.columns(2)
-                if cu.button("💾 Update via Dropdown", use_container_width=True, key=f"btn_a_upd_{a_data['id']}"):
-                    if run_query("UPDATE areas SET name=?, code=?, sector=?, needs_helper=? WHERE name=?", (ea_name, ea_code, ea_sec, ea_needs, sel_a), table_name="areas", action="UPDATE", doc_id=a_data['id'], data={"name":ea_name, "code":ea_code, "sector":ea_sec, "needs_helper":ea_needs}):
-                        st.success("Area Updated!")
-                        st.rerun()
-                if cd.button("🗑️ Delete Area", use_container_width=True, key=f"btn_a_del_{a_data['id']}"):
-                    if run_query("DELETE FROM areas WHERE name=?", (sel_a,), table_name="areas", action="DELETE_DOC", doc_id=a_data['id']):
-                        st.success("Area Deleted!")
-                        st.rerun()
-
-    with tab4:
-        st.subheader("📋 Full Vehicles List")
-        v_df = load_table('vehicles')
-        
-        search_v = st.text_input("🔍 Search Vehicles by Number", "")
-        disp_v = v_df.copy()
-        if search_v:
-            disp_v = disp_v[disp_v['number'].astype(str).str.contains(search_v, case=False, na=False)]
-            
-        if not disp_v.empty: disp_v.insert(0, 'S/N', range(1, 1 + len(disp_v)))
-        
-        st.info("💡 **Tip:** Double-click any cell below to edit text directly! Use the bottom form if you want guided dropdowns.")
-        edited_veh = st.data_editor(disp_v, use_container_width=True, hide_index=True, key="ed_veh", column_config={"id": st.column_config.Column(disabled=True), "S/N": st.column_config.Column(disabled=True)})
-        
-        if st.button("💾 Save Inline Vehicle Edits"):
-            for orig, mod in zip(disp_v.to_dict('records'), edited_veh.to_dict('records')):
-                if orig != mod:
-                    run_query("UPDATE vehicles SET number=?, type=?, anchor_area=? WHERE id=?", 
-                              (mod['number'], mod['type'], mod['anchor_area'], mod['id']), 
-                              table_name="vehicles", action="UPDATE", doc_id=mod['id'], data=mod)
-            st.success("Vehicle Edits Saved!")
-            st.rerun()
-
-        st.divider()
-        c_add, c_edit = st.columns(2)
-        with c_add:
-            v_num = st.text_input("New Vehicle Number", key="add_v_num")
-            v_type = st.selectbox("New Vehicle Type", VEHICLE_OPTIONS, key="add_v_type")
-            v_anchor = st.selectbox("New Vehicle Anchor Area", area_list, key="add_v_anc")
-            if st.button("➕ Add Vehicle", use_container_width=True):
-                if run_query("INSERT INTO vehicles (number, type, anchor_area) VALUES (?, ?, ?)", (v_num, v_type, v_anchor), table_name="vehicles", action="INSERT", data={"number":v_num, "type":v_type, "anchor_area":v_anchor}):
-                    st.success("Vehicle Added!")
-                    st.rerun()
-        with c_edit:
-            sel_v = st.selectbox("Select Vehicle to Delete/Edit from Dropdowns", v_df['number'].tolist() if not v_df.empty else [])
-            if sel_v:
-                v_data = v_df[v_df['number'] == sel_v].iloc[0]
-                ev_type = st.selectbox("Edit Vehicle Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(v_data.get('type', 'None')) if v_data.get('type') in VEHICLE_OPTIONS else 0, key=f"edit_v_type_{v_data['id']}")
-                va_idx = area_list.index(v_data.get('anchor_area', 'None')) if v_data.get('anchor_area', 'None') in area_list else 0
-                ev_anchor = st.selectbox("Edit Vehicle Anchor Area", area_list, index=va_idx, key=f"edit_v_anc_{v_data['id']}")
-                
-                cu, cd = st.columns(2)
-                if cu.button("💾 Update via Dropdown", use_container_width=True, key=f"btn_v_upd_{v_data['id']}"):
-                    if run_query("UPDATE vehicles SET type=?, anchor_area=? WHERE number=?", (ev_type, ev_anchor, sel_v), table_name="vehicles", action="UPDATE", doc_id=v_data['id'], data={"type":ev_type, "anchor_area":ev_anchor}):
-                        st.success("Vehicle Updated!")
-                        st.rerun()
-                if cd.button("🗑️ Delete Veh", use_container_width=True, key=f"btn_v_del_{v_data['id']}"):
-                    if run_query("DELETE FROM vehicles WHERE number=?", (sel_v,), table_name="vehicles", action="DELETE_DOC", doc_id=v_data['id']):
-                        st.success("Vehicle Deleted!")
-                        st.rerun()
-                
-    with tab5:
-        st.subheader("📥 Export / 📤 Import Database")
-        dfs_to_export = [load_table(t) for t in ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations']]
-        output = generate_excel_with_sn(dfs_to_export, ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations'])
-        st.download_button("📥 Download Master Database (Excel)", data=output, file_name="Master_Database.xlsx", type="primary")
-        
-        uploaded_file = st.file_uploader("Upload your modified Excel to Sync", type=['xlsx'])
-        if uploaded_file and st.button("Sync Data to System", type="primary"):
-            xls = pd.ExcelFile(uploaded_file)
-            for sheet in xls.sheet_names:
-                df = pd.read_excel(xls, sheet_name=sheet)
-                if not FIREBASE_READY: run_query(f"DELETE FROM {sheet}")
-                else: run_query(None, table_name=sheet, action="CLEAR_TABLE")
-
-                for _, row in df.iterrows():
-                    data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N']}
-                    if not FIREBASE_READY:
-                        cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
-                        qmarks = ', '.join(['?'] * len(data_dict))
-                        run_query(f"INSERT INTO {sheet} ({cols}) VALUES ({qmarks})", vals)
-                    else:
-                        run_query(None, table_name=sheet, action="INSERT", data=data_dict)
-            st.success("Database synchronized successfully!")
-            
-        st.divider()
-        st.subheader("🚨 Emergency Route Template Restore")
-        st.warning("If your Areas got messed up, click this to reset the Route Template exactly to your Image Layout.")
-        if st.button("♻️ Restore 39-Row Route Layout", type="primary"):
-            with st.spinner("Restoring layout..."):
-                auto_seed_database(force=True)
-            st.success("Layout restored successfully!")
-            st.rerun()
-
-
-# ==========================================
-# SCREEN 3: PAST EXPERIENCE BUILDER
-# ==========================================
-elif choice == "3. Past Experience Builder":
-    st.header("🕰️ Manage Past Experience")
-    history_df = load_table('history')
-    
-    col_s1, col_s2 = st.columns(2)
-    search_hist = col_s1.text_input("🔍 Search History by Person Code or Name", "")
-    search_date = col_s2.text_input("📅 Search History by Date (Year, Month, or Day)", "")
-    
-    disp_hist = history_df.sort_values(by="date", ascending=False).copy()
-    if search_hist:
-        disp_hist = disp_hist[disp_hist['person_code'].astype(str).str.contains(search_hist, case=False, na=False) | disp_hist['person_name'].astype(str).str.contains(search_hist, case=False, na=False)]
-    if search_date:
-        disp_hist = disp_hist[disp_hist['date'].astype(str).str.contains(search_date, case=False, na=False) | disp_hist['end_date'].astype(str).str.contains(search_date, case=False, na=False)]
-    
-    if not disp_hist.empty: disp_hist.insert(0, 'S/N', range(1, 1 + len(disp_hist)))
-    
-    st.info("💡 **Tip:** Double-click any cell below to edit text directly! Use the bottom form if you want guided dropdowns.")
-    edited_hist = st.data_editor(disp_hist, use_container_width=True, hide_index=True, key="ed_hist", column_config={"id": st.column_config.Column(disabled=True), "S/N": st.column_config.Column(disabled=True)})
-    
-    if st.button("💾 Save Inline History Edits"):
-        for orig, mod in zip(disp_hist.to_dict('records'), edited_hist.to_dict('records')):
-            if orig != mod:
-                run_query("UPDATE history SET person_type=?, person_code=?, person_name=?, area=?, sector=?, date=?, end_date=? WHERE id=?", 
-                          (mod['person_type'], mod['person_code'], mod['person_name'], mod['area'], mod['sector'], mod['date'], mod['end_date'], mod['id']), 
-                          table_name="history", action="UPDATE", doc_id=mod['id'], data=mod)
-        st.success("History Edits Saved!")
-        st.rerun()
-    
-    with st.expander("📥 Export / 📤 Import History Data"):
-        output = generate_excel_with_sn([history_df], ['history'])
-        st.download_button("📥 Download History Data", data=output, file_name="History_Data.xlsx")
-        
-        up_hist = st.file_uploader("Upload History Excel", type=['xlsx'], key="up_hist")
-        if up_hist and st.button("Sync History Database"):
-            df = pd.read_excel(up_hist)
-            if not FIREBASE_READY: run_query("DELETE FROM history")
-            else: run_query(None, table_name="history", action="CLEAR_TABLE")
-            
-            for _, row in df.iterrows():
-                data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N']}
-                if not FIREBASE_READY:
-                    cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
-                    qmarks = ', '.join(['?'] * len(data_dict))
-                    run_query(f"INSERT INTO history ({cols}) VALUES ({qmarks})", vals)
-                else:
-                    run_query(None, table_name="history", action="INSERT", data=data_dict)
-            st.rerun()
-
-    st.divider()
-    
-    with st.expander("🚨 Emergency Data Restore"):
-        st.warning("If your Past Experience data is empty or incorrect, click below to wipe current records and load the exact PDF data.")
-        if st.button("♻️ Restore PDF Past Experience Data", type="primary"):
-            with st.spinner("Wiping old history and loading PDF data..."):
-                if FIREBASE_READY:
-                    run_query(None, table_name="history", action="CLEAR_TABLE")
-                    for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY:
-                        db_fs.collection("history").add({"person_type": ptype, "person_code": pcode, "person_name": RAW_NAME_MAP.get(pcode, "Unknown"), "area": parea, "sector": psec, "date": pstart, "end_date": pend})
-                else:
-                    c = conn.cursor()
-                    c.execute("DELETE FROM history")
-                    h_seed_full = [(ptype, pcode, RAW_NAME_MAP.get(pcode, "Unknown"), parea, psec, pstart, pend) for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY]
-                    c.executemany("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", h_seed_full)
-                    conn.commit()
-                st.cache_data.clear()
-            st.success("Past Experience data fully restored to PDF specifications!")
-            st.rerun()
-
-    st.divider()
-    c_add, c_edit = st.columns(2)
-    areas_df = load_table('areas')
-    area_list = areas_df['name'].tolist() if not areas_df.empty else []
-    
-    with c_add:
-        st.subheader("➕ Add Experience")
-        p_type = st.selectbox("Role", ["Driver", "Helper"])
-        df_names = load_table('drivers') if p_type == "Driver" else load_table('helpers')
-        person_list = [f"[{row.get('code', '')}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
-        if person_list:
-            p_person = st.selectbox("Select Person", person_list)
-            p_area = st.selectbox("Area Experienced In", area_list)
-            p_sec = st.selectbox("Which Sector was this in?", SECTOR_OPTIONS)
-            d1, d2 = st.columns(2)
-            p_start_date = d1.date_input("From Date (Start)")
-            p_end_date = d2.date_input("To Date (End)")
-            
-            if st.button("➕ Add Past Experience", use_container_width=True):
-                p_code = p_person.split("] ")[0].replace("[", "")
-                p_name = p_person.split("] ")[1]
-                
-                overlap = history_df[(history_df['person_code']==p_code) & (history_df['area']==p_area) & (history_df['date']==p_start_date.strftime("%Y-%m-%d"))]
-                if p_start_date > p_end_date: 
-                    st.error("Start Date cannot be after End Date.")
-                elif not overlap.empty:
-                    st.error("⚠️ This person already has an experience log for this Area on this exact Start Date!")
-                else:
-                    if run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                              (p_type, p_code, p_name, p_area, p_sec, p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")), 
-                              table_name="history", action="INSERT", data={"person_type":p_type, "person_code":p_code, "person_name":p_name, "area":p_area, "sector":p_sec, "date":p_start_date.strftime("%Y-%m-%d"), "end_date":p_end_date.strftime("%Y-%m-%d")}):
-                        st.success("Experience Added!")
-                        st.rerun()
-
-    with c_edit:
-        st.subheader("✏️ Delete/Edit Exp from Dropdowns")
-        if not history_df.empty:
-            hist_options = []
-            hist_map = {}
-            for idx, row in history_df.iterrows():
-                sec = row.get('sector', 'Pharma')
-                if pd.isna(sec) or sec == "nan": sec = "Pharma"
-                label = f"[{row.get('person_code', 'UNK')}] {row['person_name']} - {row['area']} ({sec})"
-                hist_options.append(label)
-                hist_map[label] = str(row['id'])
-
-            sel_hist_str = st.selectbox("Select Record to Edit/Delete", hist_options)
-            if sel_hist_str:
-                hist_id = hist_map[sel_hist_str]
-                hist_data = history_df[history_df['id'].astype(str) == hist_id].iloc[0]
-                a_idx = area_list.index(hist_data['area']) if hist_data['area'] in area_list else 0
-                e_area = st.selectbox("Edit Area Experience", area_list, index=a_idx, key=f"he_area_{hist_id}")
-                e_sec = st.selectbox("Edit Sector Experience", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(hist_data.get('sector', 'Pharma')) if hist_data.get('sector') in SECTOR_OPTIONS else 0, key=f"he_sec_{hist_id}")
-                ed1, ed2 = st.columns(2)
-                e_start_val, e_end_val = safe_parse_date(hist_data['date']), safe_parse_date(hist_data['end_date'])
-                new_start = ed1.date_input("Edit Exp Start Date", value=e_start_val, key=f"he_es_{hist_id}")
-                new_end = ed2.date_input("Edit Exp End Date", value=e_end_val, key=f"he_ee_{hist_id}")
-                
-                c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update via Dropdown", use_container_width=True, key=f"he_upd_{hist_id}"):
-                    if run_query("UPDATE history SET area=?, sector=?, date=?, end_date=? WHERE id=?", (e_area, e_sec, new_start.strftime("%Y-%m-%d"), new_end.strftime("%Y-%m-%d"), hist_id), table_name="history", action="UPDATE", doc_id=hist_id, data={"area":e_area, "sector":e_sec, "date":new_start.strftime("%Y-%m-%d"), "end_date":new_end.strftime("%Y-%m-%d")}):
-                        st.success("Experience Updated!")
-                        st.rerun()
-                if c_del.button("🗑️ Delete Experience", use_container_width=True, key=f"he_del_{hist_id}"):
-                    if run_query("DELETE FROM history WHERE id=?", (hist_id,), table_name="history", action="DELETE_DOC", doc_id=hist_id):
-                        st.success("Experience Deleted!")
-                        st.rerun()
-
-
-# ==========================================
-# SCREEN 4: VACATION SCHEDULE
-# ==========================================
-elif choice == "4. Vacation Schedule":
-    st.header("🌴 Manage Vacation Schedule")
-    vacs_df = load_table('vacations')
-    history_df = load_table('history')
-
-    st.subheader("📊 Active Vacations Overview")
-    today = date.today()
-    active_vacs = []
-    if not vacs_df.empty and 'person_name' in vacs_df.columns:
-        for _, row in vacs_df.iterrows():
-            sd = safe_parse_date(row['start_date'])
-            ed = safe_parse_date(row['end_date'])
-            if sd <= today <= ed:
-                active_vacs.append({
-                    "Role": row['person_type'],
-                    "Code": row.get('person_code', 'UNK'),
-                    "Name": row['person_name'],
-                    "Return Date": ed.strftime("%b %d, %Y"),
-                    "Days Left": (ed - today).days
-                })
-    if active_vacs:
-        dash_df = pd.DataFrame(active_vacs).sort_values(by="Days Left")
-        dash_df.insert(0, 'S/N', range(1, 1 + len(dash_df)))
-        st.dataframe(dash_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No personnel currently on vacation today.")
-        
-    with st.expander("🤖 Show AI Vacation Suggestions (Staff Who Need a Break)"):
-        due_list = []
-        for df, role in [(load_table('drivers'), "Driver"), (load_table('helpers'), "Helper")]:
-            for _, p in df.iterrows():
-                if vacs_df.empty or 'person_name' not in vacs_df.columns:
-                    last_vac = pd.DataFrame()
-                else:
-                    last_vac = vacs_df[vacs_df['person_name'] == p['name']]
-                    
-                if last_vac.empty:
-                    due_list.append({"Code": p.get('code', ''), "Name": p['name'], "Role": role, "Status": "NEVER Taken a Vacation!"})
-                else:
-                    lv_date = safe_parse_date(last_vac.iloc[-1]['end_date'])
-                    days_since = (today - lv_date).days
-                    if days_since > 300:
-                        due_list.append({"Code": p.get('code', ''), "Name": p['name'], "Role": role, "Status": f"Overdue by {days_since - 300} days (Last: {lv_date})"})
-        if due_list:
-            st.dataframe(pd.DataFrame(due_list), use_container_width=True, hide_index=True)
-        else:
-            st.success("Everyone seems well rested!")
-
-    st.divider()
-
-    st.subheader("📋 Full Vacation Database")
-    
-    search_vac = st.text_input("🔍 Search Vacations by Person Code or Name", "")
-    disp_vac = vacs_df.copy()
-    if search_vac and not disp_vac.empty:
-        disp_vac = disp_vac[disp_vac.get('person_code', '').astype(str).str.contains(search_vac, case=False, na=False) | disp_vac['person_name'].astype(str).str.contains(search_vac, case=False, na=False)]
-    
-    if not disp_vac.empty: disp_vac.insert(0, 'S/N', range(1, 1 + len(disp_vac)))
-    
-    st.info("💡 **Tip:** Double-click any cell below to edit text directly! Use the bottom form if you want guided dropdowns.")
-    edited_vac = st.data_editor(disp_vac, use_container_width=True, hide_index=True, key="ed_vac", column_config={"id": st.column_config.Column(disabled=True), "S/N": st.column_config.Column(disabled=True)})
-    
-    if st.button("💾 Save Inline Vacation Edits"):
-        for orig, mod in zip(disp_vac.to_dict('records'), edited_vac.to_dict('records')):
-            if orig != mod:
-                run_query("UPDATE vacations SET person_type=?, person_code=?, person_name=?, start_date=?, end_date=? WHERE id=?", 
-                          (mod['person_type'], mod['person_code'], mod['person_name'], mod['start_date'], mod['end_date'], mod['id']), 
-                          table_name="vacations", action="UPDATE", doc_id=mod['id'], data=mod)
-        st.success("Vacation Edits Saved!")
-        st.rerun()
-
-    with st.expander("📥 Export / 📤 Import Vacation Data"):
-        output = generate_excel_with_sn([vacs_df], ['vacations'])
-        st.download_button("📥 Download Vacation Data", data=output, file_name="Vacation_Data.xlsx")
-        
-        up_vac = st.file_uploader("Upload Vacation Excel", type=['xlsx'], key="up_vac")
-        if up_vac and st.button("Sync Vacation Database"):
-            df = pd.read_excel(up_vac)
-            if not FIREBASE_READY: run_query("DELETE FROM vacations")
-            else: run_query(None, table_name="vacations", action="CLEAR_TABLE")
-            
-            for _, row in df.iterrows():
-                data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N']}
-                if not FIREBASE_READY:
-                    cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
-                    qmarks = ', '.join(['?'] * len(data_dict))
-                    run_query(f"INSERT INTO vacations ({cols}) VALUES ({qmarks})", vals)
-                else:
-                    run_query(None, table_name="vacations", action="INSERT", data=data_dict)
-            st.rerun()
-
-    st.divider()
-    c_add, c_edit = st.columns(2)
-    
-    with c_add:
-        st.subheader("➕ Add Vacation")
-        v_type = st.selectbox("Role", ["Driver", "Helper"])
-        df_names = load_table('drivers') if v_type == "Driver" else load_table('helpers')
-        name_list = [f"[{row.get('code', '')}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
-        
-        if name_list:
-            v_person = st.selectbox("Select Person Name", name_list)
-            d1, d2 = st.columns(2)
-            v_start = d1.date_input("Start Date (Leave)")
-            v_end = d2.date_input("End Date (Return)", value=date.today() + timedelta(days=30))
-            
-            if st.button("➕ Add Vacation", use_container_width=True):
-                v_code = v_person.split("] ")[0].replace("[", "")
-                v_name = v_person.split("] ")[1]
-                
-                if not vacs_df.empty and 'person_name' in vacs_df.columns:
-                    overlap = vacs_df[(vacs_df['person_name'] == v_name) & (vacs_df['start_date'] == v_start.strftime("%Y-%m-%d"))]
-                else:
-                    overlap = pd.DataFrame()
-                    
-                if v_start > v_end: 
-                    st.error("Start Date cannot be after End Date.")
-                elif not overlap.empty:
-                    st.error(f"⚠️ {v_name} already has a vacation logged starting exactly on {v_start.strftime('%Y-%m-%d')}!")
-                else:
-                    if run_query("INSERT INTO vacations (person_type, person_code, person_name, start_date, end_date) VALUES (?, ?, ?, ?, ?)", (v_type, v_code, v_name, v_start.strftime("%Y-%m-%d"), v_end.strftime("%Y-%m-%d")), table_name="vacations", action="INSERT", data={"person_type":v_type, "person_code":v_code, "person_name":v_name, "start_date":v_start.strftime("%Y-%m-%d"), "end_date":v_end.strftime("%Y-%m-%d")}):
-                        st.success("Vacation Added!")
-                        st.rerun()
-
-    with c_edit:
-        st.subheader("✏️ Delete/Edit Vac from Dropdowns")
-        if not vacs_df.empty:
-            vac_options = []
-            vac_map = {}
-            for idx, row in vacs_df.iterrows():
-                label = f"[{row.get('person_code', 'UNK')}] {row['person_name']} ({row['start_date']} to {row['end_date']})"
-                vac_options.append(label)
-                vac_map[label] = str(row['id'])
-
-            sel_vac_str = st.selectbox("Select Vacation to Edit/Delete", vac_options)
-            if sel_vac_str:
-                vac_id = vac_map[sel_vac_str]
-                vac_data = vacs_df[vacs_df['id'].astype(str) == vac_id].iloc[0]
-                ed1, ed2 = st.columns(2)
-                e_vstart_val, e_vend_val = safe_parse_date(vac_data['start_date']), safe_parse_date(vac_data['end_date'])
-                new_vstart = ed1.date_input("Edit Vac Start Date", value=e_vstart_val, key=f"vac_es_{vac_id}")
-                new_vend = ed2.date_input("Edit Vac End Date", value=e_vend_val, key=f"vac_ee_{vac_id}")
-                
-                c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update via Dropdown", use_container_width=True, key=f"vac_upd_{vac_id}"):
-                    if new_vstart > new_vend: st.error("Start Date cannot be after End Date.")
-                    else:
-                        if run_query("UPDATE vacations SET start_date=?, end_date=? WHERE id=?", (new_vstart.strftime("%Y-%m-%d"), new_vend.strftime("%Y-%m-%d"), vac_id), table_name="vacations", action="UPDATE", doc_id=vac_id, data={"start_date":new_vstart.strftime("%Y-%m-%d"), "end_date":new_vend.strftime("%Y-%m-%d")}):
-                            st.success("Vacation Updated!")
-                            st.rerun()
-                        
-                if c_del.button("🗑️ Delete Vacation", use_container_width=True, key=f"vac_del_{vac_id}"):
-                    if run_query("DELETE FROM vacations WHERE id=?", (vac_id,), table_name="vacations", action="DELETE_DOC", doc_id=vac_id):
-                        st.success("Vacation Deleted!")
-                        st.rerun()
-```
