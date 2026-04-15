@@ -90,48 +90,54 @@ if not FIREBASE_READY:
     conn = init_sqlite_db()
 
 
-# --- SAFE DB QUERY HANDLER ---
+# --- SMART DB QUERY HANDLER (FIXED FOR QUOTA & EDITING) ---
+@st.cache_data(show_spinner=False)
 def load_table(table_name):
-    if FIREBASE_READY:
-        docs = db_fs.collection(table_name).stream()
-        data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
-        df = pd.DataFrame(data)
-        if table_name == 'helpers' and 'health_card' not in df.columns and not df.empty: df['health_card'] = 'No'
-        if table_name == 'drivers' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
-        if table_name == 'areas' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
-        if table_name == 'areas' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
-        if table_name == 'areas' and 'sort_order' not in df.columns and not df.empty: df['sort_order'] = 99
-        if table_name == 'history' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
-        if table_name == 'vehicles' and 'anchor_area' not in df.columns and not df.empty: df['anchor_area'] = 'None'
-        if table_name == 'active_routes' and 'start_date' not in df.columns and not df.empty: df['start_date'] = 'None'
-        if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
-        
-        if table_name == 'areas' and not df.empty:
-            df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
-            df = df.sort_values(by='sort_order')
-        if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
-            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-            df = df.sort_values(by='order_num')
-        if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
-            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-            df = df.sort_values(by='order_num')
+    try:
+        if FIREBASE_READY:
+            docs = db_fs.collection(table_name).stream()
+            data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
+            df = pd.DataFrame(data)
+            if table_name == 'helpers' and 'health_card' not in df.columns and not df.empty: df['health_card'] = 'No'
+            if table_name == 'drivers' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
+            if table_name == 'areas' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
+            if table_name == 'areas' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
+            if table_name == 'areas' and 'sort_order' not in df.columns and not df.empty: df['sort_order'] = 99
+            if table_name == 'history' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
+            if table_name == 'vehicles' and 'anchor_area' not in df.columns and not df.empty: df['anchor_area'] = 'None'
+            if table_name == 'active_routes' and 'start_date' not in df.columns and not df.empty: df['start_date'] = 'None'
+            if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
             
-        if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
-        return df
-    else:
-        df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-        if table_name == 'areas' and not df.empty: 
-            df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
-            df = df.sort_values(by='sort_order')
-        if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
-            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-            df = df.sort_values(by='order_num')
-        if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
-            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-            df = df.sort_values(by='order_num')
-        if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
-        if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
-        return df
+            if table_name == 'areas' and not df.empty:
+                df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
+                df = df.sort_values(by='sort_order')
+            if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
+                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+                df = df.sort_values(by='order_num')
+            if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
+                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+                df = df.sort_values(by='order_num')
+                
+            if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
+            return df
+        else:
+            df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+            if table_name == 'areas' and not df.empty: 
+                df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
+                df = df.sort_values(by='sort_order')
+            if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
+                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+                df = df.sort_values(by='order_num')
+            if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
+                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+                df = df.sort_values(by='order_num')
+            if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
+            if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
+            return df
+    except Exception as e:
+        if "ResourceExhausted" in str(e) or "429" in str(e):
+            st.error("🚨 Firebase Free Quota Exceeded for today! Data cannot be loaded right now.")
+        return pd.DataFrame()
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
     try:
@@ -147,13 +153,13 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 c = conn.cursor()
                 c.execute(query, params)
                 conn.commit()
+                
+        # CLEAR CACHE IMMEDIATELY UPON SUCCESS (Allows real-time editing without quota drain)
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"Database Error: {str(e)}")
         return False
-
-def clear_cache():
-    st.cache_data.clear()
 
 def generate_excel_with_sn(df_list, sheet_names):
     output = io.BytesIO()
@@ -172,7 +178,7 @@ def generate_excel_with_sn(df_list, sheet_names):
 # --- OPTIONS ---
 VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
-NEEDS_HELPER_OPTIONS = ["Yes", "No", "None"]
+NEEDS_HELPER_OPTIONS = ["Yes", "No", "Optional"]
 ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Driver Name", "Area Full Name", "Helper Code", "Helper Name", "Vehicle Number", "Division Category", "Area Code", "Sector"]
 
 # --- STRICT HARDCODED ALLOWLISTS ---
@@ -234,370 +240,204 @@ RAW_NAME_MAP = {
     "H017": "Mujammal", "H126": "Subin Kovammal"
 }
 
-# --- PDF HISTORICAL EXTRACT MAP ---
 PRELOAD_HISTORY = [
-    ("Helper", "H116", "2024-08-01", "2024-10-31", "MIRDIFF", "Pharma"),
-    ("Helper", "H116", "2024-11-01", "2025-01-31", "2ND TRIP", "Pharma"),
-    ("Helper", "H116", "2025-02-01", "2025-04-30", "ALQOUZ-2", "Pharma"),
-    ("Helper", "H116", "2025-05-01", "2025-07-31", "ALQOUZ-1", "Pharma"),
-    ("Helper", "H116", "2025-08-01", "2025-10-31", "DEIRA", "Pharma"),
-    ("Helper", "H121", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
-    ("Helper", "H121", "2025-02-01", "2025-04-30", "JUMAIRAH", "Pharma"),
-    ("Helper", "H121", "2025-05-01", "2025-07-31", "ALQ", "Consumer"),
-    ("Helper", "H121", "2025-08-01", "2025-10-31", "RAK / UAQ", "Pharma"),
-    ("Helper", "H119", "2024-08-01", "2024-10-31", "DEIRA", "Pharma"),
-    ("Helper", "H119", "2024-11-01", "2025-01-31", "JABEL ALI", "Pharma"),
-    ("Helper", "H119", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Helper", "H119", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"),
-    ("Helper", "H119", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
-    ("Helper", "H046", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
-    ("Helper", "H046", "2024-08-01", "2024-10-31", "BURDUBAI", "Pharma"),
-    ("Helper", "H046", "2024-11-01", "2025-01-31", "FUJAIRAH", "Pharma"),
-    ("Helper", "H046", "2025-02-01", "2025-04-30", "FUJAIRAH", "Pharma"),
-    ("Helper", "H046", "2025-05-01", "2025-07-31", "FUJAIRAH", "Pharma"),
-    ("Helper", "H046", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
-    ("Helper", "H070", "2024-05-01", "2024-07-31", "PHARMA", "Pharma"),
-    ("Helper", "H070", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H070", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H070", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H070", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H070", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H129", "2025-08-01", "2025-10-31", "DXBO", "Consumer"),
-    ("Helper", "H113", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Helper", "H113", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
-    ("Helper", "H113", "2024-11-01", "2025-01-31", "AJMAN", "Pharma"),
-    ("Helper", "H113", "2025-02-01", "2025-04-30", "SHJS", "Consumer"),
-    ("Helper", "H113", "2025-05-01", "2025-07-31", "DEIRA", "Pharma"),
-    ("Helper", "H113", "2025-08-01", "2025-10-31", "AJMAN", "Pharma"),
-    ("Helper", "H118", "2024-08-01", "2024-10-31", "SHJ - SANAYYA", "Pharma"),
-    ("Helper", "H118", "2024-11-01", "2025-01-31", "SHJ - SANAYYA", "Pharma"),
-    ("Helper", "H118", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
-    ("Helper", "H118", "2025-05-01", "2025-07-31", "AJMAN", "Pharma"),
-    ("Helper", "H118", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
-    ("Helper", "H115", "2024-05-01", "2024-07-31", "SHJ - SANAYYA", "Pharma"),
-    ("Helper", "H115", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Helper", "H122", "2025-02-01", "2025-04-30", "QUSAIS", "Pharma"),
-    ("Helper", "H122", "2025-05-01", "2025-07-31", "JABEL ALI", "Pharma"),
-    ("Helper", "H122", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
-    ("Helper", "H114", "2024-05-01", "2024-07-31", "DEIRA", "Pharma"),
-    ("Helper", "H114", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Helper", "H114", "2024-11-01", "2025-01-31", "DEIRA", "Pharma"),
-    ("Helper", "H114", "2025-02-01", "2025-04-30", "JABEL ALI", "Pharma"),
-    ("Helper", "H114", "2025-05-01", "2025-07-31", "SHJ - SANAYYA", "Pharma"),
-    ("Helper", "H114", "2025-08-01", "2025-10-31", "BURDUBAI", "Pharma"),
-    ("Helper", "H066", "2024-05-01", "2024-07-31", "SHJ - SANAYYA", "Pharma"),
-    ("Helper", "H066", "2024-08-01", "2024-10-31", "DXBO", "Consumer"),
-    ("Helper", "H066", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
-    ("Helper", "H066", "2025-02-01", "2025-04-30", "JA", "Consumer"),
-    ("Helper", "H066", "2025-05-01", "2025-07-31", "JA", "Consumer"),
-    ("Helper", "H066", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
-    ("Helper", "H011", "2024-05-01", "2024-07-31", "RAK / UAQ", "Pharma"),
-    ("Helper", "H011", "2024-08-01", "2024-10-31", "QUSAIS", "Pharma"),
-    ("Helper", "H011", "2024-11-01", "2025-01-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Helper", "H011", "2025-05-01", "2025-07-31", "JUMAIRAH", "Pharma"),
-    ("Helper", "H011", "2025-08-01", "2025-10-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Helper", "H005", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"),
-    ("Helper", "H005", "2024-08-01", "2024-10-31", "ALQOUZ-2", "Pharma"),
-    ("Helper", "H005", "2024-11-01", "2025-01-31", "RAK / UAQ", "Pharma"),
-    ("Helper", "H005", "2025-05-01", "2025-07-31", "BURDUBAI", "Pharma"),
-    ("Helper", "H005", "2025-08-01", "2025-10-31", "JUMAIRAH", "Pharma"),
-    ("Helper", "H023", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Helper", "H023", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H023", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H023", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H023", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H023", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H050", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H050", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H050", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H050", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H050", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H062", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"),
-    ("Helper", "H062", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H062", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H062", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H062", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H062", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H024", "2024-05-01", "2024-07-31", "JABEL ALI", "Pharma"),
-    ("Helper", "H024", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
-    ("Helper", "H024", "2024-11-01", "2025-01-31", "JA", "Consumer"),
-    ("Helper", "H024", "2025-05-01", "2025-07-31", "SHJS", "Consumer"),
-    ("Helper", "H024", "2025-08-01", "2025-10-31", "RAK", "Consumer"),
-    ("Helper", "H082", "2024-05-01", "2024-07-31", "DXBO", "Consumer"),
-    ("Helper", "H082", "2024-08-01", "2024-10-31", "ALQ", "Consumer"),
-    ("Helper", "H082", "2024-11-01", "2025-01-31", "DXBO", "Consumer"),
-    ("Helper", "H082", "2025-05-01", "2025-07-31", "DXBO", "Consumer"),
-    ("Helper", "H082", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
-    ("Helper", "H026", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
-    ("Helper", "H026", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H026", "2024-11-01", "2025-01-31", "ALQ", "Consumer"),
-    ("Helper", "H026", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
-    ("Helper", "H026", "2025-05-01", "2025-07-31", "DXBO", "Consumer"),
-    ("Helper", "H026", "2025-08-01", "2025-10-31", "SHJS", "Consumer"),
-    ("Helper", "H109", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H109", "2024-08-01", "2024-10-31", "JA", "Consumer"),
-    ("Helper", "H109", "2024-11-01", "2025-01-31", "AJM", "Consumer"),
-    ("Helper", "H109", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
-    ("Helper", "H109", "2025-05-01", "2025-07-31", "RAK", "Consumer"),
-    ("Helper", "H109", "2025-08-01", "2025-10-31", "BUR", "Consumer"),
-    ("Helper", "H013", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H013", "2024-08-01", "2024-10-31", "RAK", "Consumer"),
-    ("Helper", "H013", "2024-11-01", "2025-01-31", "SHJS", "Consumer"),
-    ("Helper", "H013", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H013", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H013", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
-    ("Helper", "H034", "2024-05-01", "2024-07-31", "AJMAN", "Pharma"),
-    ("Helper", "H034", "2024-08-01", "2024-10-31", "FUJAIRAH", "Pharma"),
-    ("Helper", "H034", "2024-11-01", "2025-01-31", "AJM", "Consumer"),
-    ("Helper", "H034", "2025-05-01", "2025-07-31", "AJM", "Consumer"),
-    ("Helper", "H034", "2025-08-01", "2025-10-31", "JA", "Consumer"),
-    ("Helper", "H099", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
-    ("Helper", "H099", "2024-08-01", "2024-10-31", "ALQOUZ-1", "Pharma"),
-    ("Helper", "H099", "2024-11-01", "2025-01-31", "MIRDIFF", "Pharma"),
-    ("Helper", "H099", "2025-05-01", "2025-07-31", "QUSAIS", "Pharma"),
-    ("Helper", "H099", "2025-08-01", "2025-10-31", "SHJ - SANAYYA", "Pharma"),
-    ("Helper", "H017", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
-    ("Helper", "H017", "2024-08-01", "2024-10-31", "JUMAIRAH", "Pharma"),
-    ("Helper", "H017", "2024-11-01", "2025-01-31", "ALQOUZ-1", "Pharma"),
-    ("Helper", "H017", "2025-05-01", "2025-07-31", "RAK / UAQ", "Pharma"),
-    ("Helper", "H017", "2025-08-01", "2025-10-31", "FUJAIRAH", "Pharma"),
-    ("Helper", "H051", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H051", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H051", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H051", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H051", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H104", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H104", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H104", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H104", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H112", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H112", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H112", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Helper", "H112", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H116", "2024-08-01", "2024-10-31", "MIRDIFF", "Pharma"), ("Helper", "H116", "2024-11-01", "2025-01-31", "2ND TRIP", "Pharma"),
+    ("Helper", "H116", "2025-02-01", "2025-04-30", "ALQOUZ-2", "Pharma"), ("Helper", "H116", "2025-05-01", "2025-07-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H116", "2025-08-01", "2025-10-31", "DEIRA", "Pharma"), ("Helper", "H121", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H121", "2025-02-01", "2025-04-30", "JUMAIRAH", "Pharma"), ("Helper", "H121", "2025-05-01", "2025-07-31", "ALQ", "Consumer"),
+    ("Helper", "H121", "2025-08-01", "2025-10-31", "RAK / UAQ", "Pharma"), ("Helper", "H119", "2024-08-01", "2024-10-31", "DEIRA", "Pharma"),
+    ("Helper", "H119", "2024-11-01", "2025-01-31", "JABEL ALI", "Pharma"), ("Helper", "H119", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Helper", "H119", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"), ("Helper", "H119", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H046", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"), ("Helper", "H046", "2024-08-01", "2024-10-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H046", "2024-11-01", "2025-01-31", "FUJAIRAH", "Pharma"), ("Helper", "H046", "2025-02-01", "2025-04-30", "FUJAIRAH", "Pharma"),
+    ("Helper", "H046", "2025-05-01", "2025-07-31", "FUJAIRAH", "Pharma"), ("Helper", "H046", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
+    ("Helper", "H070", "2024-05-01", "2024-07-31", "PHARMA", "Pharma"), ("Helper", "H070", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H070", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H070", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H070", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H070", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H129", "2025-08-01", "2025-10-31", "DXBO", "Consumer"), ("Helper", "H113", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H113", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"), ("Helper", "H113", "2024-11-01", "2025-01-31", "AJMAN", "Pharma"),
+    ("Helper", "H113", "2025-02-01", "2025-04-30", "SHJS", "Consumer"), ("Helper", "H113", "2025-05-01", "2025-07-31", "DEIRA", "Pharma"),
+    ("Helper", "H113", "2025-08-01", "2025-10-31", "AJMAN", "Pharma"), ("Helper", "H118", "2024-08-01", "2024-10-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H118", "2024-11-01", "2025-01-31", "SHJ - SANAYYA", "Pharma"), ("Helper", "H118", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
+    ("Helper", "H118", "2025-05-01", "2025-07-31", "AJMAN", "Pharma"), ("Helper", "H118", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H115", "2024-05-01", "2024-07-31", "SHJ - SANAYYA", "Pharma"), ("Helper", "H115", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Helper", "H122", "2025-02-01", "2025-04-30", "QUSAIS", "Pharma"), ("Helper", "H122", "2025-05-01", "2025-07-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H122", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"), ("Helper", "H114", "2024-05-01", "2024-07-31", "DEIRA", "Pharma"),
+    ("Helper", "H114", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"), ("Helper", "H114", "2024-11-01", "2025-01-31", "DEIRA", "Pharma"),
+    ("Helper", "H114", "2025-02-01", "2025-04-30", "JABEL ALI", "Pharma"), ("Helper", "H114", "2025-05-01", "2025-07-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H114", "2025-08-01", "2025-10-31", "BURDUBAI", "Pharma"), ("Helper", "H066", "2024-05-01", "2024-07-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H066", "2024-08-01", "2024-10-31", "DXBO", "Consumer"), ("Helper", "H066", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H066", "2025-02-01", "2025-04-30", "JA", "Consumer"), ("Helper", "H066", "2025-05-01", "2025-07-31", "JA", "Consumer"),
+    ("Helper", "H066", "2025-08-01", "2025-10-31", "AJM", "Consumer"), ("Helper", "H011", "2024-05-01", "2024-07-31", "RAK / UAQ", "Pharma"),
+    ("Helper", "H011", "2024-08-01", "2024-10-31", "QUSAIS", "Pharma"), ("Helper", "H011", "2024-11-01", "2025-01-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H011", "2025-05-01", "2025-07-31", "JUMAIRAH", "Pharma"), ("Helper", "H011", "2025-08-01", "2025-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H005", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"), ("Helper", "H005", "2024-08-01", "2024-10-31", "ALQOUZ-2", "Pharma"),
+    ("Helper", "H005", "2024-11-01", "2025-01-31", "RAK / UAQ", "Pharma"), ("Helper", "H005", "2025-05-01", "2025-07-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H005", "2025-08-01", "2025-10-31", "JUMAIRAH", "Pharma"), ("Helper", "H023", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Helper", "H023", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H023", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H023", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H023", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H023", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H050", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H050", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H050", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"), ("Helper", "H062", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H062", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H062", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H024", "2024-05-01", "2024-07-31", "JABEL ALI", "Pharma"), ("Helper", "H024", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
+    ("Helper", "H024", "2024-11-01", "2025-01-31", "JA", "Consumer"), ("Helper", "H024", "2025-05-01", "2025-07-31", "SHJS", "Consumer"),
+    ("Helper", "H024", "2025-08-01", "2025-10-31", "RAK", "Consumer"), ("Helper", "H082", "2024-05-01", "2024-07-31", "DXBO", "Consumer"),
+    ("Helper", "H082", "2024-08-01", "2024-10-31", "ALQ", "Consumer"), ("Helper", "H082", "2024-11-01", "2025-01-31", "DXBO", "Consumer"),
+    ("Helper", "H082", "2025-05-01", "2025-07-31", "DXBO", "Consumer"), ("Helper", "H082", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
+    ("Helper", "H026", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"), ("Helper", "H026", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H026", "2024-11-01", "2025-01-31", "ALQ", "Consumer"), ("Helper", "H026", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
+    ("Helper", "H026", "2025-05-01", "2025-07-31", "DXBO", "Consumer"), ("Helper", "H026", "2025-08-01", "2025-10-31", "SHJS", "Consumer"),
+    ("Helper", "H109", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H109", "2024-08-01", "2024-10-31", "JA", "Consumer"),
+    ("Helper", "H109", "2024-11-01", "2025-01-31", "AJM", "Consumer"), ("Helper", "H109", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Helper", "H109", "2025-05-01", "2025-07-31", "RAK", "Consumer"), ("Helper", "H109", "2025-08-01", "2025-10-31", "BUR", "Consumer"),
+    ("Helper", "H013", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H013", "2024-08-01", "2024-10-31", "RAK", "Consumer"),
+    ("Helper", "H013", "2024-11-01", "2025-01-31", "SHJS", "Consumer"), ("Helper", "H013", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H013", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H013", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Helper", "H034", "2024-05-01", "2024-07-31", "AJMAN", "Pharma"), ("Helper", "H034", "2024-08-01", "2024-10-31", "FUJAIRAH", "Pharma"),
+    ("Helper", "H034", "2024-11-01", "2025-01-31", "AJM", "Consumer"), ("Helper", "H034", "2025-05-01", "2025-07-31", "AJM", "Consumer"),
+    ("Helper", "H034", "2025-08-01", "2025-10-31", "JA", "Consumer"), ("Helper", "H099", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H099", "2024-08-01", "2024-10-31", "ALQOUZ-1", "Pharma"), ("Helper", "H099", "2024-11-01", "2025-01-31", "MIRDIFF", "Pharma"),
+    ("Helper", "H099", "2025-05-01", "2025-07-31", "QUSAIS", "Pharma"), ("Helper", "H099", "2025-08-01", "2025-10-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H017", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"), ("Helper", "H017", "2024-08-01", "2024-10-31", "JUMAIRAH", "Pharma"),
+    ("Helper", "H017", "2024-11-01", "2025-01-31", "ALQOUZ-1", "Pharma"), ("Helper", "H017", "2025-05-01", "2025-07-31", "RAK / UAQ", "Pharma"),
+    ("Helper", "H017", "2025-08-01", "2025-10-31", "FUJAIRAH", "Pharma"), ("Helper", "H051", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H051", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H051", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H051", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H051", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H104", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H104", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H104", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H104", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H112", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H112", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H112", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H112", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
 
-    ("Driver", "D085", "2024-05-01", "2024-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D085", "2024-08-01", "2024-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D085", "2024-11-01", "2025-01-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D085", "2025-05-01", "2025-07-31", "ALQOUZ-2", "Pharma"),
-    ("Driver", "D085", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
-    ("Driver", "D034", "2024-05-01", "2024-07-31", "JABEL ALI", "Pharma"),
-    ("Driver", "D034", "2024-08-01", "2024-10-31", "SHJ - SANAYYA", "Pharma"),
-    ("Driver", "D034", "2024-11-01", "2025-01-31", "ALQOUZ-2", "Pharma"),
-    ("Driver", "D034", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
-    ("Driver", "D034", "2025-05-01", "2025-07-31", "QUSAIS", "Pharma"),
-    ("Driver", "D034", "2025-08-01", "2025-10-31", "ALQOUZ-1", "Pharma"),
-    ("Driver", "D101", "2024-08-01", "2024-10-31", "ALQOUZ-2", "Pharma"),
-    ("Driver", "D101", "2024-11-01", "2025-01-31", "QUSAIS", "Pharma"),
-    ("Driver", "D101", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
-    ("Driver", "D101", "2025-05-01", "2025-07-31", "SHJ - SANAYYA", "Pharma"),
-    ("Driver", "D101", "2025-08-01", "2025-10-31", "DEIRA", "Pharma"),
-    ("Driver", "D038", "2024-05-01", "2024-07-31", "AJMAN", "Consumer"),
-    ("Driver", "D038", "2024-08-01", "2024-10-31", "QUSAIS", "Pharma"),
-    ("Driver", "D038", "2024-11-01", "2025-01-31", "ALQ", "Consumer"),
-    ("Driver", "D038", "2025-05-01", "2025-07-31", "JA", "Consumer"),
-    ("Driver", "D038", "2025-08-01", "2025-10-31", "BUR", "Consumer"),
-    ("Driver", "D048", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
-    ("Driver", "D048", "2024-11-01", "2025-01-31", "2ND TRIP", "Pharma"),
-    ("Driver", "D048", "2025-05-01", "2025-07-31", "BURDUBAI", "Pharma"),
-    ("Driver", "D048", "2025-08-01", "2025-10-31", "MIRDIFF", "Pharma"),
-    ("Driver", "D019", "2024-05-01", "2024-07-31", "RAK / UAQ", "Pharma"),
-    ("Driver", "D019", "2024-08-01", "2024-10-31", "MIRDIFF", "Pharma"),
-    ("Driver", "D019", "2024-11-01", "2025-01-31", "DEIRA", "Pharma"),
-    ("Driver", "D019", "2025-05-01", "2025-07-31", "ALQOUZ-1", "Pharma"),
-    ("Driver", "D019", "2025-08-01", "2025-10-31", "FUJAIRAH", "Pharma"),
-    ("Driver", "D064", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Driver", "D064", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Driver", "D064", "2024-11-01", "2025-01-31", "RAK / UAQ", "Pharma"),
-    ("Driver", "D064", "2025-05-01", "2025-07-31", "RAK / UAQ", "Pharma"),
-    ("Driver", "D064", "2025-08-01", "2025-10-31", "AJMAN", "Pharma"),
-    ("Driver", "D029", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Driver", "D029", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
-    ("Driver", "D029", "2024-11-01", "2025-01-31", "ALQOUZ-1", "Pharma"),
-    ("Driver", "D029", "2025-05-01", "2025-07-31", "JUMAIRAH", "Pharma"),
-    ("Driver", "D029", "2025-08-01", "2025-10-31", "RAK / UAQ", "Pharma"),
-    ("Driver", "D011", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Driver", "D011", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Driver", "D011", "2025-05-01", "2025-07-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Driver", "D011", "2025-08-01", "2025-10-31", "SHJ- BUH/ROLLA", "Pharma"),
-    ("Driver", "D050", "2024-05-01", "2024-07-31", "FUJAIRAH", "Pharma"),
-    ("Driver", "D050", "2024-08-01", "2024-10-31", "ALQ", "Consumer"),
-    ("Driver", "D050", "2024-11-01", "2025-01-31", "DXBO", "Consumer"),
-    ("Driver", "D050", "2025-02-01", "2025-04-30", "RAK", "Consumer"),
-    ("Driver", "D050", "2025-05-01", "2025-07-31", "DXBO", "Consumer"),
-    ("Driver", "D050", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
-    ("Driver", "D094", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
-    ("Driver", "D094", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
-    ("Driver", "D094", "2024-11-01", "2025-01-31", "MIRDIFF", "Pharma"),
-    ("Driver", "D094", "2025-05-01", "2025-07-31", "DEIRA", "Pharma"),
-    ("Driver", "D109", "2024-08-01", "2024-10-31", "JABEL ALI", "Pharma"),
-    ("Driver", "D010", "2024-05-01", "2024-07-31", "QUSAIS", "Pharma"),
-    ("Driver", "D010", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D010", "2025-05-01", "2025-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D098", "2024-05-01", "2024-07-31", "JUMAIRAH", "Pharma"),
-    ("Driver", "D098", "2024-08-01", "2024-10-31", "RAK / UAQ", "Pharma"),
-    ("Driver", "D098", "2024-11-01", "2025-01-31", "JABEL ALI", "Pharma"),
-    ("Driver", "D098", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"),
-    ("Driver", "D098", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
-    ("Driver", "D049", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"),
-    ("Driver", "D049", "2024-08-01", "2024-10-31", "JABEL ALI", "Pharma"),
-    ("Driver", "D049", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
-    ("Driver", "D049", "2025-05-01", "2025-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D049", "2025-08-01", "2025-10-31", "QUSAIS", "Pharma"),
-    ("Driver", "D046", "2024-08-01", "2024-10-31", "BURDUBAI", "Pharma"),
-    ("Driver", "D046", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D046", "2025-05-01", "2025-07-31", "AJMAN", "Pharma"),
-    ("Driver", "D046", "2025-08-01", "2025-10-31", "JUMAIRAH", "Pharma"),
-    ("Driver", "D040", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D040", "2024-08-01", "2024-10-31", "ALQOUZ-1", "Pharma"),
-    ("Driver", "D040", "2024-11-01", "2025-01-31", "JUMAIRAH", "Pharma"),
-    ("Driver", "D040", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D040", "2025-05-01", "2025-07-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
-    ("Driver", "D040", "2025-08-01", "2025-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D037", "2024-05-01", "2024-07-31", "RAK", "Consumer"),
-    ("Driver", "D037", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
-    ("Driver", "D037", "2024-11-01", "2025-01-31", "AJM", "Consumer"),
-    ("Driver", "D037", "2025-02-01", "2025-04-30", "SHJS", "Consumer"),
-    ("Driver", "D037", "2025-05-01", "2025-07-31", "FUJAIRAH", "Pharma"),
-    ("Driver", "D037", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
-    ("Driver", "D026", "2024-05-01", "2024-07-31", "FLEET SERVICE/RTA WORK", "Fleet"),
-    ("Driver", "D026", "2024-08-01", "2024-10-31", "FLEET SERVICE/RTA WORK", "Fleet"),
-    ("Driver", "D026", "2024-11-01", "2025-01-31", "FLEET SERVICE/RTA WORK", "Fleet"),
-    ("Driver", "D026", "2025-05-01", "2025-07-31", "FLEET SERVICE/RTA WORK", "Fleet"),
-    ("Driver", "D026", "2025-08-01", "2025-10-31", "FLEET SERVICE/RTA WORK", "Fleet"),
-    ("Driver", "D024", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D024", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D024", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D024", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D024", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D047", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D047", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D047", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D047", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D047", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D061", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D061", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D061", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D061", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D061", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D044", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D044", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D044", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D044", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D044", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D052", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D052", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D052", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D052", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D052", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D089", "2024-05-01", "2024-07-31", "DXBO", "Consumer"),
-    ("Driver", "D089", "2024-08-01", "2024-10-31", "RAK", "Consumer"),
-    ("Driver", "D089", "2025-05-01", "2025-07-31", "ALQ", "Consumer"),
-    ("Driver", "D089", "2025-08-01", "2025-10-31", "SHJS", "Consumer"),
-    ("Driver", "D036", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D036", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D036", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D036", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D036", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D054", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D054", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D054", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D054", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D054", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D088", "2024-05-01", "2024-07-31", "ALQ", "Consumer"),
-    ("Driver", "D088", "2024-08-01", "2024-10-31", "SHJS", "Consumer"),
-    ("Driver", "D088", "2024-11-01", "2025-01-31", "JA", "Consumer"),
-    ("Driver", "D088", "2025-05-01", "2025-07-31", "BUR", "Consumer"),
-    ("Driver", "D088", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
-    ("Driver", "D023", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D023", "2024-08-01", "2024-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D023", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D023", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D104", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D104", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D104", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D104", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
-    ("Driver", "D107", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
-    ("Driver", "D027", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D027", "2024-08-01", "2024-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D027", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D027", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D103", "2024-08-01", "2024-10-31", "DXBO", "Consumer"),
-    ("Driver", "D103", "2024-11-01", "2025-01-31", "RAK", "Consumer"),
-    ("Driver", "D103", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Driver", "D103", "2025-05-01", "2025-07-31", "SHJS", "Consumer"),
-    ("Driver", "D103", "2025-08-01", "2025-10-31", "DXBO", "Consumer"),
-    ("Driver", "D042", "2024-05-01", "2024-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D042", "2024-08-01", "2024-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D042", "2024-11-01", "2025-01-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
-    ("Driver", "D042", "2025-05-01", "2025-07-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
-    ("Driver", "D042", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
-    ("Driver", "D033", "2024-05-01", "2024-07-31", "AJMAN", "Pharma"),
-    ("Driver", "D033", "2024-08-01", "2024-10-31", "JA", "Consumer"),
-    ("Driver", "D033", "2024-11-01", "2025-01-31", "SHJS", "Consumer"),
-    ("Driver", "D033", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
-    ("Driver", "D033", "2025-05-01", "2025-07-31", "RAK", "Consumer"),
-    ("Driver", "D033", "2025-08-01", "2025-10-31", "JA", "Consumer")
+    ("Driver", "D085", "2024-05-01", "2024-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"), ("Driver", "D085", "2024-08-01", "2024-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D085", "2024-11-01", "2025-01-31", "COLD CHAIN/URGENT ORDERS", "2-8"), ("Driver", "D085", "2025-05-01", "2025-07-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D085", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D034", "2024-05-01", "2024-07-31", "JABEL ALI", "Pharma"),
+    ("Driver", "D034", "2024-08-01", "2024-10-31", "SHJ - SANAYYA", "Pharma"), ("Driver", "D034", "2024-11-01", "2025-01-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D034", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"), ("Driver", "D034", "2025-05-01", "2025-07-31", "QUSAIS", "Pharma"),
+    ("Driver", "D034", "2025-08-01", "2025-10-31", "ALQOUZ-1", "Pharma"), ("Driver", "D101", "2024-08-01", "2024-10-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D101", "2024-11-01", "2025-01-31", "QUSAIS", "Pharma"), ("Driver", "D101", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Driver", "D101", "2025-05-01", "2025-07-31", "SHJ - SANAYYA", "Pharma"), ("Driver", "D101", "2025-08-01", "2025-10-31", "DEIRA", "Pharma"),
+    ("Driver", "D038", "2024-05-01", "2024-07-31", "AJMAN", "Consumer"), ("Driver", "D038", "2024-08-01", "2024-10-31", "QUSAIS", "Pharma"),
+    ("Driver", "D038", "2024-11-01", "2025-01-31", "ALQ", "Consumer"), ("Driver", "D038", "2025-05-01", "2025-07-31", "JA", "Consumer"),
+    ("Driver", "D038", "2025-08-01", "2025-10-31", "BUR", "Consumer"), ("Driver", "D048", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
+    ("Driver", "D048", "2024-11-01", "2025-01-31", "2ND TRIP", "Pharma"), ("Driver", "D048", "2025-05-01", "2025-07-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D048", "2025-08-01", "2025-10-31", "MIRDIFF", "Pharma"), ("Driver", "D019", "2024-05-01", "2024-07-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D019", "2024-08-01", "2024-10-31", "MIRDIFF", "Pharma"), ("Driver", "D019", "2024-11-01", "2025-01-31", "DEIRA", "Pharma"),
+    ("Driver", "D019", "2025-05-01", "2025-07-31", "ALQOUZ-1", "Pharma"), ("Driver", "D019", "2025-08-01", "2025-10-31", "FUJAIRAH", "Pharma"),
+    ("Driver", "D064", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"), ("Driver", "D064", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D064", "2024-11-01", "2025-01-31", "RAK / UAQ", "Pharma"), ("Driver", "D064", "2025-05-01", "2025-07-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D064", "2025-08-01", "2025-10-31", "AJMAN", "Pharma"), ("Driver", "D029", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D029", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D029", "2024-11-01", "2025-01-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D029", "2025-05-01", "2025-07-31", "JUMAIRAH", "Pharma"), ("Driver", "D029", "2025-08-01", "2025-10-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D011", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"), ("Driver", "D011", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D011", "2025-05-01", "2025-07-31", "SHJ- BUH/ROLLA", "Pharma"), ("Driver", "D011", "2025-08-01", "2025-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D050", "2024-05-01", "2024-07-31", "FUJAIRAH", "Pharma"), ("Driver", "D050", "2024-08-01", "2024-10-31", "ALQ", "Consumer"),
+    ("Driver", "D050", "2024-11-01", "2025-01-31", "DXBO", "Consumer"), ("Driver", "D050", "2025-02-01", "2025-04-30", "RAK", "Consumer"),
+    ("Driver", "D050", "2025-05-01", "2025-07-31", "DXBO", "Consumer"), ("Driver", "D050", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Driver", "D094", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"), ("Driver", "D094", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D094", "2024-11-01", "2025-01-31", "MIRDIFF", "Pharma"), ("Driver", "D094", "2025-05-01", "2025-07-31", "DEIRA", "Pharma"),
+    ("Driver", "D109", "2024-08-01", "2024-10-31", "JABEL ALI", "Pharma"), ("Driver", "D010", "2024-05-01", "2024-07-31", "QUSAIS", "Pharma"),
+    ("Driver", "D010", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D010", "2025-05-01", "2025-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D098", "2024-05-01", "2024-07-31", "JUMAIRAH", "Pharma"), ("Driver", "D098", "2024-08-01", "2024-10-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D098", "2024-11-01", "2025-01-31", "JABEL ALI", "Pharma"), ("Driver", "D098", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"),
+    ("Driver", "D098", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"), ("Driver", "D049", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D049", "2024-08-01", "2024-10-31", "JABEL ALI", "Pharma"), ("Driver", "D049", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D049", "2025-05-01", "2025-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"), ("Driver", "D049", "2025-08-01", "2025-10-31", "QUSAIS", "Pharma"),
+    ("Driver", "D046", "2024-08-01", "2024-10-31", "BURDUBAI", "Pharma"), ("Driver", "D046", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D046", "2025-05-01", "2025-07-31", "AJMAN", "Pharma"), ("Driver", "D046", "2025-08-01", "2025-10-31", "JUMAIRAH", "Pharma"),
+    ("Driver", "D040", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D040", "2024-08-01", "2024-10-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D040", "2024-11-01", "2025-01-31", "JUMAIRAH", "Pharma"), ("Driver", "D040", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D040", "2025-05-01", "2025-07-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D040", "2025-08-01", "2025-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D037", "2024-05-01", "2024-07-31", "RAK", "Consumer"), ("Driver", "D037", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D037", "2024-11-01", "2025-01-31", "AJM", "Consumer"), ("Driver", "D037", "2025-02-01", "2025-04-30", "SHJS", "Consumer"),
+    ("Driver", "D037", "2025-05-01", "2025-07-31", "FUJAIRAH", "Pharma"), ("Driver", "D037", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Driver", "D026", "2024-05-01", "2024-07-31", "FLEET SERVICE/RTA WORK", "Fleet"), ("Driver", "D026", "2024-08-01", "2024-10-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D026", "2024-11-01", "2025-01-31", "FLEET SERVICE/RTA WORK", "Fleet"), ("Driver", "D026", "2025-05-01", "2025-07-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D026", "2025-08-01", "2025-10-31", "FLEET SERVICE/RTA WORK", "Fleet"), ("Driver", "D024", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D024", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D024", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D024", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D024", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D047", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D047", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D047", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D047", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D047", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D061", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D061", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D061", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D044", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D044", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D052", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D052", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D052", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D089", "2024-05-01", "2024-07-31", "DXBO", "Consumer"), ("Driver", "D089", "2024-08-01", "2024-10-31", "RAK", "Consumer"),
+    ("Driver", "D089", "2025-05-01", "2025-07-31", "ALQ", "Consumer"), ("Driver", "D089", "2025-08-01", "2025-10-31", "SHJS", "Consumer"),
+    ("Driver", "D036", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D036", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D036", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D036", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D036", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D054", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D054", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D054", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D088", "2024-05-01", "2024-07-31", "ALQ", "Consumer"), ("Driver", "D088", "2024-08-01", "2024-10-31", "SHJS", "Consumer"),
+    ("Driver", "D088", "2024-11-01", "2025-01-31", "JA", "Consumer"), ("Driver", "D088", "2025-05-01", "2025-07-31", "BUR", "Consumer"),
+    ("Driver", "D088", "2025-08-01", "2025-10-31", "ALQ", "Consumer"), ("Driver", "D023", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D023", "2024-08-01", "2024-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D023", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D023", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D104", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D104", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D104", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D104", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D107", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D027", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D027", "2024-08-01", "2024-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D027", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D027", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D103", "2024-08-01", "2024-10-31", "DXBO", "Consumer"), ("Driver", "D103", "2024-11-01", "2025-01-31", "RAK", "Consumer"),
+    ("Driver", "D103", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D103", "2025-05-01", "2025-07-31", "SHJS", "Consumer"),
+    ("Driver", "D103", "2025-08-01", "2025-10-31", "DXBO", "Consumer"), ("Driver", "D042", "2024-05-01", "2024-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D042", "2024-08-01", "2024-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"), ("Driver", "D042", "2024-11-01", "2025-01-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D042", "2025-05-01", "2025-07-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D042", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D033", "2024-05-01", "2024-07-31", "AJMAN", "Pharma"), ("Driver", "D033", "2024-08-01", "2024-10-31", "JA", "Consumer"),
+    ("Driver", "D033", "2024-11-01", "2025-01-31", "SHJS", "Consumer"), ("Driver", "D033", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Driver", "D033", "2025-05-01", "2025-07-31", "RAK", "Consumer"), ("Driver", "D033", "2025-08-01", "2025-10-31", "JA", "Consumer")
 ]
 
-def auto_seed_database():
-    current_areas = load_table("areas")
-    force = False
-    if len(current_areas) != 39: force = True
-    
-    if FIREBASE_READY:
-        if force:
-            run_query(None, table_name="areas", action="CLEAR_TABLE")
-            for code, name, sector, nh, order in SEED_AREAS_IMAGE: 
-                db_fs.collection("areas").add({"code": code, "name": name, "sector": sector, "needs_helper": nh, "sort_order": order})
-        if len(list(db_fs.collection("vehicles").limit(1).stream())) == 0:
-            for num, vtype in SEED_VEHICLES: db_fs.collection("vehicles").add({"number": num, "type": vtype})
-        if len(list(db_fs.collection("drivers").limit(1).stream())) == 0:
-            for code in KEEP_DRIVERS: db_fs.collection("drivers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "None", "restriction": "None", "anchor_area": "None"})
-        if len(list(db_fs.collection("helpers").limit(1).stream())) == 0:
-            for code in KEEP_HELPERS: db_fs.collection("helpers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "None", "health_card": "No", "anchor_area": "None"})
-    else:
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM areas")
-        if force or c.fetchone()[0] != 39:
-            c.execute("DELETE FROM areas")
-            c.executemany("INSERT INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
-            conn.commit()
-        c.execute("SELECT COUNT(*) FROM drivers")
-        if c.fetchone()[0] == 0:
-            c.executemany("INSERT INTO vehicles (number, type) VALUES (?, ?)", SEED_VEHICLES)
-            d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "None", "None", "None", "None") for code in KEEP_DRIVERS]
-            c.executemany("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed)
-            h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
-            c.executemany("INSERT INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
-            conn.commit()
-auto_seed_database()
+if "db_initialized" not in st.session_state:
+    def execute_global_init():
+        try:
+            # Seed Areas
+            current_areas = load_table("areas")
+            if len(current_areas) != 39:
+                if FIREBASE_READY:
+                    run_query(None, table_name="areas", action="CLEAR_TABLE")
+                    for code, name, sector, nh, order in SEED_AREAS_IMAGE: 
+                        db_fs.collection("areas").add({"code": code, "name": name, "sector": sector, "needs_helper": nh, "sort_order": order})
+                else:
+                    c = conn.cursor()
+                    c.execute("DELETE FROM areas")
+                    c.executemany("INSERT INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
+                    conn.commit()
+            
+            # Seed Missing Drivers/Helpers
+            d_df = load_table('drivers')
+            if len(d_df) == 0:
+                if FIREBASE_READY:
+                    for code in KEEP_DRIVERS: db_fs.collection("drivers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "None", "restriction": "None", "anchor_area": "None"})
+                else:
+                    c = conn.cursor()
+                    d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "None", "None", "None", "None") for code in KEEP_DRIVERS]
+                    c.executemany("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed)
+                    conn.commit()
+            
+            h_df = load_table('helpers')
+            if len(h_df) == 0:
+                if FIREBASE_READY:
+                    for code in KEEP_HELPERS: db_fs.collection("helpers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "None", "health_card": "No", "anchor_area": "None"})
+                else:
+                    c = conn.cursor()
+                    h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
+                    c.executemany("INSERT INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
+                    conn.commit()
+            
+            st.cache_data.clear()
+        except Exception:
+            pass
+            
+    execute_global_init()
+    st.session_state.db_initialized = True
 
-def clean_legacy_codes():
-    try:
-        d_df = load_table('drivers')
-        if not d_df.empty:
-            for _, r in d_df.iterrows():
-                code = str(r.get('code', ''))
-                if code not in KEEP_DRIVERS:
-                    run_query(None, None, "drivers", "DELETE_DOC", r['id'])
-        h_df = load_table('helpers')
-        if not h_df.empty:
-            for _, r in h_df.iterrows():
-                code = str(r.get('code', ''))
-                if code not in KEEP_HELPERS:
-                    run_query(None, None, "helpers", "DELETE_DOC", r['id'])
-        hist_df = load_table('history')
-        if not hist_df.empty:
-            for _, r in hist_df.iterrows():
-                code = str(r.get('person_code', ''))
-                if code not in KEEP_DRIVERS and code not in KEEP_HELPERS:
-                    run_query(None, None, "history", "DELETE_DOC", r['id'])
-    except Exception:
-        pass
-clean_legacy_codes()
-
-
-# --- SMART SCORING LOGIC ---
 def safe_parse_date(date_str):
     try: return datetime.strptime(date_str, "%Y-%m-%d").date()
     except: return date.today()
@@ -873,22 +713,16 @@ if choice == "1. AI Route Planner":
     
     areas = load_table('areas')
     vehicles = load_table('vehicles')
-    
-    if "attempt_generate" not in st.session_state:
-        st.session_state.attempt_generate = False
+
     if "bypass_val" not in st.session_state:
         st.session_state.bypass_val = False
 
     generate_clicked = st.button("Generate Smart AI Route Plan", type="primary")
 
-    if generate_clicked:
-        st.session_state.attempt_generate = True
-        st.session_state.bypass_val = False
-
-    if st.session_state.get("attempt_generate", False):
+    if generate_clicked or st.session_state.bypass_val:
         val_errors = check_route_requirements(areas, all_d, all_h, vehicles, vacs, month_target)
         
-        if val_errors and not st.session_state.get("bypass_val", False):
+        if val_errors and not st.session_state.bypass_val:
             st.error("🚨 **ROUTE GENERATION HALTED: DATABASE SHORTAGE DETECTED**")
             for err in val_errors: st.warning(err)
             st.markdown("Cannot fulfill the 39-Route Plan with current database. Please add the missing vehicles/drivers, or bypass this warning to assign what you have.")
@@ -990,7 +824,6 @@ if choice == "1. AI Route Planner":
                     q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     run_query(q_dr, (index+1, r['Area Code'], r['Area Full Name'], r['Sector'], r['Driver Code'], r['Driver Name'], r['Helper Code'], r['Helper Name'], r['Vehicle Number'], r['Division Category']), table_name="draft_routes", action="INSERT", data={"order_num":index+1, "area_code":r['Area Code'], "area_name":r['Area Full Name'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Driver Name'], "helper_code":r['Helper Code'], "helper_name":r['Helper Name'], "veh_num":r['Vehicle Number'], "div_cat":r['Division Category']})
                 
-                st.session_state.attempt_generate = False
                 st.session_state.bypass_val = False
                 st.rerun()
 
@@ -1015,13 +848,13 @@ elif choice == "2. Database Management":
         
         c_add, c_edit = st.columns(2)
         with c_add:
-            d_name = st.text_input("New Driver Name")
-            d_code = st.text_input("New Driver Code")
+            d_name = st.text_input("New Driver Name", key="add_d_name")
+            d_code = st.text_input("New Driver Code", key="add_d_code")
             col_t, col_s, col_h = st.columns(3)
-            d_type = col_t.selectbox("New Driver Veh Type", VEHICLE_OPTIONS)
-            d_sec = col_s.selectbox("New Driver Sector", SECTOR_OPTIONS)
-            d_needs_h = col_h.selectbox("New Driver Needs Helper?", NEEDS_HELPER_OPTIONS, index=2)
-            d_anchor = st.selectbox("New Driver Anchor Area", area_list)
+            d_type = col_t.selectbox("New Driver Veh Type", VEHICLE_OPTIONS, key="add_d_type")
+            d_sec = col_s.selectbox("New Driver Sector", SECTOR_OPTIONS, key="add_d_sec")
+            d_needs_h = col_h.selectbox("New Driver Needs Helper?", NEEDS_HELPER_OPTIONS, index=2, key="add_d_nh")
+            d_anchor = st.selectbox("New Driver Anchor Area", area_list, key="add_d_anchor")
             if st.button("➕ Add Driver", use_container_width=True):
                 if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", 
                           (d_name, d_code, d_type, d_sec, d_needs_h, "None", d_anchor), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":d_type, "sector":d_sec, "needs_helper":d_needs_h, "restriction":"None", "anchor_area":d_anchor}):
@@ -1032,21 +865,21 @@ elif choice == "2. Database Management":
             sel_d_code = st.selectbox("Select Driver to Edit/Delete", drivers_df['code'].tolist() if not drivers_df.empty else [])
             if sel_d_code:
                 d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
-                e_name = st.text_input("Edit Driver Name", d_data['name'])
+                e_name = st.text_input("Edit Driver Name", d_data['name'], key=f"edit_d_name_{d_data['id']}")
                 ct, cs, ch = st.columns(3)
-                e_type = ct.selectbox("Edit Driver Veh Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(d_data.get('veh_type', 'None')) if d_data.get('veh_type') in VEHICLE_OPTIONS else 0)
-                e_sec = cs.selectbox("Edit Driver Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(d_data.get('sector', 'None')) if d_data.get('sector') in SECTOR_OPTIONS else 0)
-                e_needs_h = ch.selectbox("Edit Driver Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(d_data.get('needs_helper', 'None')) if d_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 2)
+                e_type = ct.selectbox("Edit Driver Veh Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(d_data.get('veh_type', 'None')) if d_data.get('veh_type') in VEHICLE_OPTIONS else 0, key=f"edit_d_veh_{d_data['id']}")
+                e_sec = cs.selectbox("Edit Driver Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(d_data.get('sector', 'None')) if d_data.get('sector') in SECTOR_OPTIONS else 0, key=f"edit_d_sec_{d_data['id']}")
+                e_needs_h = ch.selectbox("Edit Driver Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(d_data.get('needs_helper', 'None')) if d_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 2, key=f"edit_d_nh_{d_data['id']}")
                 
                 a_idx = area_list.index(d_data.get('anchor_area', 'None')) if d_data.get('anchor_area', 'None') in area_list else 0
-                e_anchor = st.selectbox("Edit Driver Anchor", area_list, index=a_idx)
+                e_anchor = st.selectbox("Edit Driver Anchor", area_list, index=a_idx, key=f"edit_d_anc_{d_data['id']}")
                 
                 c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update Driver", use_container_width=True):
+                if c_upd.button("💾 Update Driver", use_container_width=True, key=f"btn_d_upd_{d_data['id']}"):
                     if run_query("UPDATE drivers SET name=?, veh_type=?, sector=?, needs_helper=?, anchor_area=? WHERE code=?", (e_name, e_type, e_sec, e_needs_h, e_anchor, sel_d_code), table_name="drivers", action="UPDATE", doc_id=d_data['id'], data={"name":e_name, "veh_type":e_type, "sector":e_sec, "needs_helper":e_needs_h, "anchor_area":e_anchor}):
                         st.success("Driver Updated!")
                         st.rerun()
-                if c_del.button("🗑️ Delete Driver", use_container_width=True):
+                if c_del.button("🗑️ Delete Driver", use_container_width=True, key=f"btn_d_del_{d_data['id']}"):
                     if run_query("DELETE FROM drivers WHERE code=?", (sel_d_code,), table_name="drivers", action="DELETE_DOC", doc_id=d_data['id']):
                         st.success("Driver Deleted!")
                         st.rerun()
@@ -1060,10 +893,10 @@ elif choice == "2. Database Management":
         
         c_add, c_edit = st.columns(2)
         with c_add:
-            h_name = st.text_input("New Helper Name")
-            h_code = st.text_input("New Helper Code")
-            h_health = st.selectbox("New Helper Health Card?", ["No", "Yes"])
-            h_anchor = st.selectbox("New Helper Anchor Area", area_list)
+            h_name = st.text_input("New Helper Name", key="add_h_name")
+            h_code = st.text_input("New Helper Code", key="add_h_code")
+            h_health = st.selectbox("New Helper Health Card?", ["No", "Yes"], key="add_h_hc")
+            h_anchor = st.selectbox("New Helper Anchor Area", area_list, key="add_h_anc")
             if st.button("➕ Add Helper", use_container_width=True):
                 if run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area) VALUES (?, ?, ?, ?, ?)", (h_name, h_code, h_health, "None", h_anchor), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"None", "anchor_area":h_anchor}):
                     st.success("Helper Added!")
@@ -1072,17 +905,17 @@ elif choice == "2. Database Management":
             sel_h_code = st.selectbox("Select Helper to Edit/Delete", helpers_df['code'].tolist() if not helpers_df.empty else [])
             if sel_h_code:
                 h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
-                e_hname = st.text_input("Edit Helper Name", h_data['name'])
-                e_hhealth = st.selectbox("Edit Helper Health Card", ["No", "Yes"], index=1 if h_data.get('health_card') == "Yes" else 0)
+                e_hname = st.text_input("Edit Helper Name", h_data['name'], key=f"edit_h_name_{h_data['id']}")
+                e_hhealth = st.selectbox("Edit Helper Health Card", ["No", "Yes"], index=1 if h_data.get('health_card') == "Yes" else 0, key=f"edit_h_hc_{h_data['id']}")
                 ha_idx = area_list.index(h_data.get('anchor_area', 'None')) if h_data.get('anchor_area', 'None') in area_list else 0
-                e_hanchor = st.selectbox("Edit Helper Anchor", area_list, index=ha_idx)
+                e_hanchor = st.selectbox("Edit Helper Anchor", area_list, index=ha_idx, key=f"edit_h_anc_{h_data['id']}")
                 
                 c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update Helper", use_container_width=True):
+                if c_upd.button("💾 Update Helper", use_container_width=True, key=f"btn_h_upd_{h_data['id']}"):
                     if run_query("UPDATE helpers SET name=?, health_card=?, anchor_area=? WHERE code=?", (e_hname, e_hhealth, e_hanchor, sel_h_code), table_name="helpers", action="UPDATE", doc_id=h_data['id'], data={"name":e_hname, "health_card":e_hhealth, "anchor_area":e_hanchor}):
                         st.success("Helper Updated!")
                         st.rerun()
-                if c_del.button("🗑️ Delete Helper", use_container_width=True):
+                if c_del.button("🗑️ Delete Helper", use_container_width=True, key=f"btn_h_del_{h_data['id']}"):
                     if run_query("DELETE FROM helpers WHERE code=?", (sel_h_code,), table_name="helpers", action="DELETE_DOC", doc_id=h_data['id']):
                         st.success("Helper Deleted!")
                         st.rerun()
@@ -1096,11 +929,11 @@ elif choice == "2. Database Management":
         
         c_add, c_edit = st.columns(2)
         with c_add:
-            a_name = st.text_input("New Area Name")
-            a_code = st.text_input("New Area Code")
+            a_name = st.text_input("New Area Name", key="add_a_name")
+            a_code = st.text_input("New Area Code", key="add_a_code")
             col_s, col_n = st.columns(2)
-            a_sec = col_s.selectbox("New Area Sector", SECTOR_OPTIONS)
-            a_needs = col_n.selectbox("New Area Needs Helper?", NEEDS_HELPER_OPTIONS)
+            a_sec = col_s.selectbox("New Area Sector", SECTOR_OPTIONS, key="add_a_sec")
+            a_needs = col_n.selectbox("New Area Needs Helper?", NEEDS_HELPER_OPTIONS, key="add_a_nh")
             if st.button("➕ Add Area", use_container_width=True):
                 new_order = len(a_df) + 1
                 if run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", (a_name, a_code, a_sec, a_needs, new_order), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":a_sec, "needs_helper":a_needs, "sort_order":new_order}):
@@ -1110,18 +943,18 @@ elif choice == "2. Database Management":
             sel_a = st.selectbox("Select Area to Edit/Delete", a_df['name'].tolist() if not a_df.empty else [])
             if sel_a:
                 a_data = a_df[a_df['name'] == sel_a].iloc[0]
-                ea_name = st.text_input("Edit Area Name", a_data['name'])
-                ea_code = st.text_input("Edit Area Code", a_data['code'])
+                ea_name = st.text_input("Edit Area Name", a_data['name'], key=f"edit_a_name_{a_data['id']}")
+                ea_code = st.text_input("Edit Area Code", a_data['code'], key=f"edit_a_code_{a_data['id']}")
                 ecs, ecn = st.columns(2)
-                ea_sec = ecs.selectbox("Edit Area Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(a_data.get('sector', 'Pharma')) if a_data.get('sector') in SECTOR_OPTIONS else 0)
-                ea_needs = ecn.selectbox("Edit Area Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(a_data.get('needs_helper', 'Yes')) if a_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 0)
+                ea_sec = ecs.selectbox("Edit Area Sector", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(a_data.get('sector', 'Pharma')) if a_data.get('sector') in SECTOR_OPTIONS else 0, key=f"edit_a_sec_{a_data['id']}")
+                ea_needs = ecn.selectbox("Edit Area Needs Helper", NEEDS_HELPER_OPTIONS, index=NEEDS_HELPER_OPTIONS.index(a_data.get('needs_helper', 'Yes')) if a_data.get('needs_helper') in NEEDS_HELPER_OPTIONS else 0, key=f"edit_a_nh_{a_data['id']}")
                 
                 cu, cd = st.columns(2)
-                if cu.button("💾 Update Area", use_container_width=True):
+                if cu.button("💾 Update Area", use_container_width=True, key=f"btn_a_upd_{a_data['id']}"):
                     if run_query("UPDATE areas SET name=?, code=?, sector=?, needs_helper=? WHERE name=?", (ea_name, ea_code, ea_sec, ea_needs, sel_a), table_name="areas", action="UPDATE", doc_id=a_data['id'], data={"name":ea_name, "code":ea_code, "sector":ea_sec, "needs_helper":ea_needs}):
                         st.success("Area Updated!")
                         st.rerun()
-                if cd.button("🗑️ Delete Area", use_container_width=True):
+                if cd.button("🗑️ Delete Area", use_container_width=True, key=f"btn_a_del_{a_data['id']}"):
                     if run_query("DELETE FROM areas WHERE name=?", (sel_a,), table_name="areas", action="DELETE_DOC", doc_id=a_data['id']):
                         st.success("Area Deleted!")
                         st.rerun()
@@ -1135,9 +968,9 @@ elif choice == "2. Database Management":
         
         c_add, c_edit = st.columns(2)
         with c_add:
-            v_num = st.text_input("New Vehicle Number")
-            v_type = st.selectbox("New Vehicle Type", VEHICLE_OPTIONS)
-            v_anchor = st.selectbox("New Vehicle Anchor Area", area_list)
+            v_num = st.text_input("New Vehicle Number", key="add_v_num")
+            v_type = st.selectbox("New Vehicle Type", VEHICLE_OPTIONS, key="add_v_type")
+            v_anchor = st.selectbox("New Vehicle Anchor Area", area_list, key="add_v_anc")
             if st.button("➕ Add Vehicle", use_container_width=True):
                 if run_query("INSERT INTO vehicles (number, type, anchor_area) VALUES (?, ?, ?)", (v_num, v_type, v_anchor), table_name="vehicles", action="INSERT", data={"number":v_num, "type":v_type, "anchor_area":v_anchor}):
                     st.success("Vehicle Added!")
@@ -1146,16 +979,16 @@ elif choice == "2. Database Management":
             sel_v = st.selectbox("Select Vehicle to Edit/Delete", v_df['number'].tolist() if not v_df.empty else [])
             if sel_v:
                 v_data = v_df[v_df['number'] == sel_v].iloc[0]
-                ev_type = st.selectbox("Edit Vehicle Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(v_data.get('type', 'None')) if v_data.get('type') in VEHICLE_OPTIONS else 0)
+                ev_type = st.selectbox("Edit Vehicle Type", VEHICLE_OPTIONS, index=VEHICLE_OPTIONS.index(v_data.get('type', 'None')) if v_data.get('type') in VEHICLE_OPTIONS else 0, key=f"edit_v_type_{v_data['id']}")
                 va_idx = area_list.index(v_data.get('anchor_area', 'None')) if v_data.get('anchor_area', 'None') in area_list else 0
-                ev_anchor = st.selectbox("Edit Vehicle Anchor Area", area_list, index=va_idx)
+                ev_anchor = st.selectbox("Edit Vehicle Anchor Area", area_list, index=va_idx, key=f"edit_v_anc_{v_data['id']}")
                 
                 cu, cd = st.columns(2)
-                if cu.button("💾 Update Veh", use_container_width=True):
+                if cu.button("💾 Update Veh", use_container_width=True, key=f"btn_v_upd_{v_data['id']}"):
                     if run_query("UPDATE vehicles SET type=?, anchor_area=? WHERE number=?", (ev_type, ev_anchor, sel_v), table_name="vehicles", action="UPDATE", doc_id=v_data['id'], data={"type":ev_type, "anchor_area":ev_anchor}):
                         st.success("Vehicle Updated!")
                         st.rerun()
-                if cd.button("🗑️ Delete Veh", use_container_width=True):
+                if cd.button("🗑️ Delete Veh", use_container_width=True, key=f"btn_v_del_{v_data['id']}"):
                     if run_query("DELETE FROM vehicles WHERE number=?", (sel_v,), table_name="vehicles", action="DELETE_DOC", doc_id=v_data['id']):
                         st.success("Vehicle Deleted!")
                         st.rerun()
@@ -1204,7 +1037,7 @@ elif choice == "3. Past Experience Builder":
     search_hist = st.text_input("🔍 Search History by Person Code or Name", "")
     disp_hist = history_df.drop(columns=['id'], errors='ignore').sort_values(by="date", ascending=False).copy()
     if search_hist:
-        disp_hist = disp_hist[disp_hist['person_code'].str.contains(search_hist, case=False, na=False) | disp_hist['person_name'].str.contains(search_hist, case=False, na=False)]
+        disp_hist = disp_hist[disp_hist['person_code'].astype(str).str.contains(search_hist, case=False, na=False) | disp_hist['person_name'].astype(str).str.contains(search_hist, case=False, na=False)]
     
     if not disp_hist.empty: disp_hist.insert(0, 'S/N', range(1, 1 + len(disp_hist)))
     st.dataframe(disp_hist, use_container_width=True, height=250, hide_index=True)
@@ -1223,7 +1056,7 @@ elif choice == "3. Past Experience Builder":
                     h_seed_full = [(ptype, pcode, RAW_NAME_MAP.get(pcode, "Unknown"), parea, psec, pstart, pend) for ptype, pcode, pstart, pend, parea, psec in PRELOAD_HISTORY]
                     c.executemany("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", h_seed_full)
                     conn.commit()
-                clear_cache()
+                st.cache_data.clear()
             st.success("Past Experience data fully restored to PDF specifications!")
             st.rerun()
 
@@ -1278,19 +1111,19 @@ elif choice == "3. Past Experience Builder":
                 hist_id = hist_map[sel_hist_str]
                 hist_data = history_df[history_df['id'].astype(str) == hist_id].iloc[0]
                 a_idx = area_list.index(hist_data['area']) if hist_data['area'] in area_list else 0
-                e_area = st.selectbox("Edit Area Experience", area_list, index=a_idx)
-                e_sec = st.selectbox("Edit Sector Experience", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(hist_data.get('sector', 'Pharma')) if hist_data.get('sector') in SECTOR_OPTIONS else 0)
+                e_area = st.selectbox("Edit Area Experience", area_list, index=a_idx, key=f"he_area_{hist_id}")
+                e_sec = st.selectbox("Edit Sector Experience", SECTOR_OPTIONS, index=SECTOR_OPTIONS.index(hist_data.get('sector', 'Pharma')) if hist_data.get('sector') in SECTOR_OPTIONS else 0, key=f"he_sec_{hist_id}")
                 ed1, ed2 = st.columns(2)
                 e_start_val, e_end_val = safe_parse_date(hist_data['date']), safe_parse_date(hist_data['end_date'])
-                new_start = ed1.date_input("Edit Exp Start Date", value=e_start_val)
-                new_end = ed2.date_input("Edit Exp End Date", value=e_end_val)
+                new_start = ed1.date_input("Edit Exp Start Date", value=e_start_val, key=f"he_es_{hist_id}")
+                new_end = ed2.date_input("Edit Exp End Date", value=e_end_val, key=f"he_ee_{hist_id}")
                 
                 c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update Experience", use_container_width=True):
+                if c_upd.button("💾 Update Experience", use_container_width=True, key=f"he_upd_{hist_id}"):
                     if run_query("UPDATE history SET area=?, sector=?, date=?, end_date=? WHERE id=?", (e_area, e_sec, new_start.strftime("%Y-%m-%d"), new_end.strftime("%Y-%m-%d"), hist_id), table_name="history", action="UPDATE", doc_id=hist_id, data={"area":e_area, "sector":e_sec, "date":new_start.strftime("%Y-%m-%d"), "end_date":new_end.strftime("%Y-%m-%d")}):
                         st.success("Experience Updated!")
                         st.rerun()
-                if c_del.button("🗑️ Delete Experience", use_container_width=True):
+                if c_del.button("🗑️ Delete Experience", use_container_width=True, key=f"he_del_{hist_id}"):
                     if run_query("DELETE FROM history WHERE id=?", (hist_id,), table_name="history", action="DELETE_DOC", doc_id=hist_id):
                         st.success("Experience Deleted!")
                         st.rerun()
@@ -1354,7 +1187,7 @@ elif choice == "4. Vacation Schedule":
     search_vac = st.text_input("🔍 Search Vacations by Person Code or Name", "")
     disp_vac = vacs_df.drop(columns=['id'], errors='ignore').copy()
     if search_vac and not disp_vac.empty:
-        disp_vac = disp_vac[disp_vac.get('person_code', '').astype(str).str.contains(search_vac, case=False, na=False) | disp_vac['person_name'].str.contains(search_vac, case=False, na=False)]
+        disp_vac = disp_vac[disp_vac.get('person_code', '').astype(str).str.contains(search_vac, case=False, na=False) | disp_vac['person_name'].astype(str).str.contains(search_vac, case=False, na=False)]
     
     if not disp_vac.empty: disp_vac.insert(0, 'S/N', range(1, 1 + len(disp_vac)))
     st.dataframe(disp_vac, use_container_width=True, height=250, hide_index=True)
@@ -1428,18 +1261,18 @@ elif choice == "4. Vacation Schedule":
                 vac_data = vacs_df[vacs_df['id'].astype(str) == vac_id].iloc[0]
                 ed1, ed2 = st.columns(2)
                 e_vstart_val, e_vend_val = safe_parse_date(vac_data['start_date']), safe_parse_date(vac_data['end_date'])
-                new_vstart = ed1.date_input("Edit Vac Start Date", value=e_vstart_val)
-                new_vend = ed2.date_input("Edit Vac End Date", value=e_vend_val)
+                new_vstart = ed1.date_input("Edit Vac Start Date", value=e_vstart_val, key=f"vac_es_{vac_id}")
+                new_vend = ed2.date_input("Edit Vac End Date", value=e_vend_val, key=f"vac_ee_{vac_id}")
                 
                 c_upd, c_del = st.columns(2)
-                if c_upd.button("💾 Update Vacation", use_container_width=True):
+                if c_upd.button("💾 Update Vacation", use_container_width=True, key=f"vac_upd_{vac_id}"):
                     if new_vstart > new_vend: st.error("Start Date cannot be after End Date.")
                     else:
                         if run_query("UPDATE vacations SET start_date=?, end_date=? WHERE id=?", (new_vstart.strftime("%Y-%m-%d"), new_vend.strftime("%Y-%m-%d"), vac_id), table_name="vacations", action="UPDATE", doc_id=vac_id, data={"start_date":new_vstart.strftime("%Y-%m-%d"), "end_date":new_vend.strftime("%Y-%m-%d")}):
                             st.success("Vacation Updated!")
                             st.rerun()
                         
-                if c_del.button("🗑️ Delete Vacation", use_container_width=True):
+                if c_del.button("🗑️ Delete Vacation", use_container_width=True, key=f"vac_del_{vac_id}"):
                     if run_query("DELETE FROM vacations WHERE id=?", (vac_id,), table_name="vacations", action="DELETE_DOC", doc_id=vac_id):
                         st.success("Vacation Deleted!")
                         st.rerun()
