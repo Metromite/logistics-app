@@ -196,8 +196,8 @@ VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 NEEDS_HELPER_OPTIONS = ["Yes", "No", "None"]
 
-# Adjusted to match the Image while keeping Pandas unique names
-ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Drivers Name", "AREA", "Helper Code", "Helpers Name", "VEH NO", "Division Category", "Sector"]
+# NEW: Moved "Sector" explicitly to the right of "AREA" for full Cross-Training visibility
+ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Drivers Name", "AREA", "Sector", "Helper Code", "Helpers Name", "VEH NO", "Division Category"]
 
 # --- STRICT HARDCODED ALLOWLISTS ---
 KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
@@ -468,17 +468,21 @@ def safe_parse_date(date_str):
     try: return datetime.strptime(str(date_str).split(" ")[0], "%Y-%m-%d").date()
     except: return date.today()
 
-# --- HIGH PERFORMANCE SCORING HELPERS ---
+# --- HIGH PERFORMANCE SCORING HELPERS (WITH CROSS TRAINING SECTOR CACHE) ---
 def build_experience_cache():
     history_df = load_table('history')
     exp_cache = {}
     if not history_df.empty:
         for _, r in history_df.iterrows():
-            code, area = r['person_code'], r['area']
+            code, area, sector = r['person_code'], r['area'], r.get('sector', 'Pharma')
+            if pd.isna(sector) or sector == "nan": sector = "Pharma"
             end_date = safe_parse_date(r['end_date'] if pd.notna(r.get('end_date')) and r['end_date'] != "None" else r['date'])
-            if code not in exp_cache: exp_cache[code] = {}
-            if area not in exp_cache[code] or end_date > exp_cache[code][area]:
-                exp_cache[code][area] = end_date
+            
+            if code not in exp_cache: exp_cache[code] = {'areas': {}, 'sectors': {}}
+            if area not in exp_cache[code]['areas'] or end_date > exp_cache[code]['areas'][area]:
+                exp_cache[code]['areas'][area] = end_date
+            if sector not in exp_cache[code]['sectors'] or end_date > exp_cache[code]['sectors'][sector]:
+                exp_cache[code]['sectors'][sector] = end_date
     return exp_cache
 
 def build_vacation_cache():
@@ -504,16 +508,18 @@ def vacation_within_3_months(person_code, target_date, vac_cache):
 
 def months_until_next_vacation(person_code, vac_cache, target_date):
     past_vacs = [end for start, end in vac_cache.get(person_code, []) if end < target_date]
-    if not past_vacs: return 0 # Overdue or never taken
+    if not past_vacs: return 0 
     last_vac = max(past_vacs)
     days_since = (target_date - last_vac).days
     return max(0, 365 - days_since) / 30.0
 
 
-# --- WEIGHTED AI SCORING ALGORITHM ---
+# --- WEIGHTED AI SCORING ALGORITHM (WITH SECTOR CROSS TRAINING) ---
 NEVER_WORKED_BONUS = 10000
+NEVER_WORKED_SECTOR_BONUS = 8000
 ANCHOR_MATCH_BONUS = 5000
 MONTHS_WEIGHT = 100
+SECTOR_MONTHS_WEIGHT = 50
 RECENT_AREA_PENALTY = -3000
 VACATION_SOON_PENALTY = -1500
 
@@ -531,40 +537,50 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
         if p_veh not in [req_veh, "None"] and not (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
             return None, f"Excluded: Vehicle Mismatch ({p_veh} != {req_veh})"
         
-        p_sec = candidate.get('sector', 'None')
-        if p_sec not in [req_sector, "None"]:
-            return None, f"Excluded: Sector Mismatch ({p_sec} != {req_sector})"
+        # EXCLUDED Sector Hard Constraint to allow FULL Sector Cross-Training capability.
+        # Drivers/Helpers now freely swap between Consumer and Pharma based on experience time.
 
-    # 2. Anchor Logic
+    # 2. Anchor Logic (Strict Exclusion)
     anchor = candidate.get('anchor_area')
     if anchor == area['name']:
         score += ANCHOR_MATCH_BONUS
         reasons.append(f"Anchor Match (+{ANCHOR_MATCH_BONUS})")
     elif anchor not in ["None", "", None] and type(anchor) == str:
-        return None, f"Excluded: Anchored to {anchor}"
+        return None, f"Excluded: Anchored strictly to {anchor}"
 
-    # 3. Experience Logic (Rotation Goal)
-    last_worked = exp_cache.get(code, {}).get(area['name'])
-    if not last_worked:
+    # 3. Area Rotation Logic
+    last_worked_area = exp_cache.get(code, {}).get('areas', {}).get(area['name'])
+    if not last_worked_area:
         score += NEVER_WORKED_BONUS
-        reasons.append(f"Never worked here (+{NEVER_WORKED_BONUS})")
+        reasons.append(f"Never worked Area (+{NEVER_WORKED_BONUS})")
     else:
-        months_since = (target_date - last_worked).days / 30.0
+        months_since = (target_date - last_worked_area).days / 30.0
         if months_since < 3:
             score += RECENT_AREA_PENALTY
-            reasons.append(f"Recent Visit <3m ({RECENT_AREA_PENALTY})")
+            reasons.append(f"Recent Area Visit <3m ({RECENT_AREA_PENALTY})")
         else:
             time_score = int(months_since * MONTHS_WEIGHT)
             score += time_score
-            reasons.append(f"{months_since:.1f}m since last visit (+{time_score})")
+            reasons.append(f"{months_since:.1f}m since area (+{time_score})")
 
-    # 4. Vacation Predictor Logic
+    # 4. Sector Cross-Training Logic (New feature!)
+    last_worked_sector = exp_cache.get(code, {}).get('sectors', {}).get(req_sector)
+    if not last_worked_sector:
+        score += NEVER_WORKED_SECTOR_BONUS
+        reasons.append(f"Never worked {req_sector} Sector (+{NEVER_WORKED_SECTOR_BONUS})")
+    else:
+        months_since_sec = (target_date - last_worked_sector).days / 30.0
+        time_score_sec = int(months_since_sec * SECTOR_MONTHS_WEIGHT)
+        score += time_score_sec
+        reasons.append(f"{months_since_sec:.1f}m since {req_sector} Sector (+{time_score_sec})")
+
+    # 5. Vacation Predictor Logic
     vac_start = vacation_within_3_months(code, target_date, vac_cache)
     if vac_start:
         score += VACATION_SOON_PENALTY
         reasons.append(f"Vacation soon ({VACATION_SOON_PENALTY})")
 
-    # 5. Role Specific Additions
+    # 6. Role Specific Additions
     if role == "Helper":
         if "Consumer" in req_sector:
             if candidate.get('health_card') == 'Yes':
@@ -683,7 +699,7 @@ if choice == "1. AI Route Planner":
         disp_draft = draft_routes.copy()
         
         # Mapping DB to Requested Visual Layout exactly
-        disp_draft = disp_draft.rename(columns={"area_name": "AREA", "veh_num": "VEH NO"})
+        disp_draft = disp_draft.rename(columns={"area_name": "AREA", "veh_num": "VEH NO", "sector": "Sector"})
         if "driver_name" in disp_draft.columns: disp_draft["Drivers Name"] = disp_draft["driver_name"]
         if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
         if "helper_name" in disp_draft.columns: disp_draft["Helpers Name"] = disp_draft["helper_name"]
@@ -731,7 +747,14 @@ if choice == "1. AI Route Planner":
         start_dt = active_routes.iloc[0].get('start_date', 'Unknown')
         st.subheader(f"📋 Current Active Route Plan (Started: {start_dt})")
         
-        disp_active = active_routes.copy().rename(columns={"area_name": "AREA", "veh_num": "VEH NO", "driver_name": "Drivers Name", "driver_code": "Driver Code", "helper_name": "Helpers Name", "helper_code": "Helper Code"})
+        # Merge Sector info to display seamlessly on active routes
+        areas = load_table('areas')
+        active_with_sector = active_routes.copy()
+        if not areas.empty:
+            sector_map = dict(zip(areas['name'], areas['sector']))
+            active_with_sector['Sector'] = active_with_sector['area_name'].map(sector_map).fillna("Pharma")
+            
+        disp_active = active_with_sector.rename(columns={"area_name": "AREA", "veh_num": "VEH NO", "driver_name": "Drivers Name", "driver_code": "Driver Code", "helper_name": "Helpers Name", "helper_code": "Helper Code"})
         disp_active = disp_active[[c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]]
         if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
         
@@ -805,7 +828,7 @@ if choice == "1. AI Route Planner":
                     prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED"
 
-                    # 1. ASSIGN DRIVER
+                    # 1. ASSIGN DRIVER (Only generates new ones if "Drivers" is selected, otherwise keeps old one)
                     if rot_type == "Drivers" or prev_assignment.empty or prev_assignment.iloc[0].get('driver_code') in ["N/A", "UNASSIGNED", None]:
                         best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                         avail_dr = all_d[~all_d['code'].isin(used_drivers)]
@@ -837,7 +860,7 @@ if choice == "1. AI Route Planner":
                         a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
                         used_drivers.add(a_d_code)
 
-                    # 2. ASSIGN HELPER
+                    # 2. ASSIGN HELPER (Only generates new ones if "Helpers" is selected, otherwise keeps old one)
                     if not needs_helper:
                         a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
                     elif rot_type == "Helpers" or prev_assignment.empty or prev_assignment.iloc[0].get('helper_code') in ["N/A", "UNASSIGNED", None]:
@@ -870,7 +893,7 @@ if choice == "1. AI Route Planner":
                         a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
 
-                    # 3. ASSIGN VEHICLE
+                    # 3. ASSIGN VEHICLE (Strict anchor adherence applies here naturally)
                     if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else d_type
@@ -885,8 +908,8 @@ if choice == "1. AI Route Planner":
 
                     route_plan.append({
                         "Driver Code": a_d_code, "Drivers Name": a_d_name, 
-                        "AREA": area_name, "Helper Code": a_h_code, "Helpers Name": a_h_name, 
-                        "VEH NO": a_v_num, "Division Category": div_cat, "Area Code": area['code'], "Sector": req_sector
+                        "AREA": area_name, "Sector": req_sector, "Helper Code": a_h_code, "Helpers Name": a_h_name, 
+                        "VEH NO": a_v_num, "Division Category": div_cat, "Area Code": area['code']
                     })
 
                 run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
