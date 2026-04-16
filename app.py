@@ -77,7 +77,10 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS vacations (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, start_date DATE, end_date DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS active_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT, start_date TEXT, end_date TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS draft_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT, start_date TEXT, end_date TEXT, div_cat TEXT, sector TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS performance (id INTEGER PRIMARY KEY, person_code TEXT, area TEXT, success_rate REAL, delay_count INTEGER)''')
+    
+    # NEW AI REASONING TABLES
+    c.execute('''CREATE TABLE IF NOT EXISTS route_plan_reasons (id INTEGER PRIMARY KEY, plan_date TEXT, area TEXT, role TEXT, selected_person TEXT, score REAL, reasons TEXT, generated_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS vacation_predictions (id INTEGER PRIMARY KEY, person_code TEXT, person_name TEXT, role TEXT, suggested_start TEXT, suggested_end TEXT, reason TEXT, replacement_person TEXT, replacement_date TEXT)''')
     
     for query in [
         "ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'",
@@ -93,7 +96,8 @@ def init_sqlite_db():
         "ALTER TABLE vehicles ADD COLUMN anchor_area TEXT DEFAULT 'None'",
         "ALTER TABLE active_routes ADD COLUMN start_date TEXT DEFAULT 'None'",
         "ALTER TABLE active_routes ADD COLUMN end_date TEXT DEFAULT 'None'",
-        "ALTER TABLE vacations ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'"
+        "ALTER TABLE vacations ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'",
+        "ALTER TABLE vacation_predictions ADD COLUMN replacement_date TEXT DEFAULT 'None'"
     ]:
         try: c.execute(query)
         except sqlite3.OperationalError: pass
@@ -115,44 +119,40 @@ def load_table(table_name):
             docs = db_fs.collection(table_name).stream()
             data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
             df = pd.DataFrame(data)
-            if table_name == 'helpers' and 'health_card' not in df.columns and not df.empty: df['health_card'] = 'No'
-            if table_name == 'drivers' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
-            if table_name == 'areas' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
-            if table_name == 'areas' and 'needs_helper' not in df.columns and not df.empty: df['needs_helper'] = 'Yes'
-            if table_name == 'areas' and 'sort_order' not in df.columns and not df.empty: df['sort_order'] = 99
-            if table_name == 'history' and 'sector' not in df.columns and not df.empty: df['sector'] = 'Pharma'
-            if table_name == 'vehicles' and 'anchor_area' not in df.columns and not df.empty: df['anchor_area'] = 'None'
-            if table_name == 'active_routes' and 'start_date' not in df.columns and not df.empty: df['start_date'] = 'None'
-            if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
+            if df.empty: return df
+            if table_name == 'helpers' and 'health_card' not in df.columns: df['health_card'] = 'No'
+            if table_name == 'drivers' and 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
+            if table_name == 'areas' and 'sector' not in df.columns: df['sector'] = 'Pharma'
+            if table_name == 'areas' and 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
+            if table_name == 'areas' and 'sort_order' not in df.columns: df['sort_order'] = 99
+            if table_name == 'history' and 'sector' not in df.columns: df['sector'] = 'Pharma'
+            if table_name == 'vehicles' and 'anchor_area' not in df.columns: df['anchor_area'] = 'None'
+            if table_name == 'active_routes' and 'start_date' not in df.columns: df['start_date'] = 'None'
+            if table_name == 'vacations' and 'person_code' not in df.columns: df['person_code'] = 'UNKNOWN'
             
-            if table_name == 'areas' and not df.empty:
+            if table_name == 'areas':
                 df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
                 df = df.sort_values(by='sort_order')
-            if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
-                df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-                df = df.sort_values(by='order_num')
-            if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
+            if table_name in ['active_routes', 'draft_routes'] and 'order_num' in df.columns:
                 df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
                 df = df.sort_values(by='order_num')
                 
-            if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
+            if table_name == 'history': df['sector'] = df['sector'].fillna('Pharma')
             return df
         except Exception as e:
             st.error(f"Error reading from Firebase: {e}")
             return pd.DataFrame()
     else:
         df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-        if table_name == 'areas' and not df.empty: 
+        if df.empty: return df
+        if table_name == 'areas': 
             df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
             df = df.sort_values(by='sort_order')
-        if table_name == 'active_routes' and not df.empty and 'order_num' in df.columns:
+        if table_name in ['active_routes', 'draft_routes'] and 'order_num' in df.columns:
             df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
             df = df.sort_values(by='order_num')
-        if table_name == 'draft_routes' and not df.empty and 'order_num' in df.columns:
-            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-            df = df.sort_values(by='order_num')
-        if table_name == 'history' and not df.empty: df['sector'] = df['sector'].fillna('Pharma')
-        if table_name == 'vacations' and 'person_code' not in df.columns and not df.empty: df['person_code'] = 'UNKNOWN'
+        if table_name == 'history': df['sector'] = df['sector'].fillna('Pharma')
+        if table_name == 'vacations' and 'person_code' not in df.columns: df['person_code'] = 'UNKNOWN'
         return df
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
@@ -170,6 +170,7 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 c.execute(query, params)
                 conn.commit()
                 
+        # Instantly wipe memory so the next screen shows the new data!
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -194,13 +195,14 @@ def generate_excel_with_sn(df_list, sheet_names):
 VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 NEEDS_HELPER_OPTIONS = ["Yes", "No", "None"]
-ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Driver Name", "Area Full Name", "Helper Code", "Helper Name", "Vehicle Number", "Division Category", "Area Code", "Sector"]
+
+# Adjusted to match the Image while keeping Pandas unique names
+ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Drivers Name", "AREA", "Helper Code", "Helpers Name", "VEH NO", "Division Category", "Sector"]
 
 # --- STRICT HARDCODED ALLOWLISTS ---
 KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
 KEEP_DRIVERS = ["D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", "D089", "D054", "D088", "D098", "D033"]
 
-# --- STRICT IMAGE-BASED 39-ROW ROUTE LAYOUT ---
 SEED_AREAS_IMAGE = [
     ("PH-FUJ", "FUJAIRAH", "Pharma", "Yes", 1), ("PH-RAK", "RAK / UAQ", "Pharma", "Yes", 2),
     ("PH-ALQ1", "ALQOUZ-1", "Pharma", "Yes", 3), ("PH-ALQ2", "ALQOUZ-2", "Pharma", "Yes", 4),
@@ -223,6 +225,18 @@ SEED_AREAS_IMAGE = [
     ("CON-RAK", "RAK", "Consumer", "Yes", 34), ("CON-PU1", "PICK UP/SHJ (C)", "Consumer", "Yes", 35),
     ("CON-PU2", "PICK UP (C)", "Consumer", "Yes", 36), ("CON-AJM", "AJM", "Consumer", "Yes", 37),
     ("CON-SHJS", "SHJS", "Consumer", "Yes", 38), ("CON-SUB", "SUBTITUTE/URGENT ORDERS", "Substitute", "No", 39)
+]
+
+SEED_VEHICLES = [
+    ("M 95321", "PICK-UP"), ("C 47055", "PICK-UP"), ("B 14813", "BUS"), ("C 58107", "PICK-UP"), ("C 58801", "VAN"),
+    ("16 47645", "BUS"), ("I 85664", "PICK-UP"), ("I 86488", "VAN"), ("R 96871", "BUS"), ("U 65986", "PICK-UP"),
+    ("U 65988", "VAN"), ("U 65990", "VAN"), ("V-83576", "VAN"), ("V-84049", "VAN"), ("V-84050", "VAN"),
+    ("W 49535", "PICK-UP"), ("W 49536", "VAN"), ("W 49539", "VAN"), ("W 49540", "VAN"), ("O 72506", "VAN"),
+    ("O 72533", "PICK-UP"), ("O 72548", "PICK-UP"), ("O 72567", "VAN"), ("O 72578", "VAN"), ("O 72579", "VAN"),
+    ("O 72581", "VAN"), ("D 85038", "VAN"), ("D 85076", "VAN"), ("D 85823", "VAN"), ("C 26596", "BUS"),
+    ("V 60857", "VAN"), ("N 31329", "VAN"), ("N 32094", "VAN"), ("N 32119", "VAN"), ("N 32126", "VAN"),
+    ("N 33680", "VAN"), ("E 18104", "VAN"), ("E 18316", "VAN"), ("BB 72473", "BUS"), ("I 71528", "PICK-UP"),
+    ("W 11792", "VAN"), ("T 26701", "VAN"), ("CC 98174", "VAN"), ("CC 98175", "VAN"), ("CC 98176", "VAN")
 ]
 
 RAW_NAME_MAP = {
@@ -250,14 +264,159 @@ PRELOAD_HISTORY = [
     ("Helper", "H121", "2025-02-01", "2025-04-30", "JUMAIRAH", "Pharma"), ("Helper", "H121", "2025-05-01", "2025-07-31", "ALQ", "Consumer"),
     ("Helper", "H121", "2025-08-01", "2025-10-31", "RAK / UAQ", "Pharma"), ("Helper", "H119", "2024-08-01", "2024-10-31", "DEIRA", "Pharma"),
     ("Helper", "H119", "2024-11-01", "2025-01-31", "JABEL ALI", "Pharma"), ("Helper", "H119", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
-    ("Helper", "H119", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"), ("Helper", "H119", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma")
+    ("Helper", "H119", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"), ("Helper", "H119", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H046", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"), ("Helper", "H046", "2024-08-01", "2024-10-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H046", "2024-11-01", "2025-01-31", "FUJAIRAH", "Pharma"), ("Helper", "H046", "2025-02-01", "2025-04-30", "FUJAIRAH", "Pharma"),
+    ("Helper", "H046", "2025-05-01", "2025-07-31", "FUJAIRAH", "Pharma"), ("Helper", "H046", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
+    ("Helper", "H070", "2024-05-01", "2024-07-31", "PHARMA", "Pharma"), ("Helper", "H070", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H070", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H070", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H070", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H070", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H129", "2025-08-01", "2025-10-31", "DXBO", "Consumer"), ("Helper", "H113", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H113", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"), ("Helper", "H113", "2024-11-01", "2025-01-31", "AJMAN", "Pharma"),
+    ("Helper", "H113", "2025-02-01", "2025-04-30", "SHJS", "Consumer"), ("Helper", "H113", "2025-05-01", "2025-07-31", "DEIRA", "Pharma"),
+    ("Helper", "H113", "2025-08-01", "2025-10-31", "AJMAN", "Pharma"), ("Helper", "H118", "2024-08-01", "2024-10-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H118", "2024-11-01", "2025-01-31", "SHJ - SANAYYA", "Pharma"), ("Helper", "H118", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
+    ("Helper", "H118", "2025-05-01", "2025-07-31", "AJMAN", "Pharma"), ("Helper", "H118", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H115", "2024-05-01", "2024-07-31", "SHJ - SANAYYA", "Pharma"), ("Helper", "H115", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Helper", "H122", "2025-02-01", "2025-04-30", "QUSAIS", "Pharma"), ("Helper", "H122", "2025-05-01", "2025-07-31", "JABEL ALI", "Pharma"),
+    ("Helper", "H122", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"), ("Helper", "H114", "2024-05-01", "2024-07-31", "DEIRA", "Pharma"),
+    ("Helper", "H114", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"), ("Helper", "H114", "2024-11-01", "2025-01-31", "DEIRA", "Pharma"),
+    ("Helper", "H114", "2025-02-01", "2025-04-30", "JABEL ALI", "Pharma"), ("Helper", "H114", "2025-05-01", "2025-07-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H114", "2025-08-01", "2025-10-31", "BURDUBAI", "Pharma"), ("Helper", "H066", "2024-05-01", "2024-07-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H066", "2024-08-01", "2024-10-31", "DXBO", "Consumer"), ("Helper", "H066", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H066", "2025-02-01", "2025-04-30", "JA", "Consumer"), ("Helper", "H066", "2025-05-01", "2025-07-31", "JA", "Consumer"),
+    ("Helper", "H066", "2025-08-01", "2025-10-31", "AJM", "Consumer"), ("Helper", "H011", "2024-05-01", "2024-07-31", "RAK / UAQ", "Pharma"),
+    ("Helper", "H011", "2024-08-01", "2024-10-31", "QUSAIS", "Pharma"), ("Helper", "H011", "2024-11-01", "2025-01-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H011", "2025-05-01", "2025-07-31", "JUMAIRAH", "Pharma"), ("Helper", "H011", "2025-08-01", "2025-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Helper", "H005", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"), ("Helper", "H005", "2024-08-01", "2024-10-31", "ALQOUZ-2", "Pharma"),
+    ("Helper", "H005", "2024-11-01", "2025-01-31", "RAK / UAQ", "Pharma"), ("Helper", "H005", "2025-05-01", "2025-07-31", "BURDUBAI", "Pharma"),
+    ("Helper", "H005", "2025-08-01", "2025-10-31", "JUMAIRAH", "Pharma"), ("Helper", "H023", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Helper", "H023", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H023", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H023", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H023", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H023", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H050", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H050", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H050", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H050", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"), ("Helper", "H062", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H062", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H062", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H062", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H024", "2024-05-01", "2024-07-31", "JABEL ALI", "Pharma"), ("Helper", "H024", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
+    ("Helper", "H024", "2024-11-01", "2025-01-31", "JA", "Consumer"), ("Helper", "H024", "2025-05-01", "2025-07-31", "SHJS", "Consumer"),
+    ("Helper", "H024", "2025-08-01", "2025-10-31", "RAK", "Consumer"), ("Helper", "H082", "2024-05-01", "2024-07-31", "DXBO", "Consumer"),
+    ("Helper", "H082", "2024-08-01", "2024-10-31", "ALQ", "Consumer"), ("Helper", "H082", "2024-11-01", "2025-01-31", "DXBO", "Consumer"),
+    ("Helper", "H082", "2025-05-01", "2025-07-31", "DXBO", "Consumer"), ("Helper", "H082", "2025-08-01", "2025-10-31", "ALQ", "Consumer"),
+    ("Helper", "H026", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"), ("Helper", "H026", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H026", "2024-11-01", "2025-01-31", "ALQ", "Consumer"), ("Helper", "H026", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"),
+    ("Helper", "H026", "2025-05-01", "2025-07-31", "DXBO", "Consumer"), ("Helper", "H026", "2025-08-01", "2025-10-31", "SHJS", "Consumer"),
+    ("Helper", "H109", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H109", "2024-08-01", "2024-10-31", "JA", "Consumer"),
+    ("Helper", "H109", "2024-11-01", "2025-01-31", "AJM", "Consumer"), ("Helper", "H109", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Helper", "H109", "2025-05-01", "2025-07-31", "RAK", "Consumer"), ("Helper", "H109", "2025-08-01", "2025-10-31", "BUR", "Consumer"),
+    ("Helper", "H013", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H013", "2024-08-01", "2024-10-31", "RAK", "Consumer"),
+    ("Helper", "H013", "2024-11-01", "2025-01-31", "SHJS", "Consumer"), ("Helper", "H013", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H013", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H013", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Helper", "H034", "2024-05-01", "2024-07-31", "AJMAN", "Pharma"), ("Helper", "H034", "2024-08-01", "2024-10-31", "FUJAIRAH", "Pharma"),
+    ("Helper", "H034", "2024-11-01", "2025-01-31", "AJM", "Consumer"), ("Helper", "H034", "2025-05-01", "2025-07-31", "AJM", "Consumer"),
+    ("Helper", "H034", "2025-08-01", "2025-10-31", "JA", "Consumer"), ("Helper", "H099", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"),
+    ("Helper", "H099", "2024-08-01", "2024-10-31", "ALQOUZ-1", "Pharma"), ("Helper", "H099", "2024-11-01", "2025-01-31", "MIRDIFF", "Pharma"),
+    ("Helper", "H099", "2025-05-01", "2025-07-31", "QUSAIS", "Pharma"), ("Helper", "H099", "2025-08-01", "2025-10-31", "SHJ - SANAYYA", "Pharma"),
+    ("Helper", "H017", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"), ("Helper", "H017", "2024-08-01", "2024-10-31", "JUMAIRAH", "Pharma"),
+    ("Helper", "H017", "2024-11-01", "2025-01-31", "ALQOUZ-1", "Pharma"), ("Helper", "H017", "2025-05-01", "2025-07-31", "RAK / UAQ", "Pharma"),
+    ("Helper", "H017", "2025-08-01", "2025-10-31", "FUJAIRAH", "Pharma"), ("Helper", "H051", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H051", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H051", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H051", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H051", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H104", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H104", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H104", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H104", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H112", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H112", "2025-02-01", "2025-04-30", "PICK UP", "Bulk / Pick-Up"),
+    ("Helper", "H112", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Helper", "H112", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+
+    ("Driver", "D085", "2024-05-01", "2024-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"), ("Driver", "D085", "2024-08-01", "2024-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D085", "2024-11-01", "2025-01-31", "COLD CHAIN/URGENT ORDERS", "2-8"), ("Driver", "D085", "2025-05-01", "2025-07-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D085", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D034", "2024-05-01", "2024-07-31", "JABEL ALI", "Pharma"),
+    ("Driver", "D034", "2024-08-01", "2024-10-31", "SHJ - SANAYYA", "Pharma"), ("Driver", "D034", "2024-11-01", "2025-01-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D034", "2025-02-01", "2025-04-30", "AJMAN", "Pharma"), ("Driver", "D034", "2025-05-01", "2025-07-31", "QUSAIS", "Pharma"),
+    ("Driver", "D034", "2025-08-01", "2025-10-31", "ALQOUZ-1", "Pharma"), ("Driver", "D101", "2024-08-01", "2024-10-31", "ALQOUZ-2", "Pharma"),
+    ("Driver", "D101", "2024-11-01", "2025-01-31", "QUSAIS", "Pharma"), ("Driver", "D101", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Driver", "D101", "2025-05-01", "2025-07-31", "SHJ - SANAYYA", "Pharma"), ("Driver", "D101", "2025-08-01", "2025-10-31", "DEIRA", "Pharma"),
+    ("Driver", "D038", "2024-05-01", "2024-07-31", "AJMAN", "Consumer"), ("Driver", "D038", "2024-08-01", "2024-10-31", "QUSAIS", "Pharma"),
+    ("Driver", "D038", "2024-11-01", "2025-01-31", "ALQ", "Consumer"), ("Driver", "D038", "2025-05-01", "2025-07-31", "JA", "Consumer"),
+    ("Driver", "D038", "2025-08-01", "2025-10-31", "BUR", "Consumer"), ("Driver", "D048", "2024-08-01", "2024-10-31", "AJMAN", "Pharma"),
+    ("Driver", "D048", "2024-11-01", "2025-01-31", "2ND TRIP", "Pharma"), ("Driver", "D048", "2025-05-01", "2025-07-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D048", "2025-08-01", "2025-10-31", "MIRDIFF", "Pharma"), ("Driver", "D019", "2024-05-01", "2024-07-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D019", "2024-08-01", "2024-10-31", "MIRDIFF", "Pharma"), ("Driver", "D019", "2024-11-01", "2025-01-31", "DEIRA", "Pharma"),
+    ("Driver", "D019", "2025-05-01", "2025-07-31", "ALQOUZ-1", "Pharma"), ("Driver", "D019", "2025-08-01", "2025-10-31", "FUJAIRAH", "Pharma"),
+    ("Driver", "D064", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"), ("Driver", "D064", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D064", "2024-11-01", "2025-01-31", "RAK / UAQ", "Pharma"), ("Driver", "D064", "2025-05-01", "2025-07-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D064", "2025-08-01", "2025-10-31", "AJMAN", "Pharma"), ("Driver", "D029", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D029", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D029", "2024-11-01", "2025-01-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D029", "2025-05-01", "2025-07-31", "JUMAIRAH", "Pharma"), ("Driver", "D029", "2025-08-01", "2025-10-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D011", "2024-05-01", "2024-07-31", "SHJ- BUH/ROLLA", "Pharma"), ("Driver", "D011", "2024-08-01", "2024-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D011", "2025-05-01", "2025-07-31", "SHJ- BUH/ROLLA", "Pharma"), ("Driver", "D011", "2025-08-01", "2025-10-31", "SHJ- BUH/ROLLA", "Pharma"),
+    ("Driver", "D050", "2024-05-01", "2024-07-31", "FUJAIRAH", "Pharma"), ("Driver", "D050", "2024-08-01", "2024-10-31", "ALQ", "Consumer"),
+    ("Driver", "D050", "2024-11-01", "2025-01-31", "DXBO", "Consumer"), ("Driver", "D050", "2025-02-01", "2025-04-30", "RAK", "Consumer"),
+    ("Driver", "D050", "2025-05-01", "2025-07-31", "DXBO", "Consumer"), ("Driver", "D050", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Driver", "D094", "2024-05-01", "2024-07-31", "ALQOUZ-1", "Pharma"), ("Driver", "D094", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D094", "2024-11-01", "2025-01-31", "MIRDIFF", "Pharma"), ("Driver", "D094", "2025-05-01", "2025-07-31", "DEIRA", "Pharma"),
+    ("Driver", "D109", "2024-08-01", "2024-10-31", "JABEL ALI", "Pharma"), ("Driver", "D010", "2024-05-01", "2024-07-31", "QUSAIS", "Pharma"),
+    ("Driver", "D010", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D010", "2025-05-01", "2025-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D098", "2024-05-01", "2024-07-31", "JUMAIRAH", "Pharma"), ("Driver", "D098", "2024-08-01", "2024-10-31", "RAK / UAQ", "Pharma"),
+    ("Driver", "D098", "2024-11-01", "2025-01-31", "JABEL ALI", "Pharma"), ("Driver", "D098", "2025-05-01", "2025-07-31", "MIRDIFF", "Pharma"),
+    ("Driver", "D098", "2025-08-01", "2025-10-31", "JABEL ALI", "Pharma"), ("Driver", "D049", "2024-05-01", "2024-07-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D049", "2024-08-01", "2024-10-31", "JABEL ALI", "Pharma"), ("Driver", "D049", "2024-11-01", "2025-01-31", "BURDUBAI", "Pharma"),
+    ("Driver", "D049", "2025-05-01", "2025-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"), ("Driver", "D049", "2025-08-01", "2025-10-31", "QUSAIS", "Pharma"),
+    ("Driver", "D046", "2024-08-01", "2024-10-31", "BURDUBAI", "Pharma"), ("Driver", "D046", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D046", "2025-05-01", "2025-07-31", "AJMAN", "Pharma"), ("Driver", "D046", "2025-08-01", "2025-10-31", "JUMAIRAH", "Pharma"),
+    ("Driver", "D040", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D040", "2024-08-01", "2024-10-31", "ALQOUZ-1", "Pharma"),
+    ("Driver", "D040", "2024-11-01", "2025-01-31", "JUMAIRAH", "Pharma"), ("Driver", "D040", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D040", "2025-05-01", "2025-07-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D040", "2025-08-01", "2025-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D037", "2024-05-01", "2024-07-31", "RAK", "Consumer"), ("Driver", "D037", "2024-08-01", "2024-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D037", "2024-11-01", "2025-01-31", "AJM", "Consumer"), ("Driver", "D037", "2025-02-01", "2025-04-30", "SHJS", "Consumer"),
+    ("Driver", "D037", "2025-05-01", "2025-07-31", "FUJAIRAH", "Pharma"), ("Driver", "D037", "2025-08-01", "2025-10-31", "AJM", "Consumer"),
+    ("Driver", "D026", "2024-05-01", "2024-07-31", "FLEET SERVICE/RTA WORK", "Fleet"), ("Driver", "D026", "2024-08-01", "2024-10-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D026", "2024-11-01", "2025-01-31", "FLEET SERVICE/RTA WORK", "Fleet"), ("Driver", "D026", "2025-05-01", "2025-07-31", "FLEET SERVICE/RTA WORK", "Fleet"),
+    ("Driver", "D026", "2025-08-01", "2025-10-31", "FLEET SERVICE/RTA WORK", "Fleet"), ("Driver", "D024", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D024", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D024", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D024", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D024", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D047", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D047", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D047", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D047", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D047", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D061", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D061", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D061", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D061", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D044", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D044", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D044", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D052", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D052", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D052", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D052", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D089", "2024-05-01", "2024-07-31", "DXBO", "Consumer"), ("Driver", "D089", "2024-08-01", "2024-10-31", "RAK", "Consumer"),
+    ("Driver", "D089", "2025-05-01", "2025-07-31", "ALQ", "Consumer"), ("Driver", "D089", "2025-08-01", "2025-10-31", "SHJS", "Consumer"),
+    ("Driver", "D036", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D036", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D036", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D036", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D036", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D054", "2024-05-01", "2024-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2024-08-01", "2024-10-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D054", "2024-11-01", "2025-01-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D054", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"), ("Driver", "D054", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D088", "2024-05-01", "2024-07-31", "ALQ", "Consumer"), ("Driver", "D088", "2024-08-01", "2024-10-31", "SHJS", "Consumer"),
+    ("Driver", "D088", "2024-11-01", "2025-01-31", "JA", "Consumer"), ("Driver", "D088", "2025-05-01", "2025-07-31", "BUR", "Consumer"),
+    ("Driver", "D088", "2025-08-01", "2025-10-31", "ALQ", "Consumer"), ("Driver", "D023", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D023", "2024-08-01", "2024-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D023", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D023", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D104", "2024-11-01", "2025-01-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D104", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D104", "2025-05-01", "2025-07-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D104", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D107", "2025-08-01", "2025-10-31", "SUBTITUTE/URGENT ORDERS", "Substitute"),
+    ("Driver", "D027", "2024-05-01", "2024-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D027", "2024-08-01", "2024-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D027", "2025-05-01", "2025-07-31", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D027", "2025-08-01", "2025-10-31", "GOVT/URGENT ORDERS", "Govt / Urgent"),
+    ("Driver", "D103", "2024-08-01", "2024-10-31", "DXBO", "Consumer"), ("Driver", "D103", "2024-11-01", "2025-01-31", "RAK", "Consumer"),
+    ("Driver", "D103", "2025-02-01", "2025-04-30", "GOVT/URGENT ORDERS", "Govt / Urgent"), ("Driver", "D103", "2025-05-01", "2025-07-31", "SHJS", "Consumer"),
+    ("Driver", "D103", "2025-08-01", "2025-10-31", "DXBO", "Consumer"), ("Driver", "D042", "2024-05-01", "2024-07-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D042", "2024-08-01", "2024-10-31", "COLD CHAIN/URGENT ORDERS", "2-8"), ("Driver", "D042", "2024-11-01", "2025-01-31", "COLD CHAIN/URGENT ORDERS", "2-8"),
+    ("Driver", "D042", "2025-05-01", "2025-07-31", "SUBTITUTE/URGENT ORDERS", "Substitute"), ("Driver", "D042", "2025-08-01", "2025-10-31", "PICK UP", "Bulk / Pick-Up"),
+    ("Driver", "D033", "2024-05-01", "2024-07-31", "AJMAN", "Pharma"), ("Driver", "D033", "2024-08-01", "2024-10-31", "JA", "Consumer"),
+    ("Driver", "D033", "2024-11-01", "2025-01-31", "SHJS", "Consumer"), ("Driver", "D033", "2025-02-01", "2025-04-30", "DXBO", "Consumer"),
+    ("Driver", "D033", "2025-05-01", "2025-07-31", "RAK", "Consumer"), ("Driver", "D033", "2025-08-01", "2025-10-31", "JA", "Consumer")
 ]
 
+
 if "db_initialized" not in st.session_state:
-    def execute_global_init():
+    def execute_global_init(force=False):
         try:
             current_areas = load_table("areas")
-            if len(current_areas) != 39:
+            if force or len(current_areas) != 39:
                 if FIREBASE_READY:
                     run_query(None, table_name="areas", action="CLEAR_TABLE")
                     for code, name, sector, nh, order in SEED_AREAS_IMAGE: 
@@ -287,6 +446,16 @@ if "db_initialized" not in st.session_state:
                     h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
                     c.executemany("INSERT INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
                     conn.commit()
+
+            v_df = load_table('vehicles')
+            if len(v_df) == 0:
+                if FIREBASE_READY:
+                    for v_num, v_type in SEED_VEHICLES: db_fs.collection("vehicles").add({"number": v_num, "type": v_type, "anchor_area": "None"})
+                else:
+                    c = conn.cursor()
+                    v_seed = [(v_num, v_type, "None") for v_num, v_type in SEED_VEHICLES]
+                    c.executemany("INSERT INTO vehicles (number, type, anchor_area) VALUES (?, ?, ?)", v_seed)
+                    conn.commit()
             
             st.cache_data.clear()
         except Exception:
@@ -296,105 +465,119 @@ if "db_initialized" not in st.session_state:
     st.session_state.db_initialized = True
 
 def safe_parse_date(date_str):
-    try: return datetime.strptime(date_str, "%Y-%m-%d").date()
+    try: return datetime.strptime(str(date_str).split(" ")[0], "%Y-%m-%d").date()
     except: return date.today()
 
-def get_experience_months(history_df, person_code, area_name, sector_name):
-    if history_df.empty or 'person_code' not in history_df.columns: return 0
-    records = history_df[(history_df['person_code'] == person_code) & (history_df['area'] == area_name) & (history_df['sector'] == sector_name)]
-    total_days = sum(max(0, ((safe_parse_date(r['end_date']) if pd.notna(r.get('end_date')) and r['end_date'] != "None" else safe_parse_date(r['date']) + timedelta(days=30)) - safe_parse_date(r['date'])).days) for _, r in records.iterrows())
-    return total_days / 30.0
+# --- HIGH PERFORMANCE SCORING HELPERS ---
+def build_experience_cache():
+    history_df = load_table('history')
+    exp_cache = {}
+    if not history_df.empty:
+        for _, r in history_df.iterrows():
+            code, area = r['person_code'], r['area']
+            end_date = safe_parse_date(r['end_date'] if pd.notna(r.get('end_date')) and r['end_date'] != "None" else r['date'])
+            if code not in exp_cache: exp_cache[code] = {}
+            if area not in exp_cache[code] or end_date > exp_cache[code][area]:
+                exp_cache[code][area] = end_date
+    return exp_cache
 
-def get_last_assignment(history_df, person_code, area_name):
-    if history_df.empty: return None
-    records = history_df[(history_df['person_code'] == person_code) & (history_df['area'] == area_name)]
-    if records.empty: return None
-    return safe_parse_date(records.iloc[-1]['date'])
+def build_vacation_cache():
+    vacs_df = load_table('vacations')
+    vac_cache = {}
+    if not vacs_df.empty and 'person_code' in vacs_df.columns:
+        for _, r in vacs_df.iterrows():
+            code = r['person_code']
+            if code not in vac_cache: vac_cache[code] = []
+            vac_cache[code].append((safe_parse_date(r['start_date']), safe_parse_date(r['end_date'])))
+    return vac_cache
 
-def is_on_vacation(vacations_df, person_name, target_date):
-    if vacations_df.empty or 'person_name' not in vacations_df.columns: return False
-    for _, row in vacations_df.iterrows():
-        if row['person_name'] == person_name:
-            if safe_parse_date(row['start_date']) <= target_date <= safe_parse_date(row['end_date']):
-                return True
+def is_on_vacation(person_code, target_date, vac_cache):
+    for start, end in vac_cache.get(person_code, []):
+        if start <= target_date <= end: return True
     return False
 
-def select_best_candidate(candidates_df, area_name, req_sector, target_date, history_df, vacations_df, role="Driver"):
-    best_candidate, best_score, best_reason = None, -99999, "No valid candidates left"
-    
-    req_veh = "VAN"
-    if "2-8" in req_sector or "2-8" in area_name or "COLD CHAIN" in area_name: req_veh = "2-8 VAN"
-    elif "Govt" in req_sector or "GOVT" in area_name: req_veh = "BUS"
-    elif "Pick-Up" in req_sector or "PICK UP" in area_name: req_veh = "PICK-UP"
+def vacation_within_3_months(person_code, target_date, vac_cache):
+    limit_date = target_date + timedelta(days=90)
+    for start, end in vac_cache.get(person_code, []):
+        if target_date < start <= limit_date: return start
+    return None
 
-    for _, person in candidates_df.iterrows():
-        if is_on_vacation(vacations_df, person['name'], target_date): continue
-        score = 0
-        reasons = []
+def months_until_next_vacation(person_code, vac_cache, target_date):
+    past_vacs = [end for start, end in vac_cache.get(person_code, []) if end < target_date]
+    if not past_vacs: return 0 # Overdue or never taken
+    last_vac = max(past_vacs)
+    days_since = (target_date - last_vac).days
+    return max(0, 365 - days_since) / 30.0
 
-        if role == "Driver":
-            p_veh = person.get('veh_type', 'None')
-            p_sec = person.get('sector', 'None')
-            
-            if p_veh in [req_veh, "None"] or (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
-                score += 300
-                reasons.append(f"Veh Match ({p_veh}) (+300)")
-            else:
-                score -= 600
-                reasons.append(f"Wrong Veh (-600)")
 
-            if p_sec in [req_sector, "None"]:
-                score += 200
-                reasons.append(f"Sector Match ({p_sec}) (+200)")
-            else:
-                score -= 400
-                reasons.append(f"Wrong Sector (-400)")
+# --- WEIGHTED AI SCORING ALGORITHM ---
+NEVER_WORKED_BONUS = 10000
+ANCHOR_MATCH_BONUS = 5000
+MONTHS_WEIGHT = 100
+RECENT_AREA_PENALTY = -3000
+VACATION_SOON_PENALTY = -1500
 
-        if role == "Helper":
-            if "Consumer" in req_sector:
-                if person.get('health_card') == 'Yes':
-                    score += 1500
-                    reasons.append("Health Card for Consumer (+1500)")
-                else:
-                    score -= 1500
-                    reasons.append("No Health Card for Consumer (-1500)")
-            elif person.get('health_card') == 'Yes':
-                score -= 1000
-                reasons.append("Waste of Health Card in Pharma (-1000)")
+def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date, exp_cache, vac_cache, role="Driver"):
+    code = candidate['code']
+    score = 0
+    reasons = []
 
-        anchor = person.get('anchor_area')
-        if anchor == area_name:
-            score += 2000
-            reasons.append("Anchored Area (+2000)")
-        elif anchor not in ["None", "", None] and type(anchor) == str:
-            score -= 1000
-            reasons.append(f"Anchored elsewhere (-1000)")
+    # 1. Hard Constraints (Exclusions)
+    if is_on_vacation(code, target_date, vac_cache):
+        return None, "Excluded: On Vacation"
+        
+    if role == "Driver":
+        p_veh = candidate.get('veh_type', 'None')
+        if p_veh not in [req_veh, "None"] and not (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
+            return None, f"Excluded: Vehicle Mismatch ({p_veh} != {req_veh})"
+        
+        p_sec = candidate.get('sector', 'None')
+        if p_sec not in [req_sector, "None"]:
+            return None, f"Excluded: Sector Mismatch ({p_sec} != {req_sector})"
 
-        exp_months = get_experience_months(history_df, person['code'], area_name, req_sector)
-        if exp_months == 0:
-            score += 5000
-            reasons.append("Learning Priority: 0 Exp (+5000)")
+    # 2. Anchor Logic
+    anchor = candidate.get('anchor_area')
+    if anchor == area['name']:
+        score += ANCHOR_MATCH_BONUS
+        reasons.append(f"Anchor Match (+{ANCHOR_MATCH_BONUS})")
+    elif anchor not in ["None", "", None] and type(anchor) == str:
+        return None, f"Excluded: Anchored to {anchor}"
+
+    # 3. Experience Logic (Rotation Goal)
+    last_worked = exp_cache.get(code, {}).get(area['name'])
+    if not last_worked:
+        score += NEVER_WORKED_BONUS
+        reasons.append(f"Never worked here (+{NEVER_WORKED_BONUS})")
+    else:
+        months_since = (target_date - last_worked).days / 30.0
+        if months_since < 3:
+            score += RECENT_AREA_PENALTY
+            reasons.append(f"Recent Visit <3m ({RECENT_AREA_PENALTY})")
         else:
-            score += int(exp_months * 5)
-            reasons.append(f"Has {exp_months:.1f}m Exp (+{int(exp_months*5)})")
-            
-        last_date = get_last_assignment(history_df, person['code'], area_name)
-        if last_date:
-            months_since = (target_date - last_date).days / 30.0
-            if months_since < 6:
-                penalty = 10000 + int((6 - months_since) * 100)
-                score -= penalty
-                reasons.append(f"Recent Visit <6m (-{penalty})")
+            time_score = int(months_since * MONTHS_WEIGHT)
+            score += time_score
+            reasons.append(f"{months_since:.1f}m since last visit (+{time_score})")
 
-        if score > best_score:
-            best_score = score
-            best_candidate = person
-            best_reason = f"Score [{score}]: " + ", ".join(reasons)
+    # 4. Vacation Predictor Logic
+    vac_start = vacation_within_3_months(code, target_date, vac_cache)
+    if vac_start:
+        score += VACATION_SOON_PENALTY
+        reasons.append(f"Vacation soon ({VACATION_SOON_PENALTY})")
 
-    return best_candidate, best_reason
+    # 5. Role Specific Additions
+    if role == "Helper":
+        if "Consumer" in req_sector:
+            if candidate.get('health_card') == 'Yes':
+                score += 1500; reasons.append("Health Card (+1500)")
+            else:
+                score -= 1500; reasons.append("No Health Card (-1500)")
+        elif candidate.get('health_card') == 'Yes':
+            score -= 1000; reasons.append("Waste Health Card (-1000)")
+
+    return score, " | ".join(reasons)
 
 
-def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vacs_df, today_date):
+def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vac_cache, today_date):
     errors = []
     req_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
     for _, area in areas_df.iterrows():
@@ -417,7 +600,7 @@ def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vacs
         if avail_veh[vtype] < required:
             errors.append(f"🚗 Missing **{vtype}** Vehicles: Route needs **{required}**, but you only have **{avail_veh[vtype]}**.")
 
-    avail_d = len([1 for _, r in drivers_df.iterrows() if not is_on_vacation(vacs_df, r['name'], today_date)])
+    avail_d = len([1 for _, r in drivers_df.iterrows() if not is_on_vacation(r['code'], today_date, vac_cache)])
     if avail_d < len(areas_df):
         errors.append(f"🚛 Missing Drivers: Route needs **{len(areas_df)}** active drivers, but you only have **{avail_d}**.")
         
@@ -438,14 +621,14 @@ if choice == "1. AI Route Planner":
     today = date.today()
     all_d = load_table('drivers')
     all_h = load_table('helpers')
-    vacs = load_table('vacations')
+    vac_cache = build_vacation_cache()
     
-    vac_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
-    avail_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_d.empty else []
-    solo_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if (not is_on_vacation(vacs, r['name'], today)) and ((r.get('needs_helper', 'Yes') == 'No') or (r.get('veh_type', '') in ['BUS', '2-8 VAN']))] if not all_d.empty else []
+    vac_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
+    avail_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
+    solo_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if (not is_on_vacation(r['code'], today, vac_cache)) and ((r.get('needs_helper', 'Yes') == 'No') or (r.get('veh_type', '') in ['BUS', '2-8 VAN']))] if not all_d.empty else []
     
-    vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(vacs, r['name'], today)] if not all_h.empty else []
-    avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(vacs, r['name'], today)] if not all_h.empty else []
+    vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
+    avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
     
     req_helpers = len(avail_d_names) - len(solo_d_names)
     shortage = req_helpers - len(avail_h_names)
@@ -491,16 +674,32 @@ if choice == "1. AI Route Planner":
 
     st.divider()
 
-    # --- ALWAYS-ON PERSISTENT ROUTE PLANS ---
+    # --- ROUTE PLANS ---
     draft_routes = load_table('draft_routes')
     active_routes = load_table('active_routes')
     
     if not draft_routes.empty:
         st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then click Approve.")
         disp_draft = draft_routes.copy()
+        
+        # Mapping DB to Requested Visual Layout exactly
+        disp_draft = disp_draft.rename(columns={"area_name": "AREA", "veh_num": "VEH NO"})
+        if "driver_name" in disp_draft.columns: disp_draft["Drivers Name"] = disp_draft["driver_name"]
+        if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
+        if "helper_name" in disp_draft.columns: disp_draft["Helpers Name"] = disp_draft["helper_name"]
+        if "helper_code" in disp_draft.columns: disp_draft["Helper Code"] = disp_draft["helper_code"]
+        
         disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns]]
         
-        edited_df = st.data_editor(disp_draft, use_container_width=True, hide_index=True, key="route_editor", column_order=ROUTE_COLUMN_ORDER)
+        edited_df = st.data_editor(
+            disp_draft, 
+            use_container_width=True, hide_index=True, key="route_editor", 
+            column_order=ROUTE_COLUMN_ORDER,
+            column_config={
+                "Driver Code": st.column_config.TextColumn("CODE"),
+                "Helper Code": st.column_config.TextColumn("CODE")
+            }
+        )
         
         col_down, col_app, col_can = st.columns([1, 1, 1])
         output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
@@ -513,78 +712,60 @@ if choice == "1. AI Route Planner":
             
             for index, r in edited_df.iterrows():
                 q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                data_dict = {"order_num":r['S/N'], "area_code":r.get('Area Code', ''), "area_name":r.get('Area Full Name', ''), "driver_code":r.get('Driver Code', ''), "driver_name":r.get('Driver Name', ''), "helper_code":r.get('Helper Code', ''), "helper_name":r.get('Helper Name', ''), "veh_num":r.get('Vehicle Number', ''), "start_date":p_s, "end_date":p_e}
-                run_query(q_ar, (r['S/N'], r.get('Area Code', ''), r.get('Area Full Name', ''), r.get('Driver Code', ''), r.get('Driver Name', ''), r.get('Helper Code', ''), r.get('Helper Name', ''), r.get('Vehicle Number', ''), p_s, p_e), table_name="active_routes", action="INSERT", data=data_dict)
+                data_dict = {"order_num":r['S/N'], "area_code":"", "area_name":r.get('AREA', ''), "driver_code":r.get('Driver Code', ''), "driver_name":r.get('Drivers Name', ''), "helper_code":r.get('Helper Code', ''), "helper_name":r.get('Helpers Name', ''), "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e}
+                run_query(q_ar, (r['S/N'], "", r.get('AREA', ''), r.get('Driver Code', ''), r.get('Drivers Name', ''), r.get('Helper Code', ''), r.get('Helpers Name', ''), r.get('VEH NO', ''), p_s, p_e), table_name="active_routes", action="INSERT", data=data_dict)
                 
-                for code, name, ptype in [(r.get('Driver Code', ''), r.get('Driver Name', ''), "Driver"), (r.get('Helper Code', ''), r.get('Helper Name', ''), "Helper")]:
+                for code, name, ptype in [(r.get('Driver Code', ''), r.get('Drivers Name', ''), "Driver"), (r.get('Helper Code', ''), r.get('Helpers Name', ''), "Helper")]:
                     if code not in ["UNASSIGNED", "N/A", ""]:
-                        hist_chk = load_table('history')
-                        if hist_chk.empty or len(hist_chk[(hist_chk['person_code']==code) & (hist_chk['area']==r.get('Area Full Name', '')) & (hist_chk['date']==p_s)]) == 0:
-                            run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", (ptype, code, name, r.get('Area Full Name', ''), r.get('Sector', ''), p_s, p_e), table_name="history", action="INSERT", data={"person_type":ptype, "person_code":code, "person_name":name, "area":r.get('Area Full Name', ''), "sector":r.get('Sector', ''), "date":p_s, "end_date":p_e})
+                        run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", (ptype, code, name, r.get('AREA', ''), r.get('Sector', ''), p_s, p_e), table_name="history", action="INSERT", data={"person_type":ptype, "person_code":code, "person_name":name, "area":r.get('AREA', ''), "sector":r.get('Sector', ''), "date":p_s, "end_date":p_e})
             
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
-            st.success("Plan Approved & Saved! System will remember these sector experiences for next month.")
+            st.success("Plan Approved! System will remember these experiences.")
             st.rerun()
             
         if col_can.button("❌ Cancel Draft", type="secondary"):
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
             st.rerun()
-            
-        st.divider()
 
     elif not active_routes.empty:
-        st.subheader("📋 Current Active Route Plan")
-        
         start_dt = active_routes.iloc[0].get('start_date', 'Unknown')
-        end_dt = active_routes.iloc[0].get('end_date', 'Unknown')
-        st.info(f"🗓️ **Plan Validity:** {start_dt} to {end_dt} (30 Days)")
+        st.subheader(f"📋 Current Active Route Plan (Started: {start_dt})")
         
-        disp_active = active_routes.copy()
-        disp_active = disp_active.rename(columns={
-            "driver_code": "Driver Code", "driver_name": "Driver Name", 
-            "area_name": "Area Full Name", "helper_code": "Helper Code", 
-            "helper_name": "Helper Name", "veh_num": "Vehicle Number",
-            "area_code": "Area Code"
-        })
+        disp_active = active_routes.copy().rename(columns={"area_name": "AREA", "veh_num": "VEH NO", "driver_name": "Drivers Name", "driver_code": "Driver Code", "helper_name": "Helpers Name", "helper_code": "Helper Code"})
         disp_active = disp_active[[c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]]
         if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
         
-        st.dataframe(disp_active, use_container_width=True, hide_index=True, column_order=ROUTE_COLUMN_ORDER)
-        
+        st.dataframe(
+            disp_active, use_container_width=True, hide_index=True, column_order=ROUTE_COLUMN_ORDER,
+            column_config={"Driver Code": st.column_config.TextColumn("CODE"), "Helper Code": st.column_config.TextColumn("CODE")}
+        )
         col_dl, col_rm = st.columns(2)
         output = generate_excel_with_sn([disp_active], ['Active Route Plan'])
         col_dl.download_button("📥 Download Active Plan Excel", data=output, file_name=f"Active_Plan_{start_dt}.xlsx")
-        
         if col_rm.button("🗑️ Remove Current Plan", type="secondary"):
             run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE")
             st.rerun()
-            
-        st.divider()
-        
+
     else:
         st.subheader("📋 Route Plan Dashboard")
-        st.info("No Active or Draft routes currently exist. Your generated AI route plan will populate here.")
+        st.info("No Active or Draft routes exist. Generate an AI route below.")
         empty_df = pd.DataFrame(columns=ROUTE_COLUMN_ORDER)
-        st.dataframe(empty_df, use_container_width=True, hide_index=True)
-        st.divider()
+        st.dataframe(empty_df, use_container_width=True, hide_index=True, column_config={"Driver Code": "CODE", "Helper Code": "CODE"})
 
-    # --- GENERATE NEW ROUTE ---
-    st.header("⚙️ Generate New AI Route Plan")
+    st.divider()
+
+    # --- GENERATOR ENGINE ---
+    st.header("⚙️ Generate Smart AI Route Plan")
     col1, col2 = st.columns(2)
     month_target = col1.date_input("Target Rotation Date", value=today)
     rot_type = col2.radio("Who is rotating this month?", ["Drivers", "Helpers"])
-    st.info(f"💡 Note: You are rotating **{rot_type}**. The system will mathematically check the Current Active Route Plan to KEEP the currently assigned **{'Helpers' if rot_type == 'Drivers' else 'Drivers'}** so they can train the incoming staff for one month.")
     
-    areas = load_table('areas')
-    vehicles = load_table('vehicles')
-    
-    if "force_bypass" not in st.session_state:
-        st.session_state.force_bypass = False
+    if "force_bypass" not in st.session_state: st.session_state.force_bypass = False
 
-    generate_clicked = st.button("Generate Smart AI Route Plan", type="primary")
-
-    if generate_clicked or st.session_state.force_bypass:
-        val_errors = check_route_requirements(areas, all_d, all_h, vehicles, vacs, month_target)
+    if st.button("Generate Smart AI Route Plan", type="primary") or st.session_state.force_bypass:
+        areas = load_table('areas')
+        vehicles = load_table('vehicles')
+        val_errors = check_route_requirements(areas, all_d, all_h, vehicles, vac_cache, month_target)
         
         if val_errors and not st.session_state.force_bypass:
             st.error("🚨 **ROUTE GENERATION HALTED: DATABASE SHORTAGE DETECTED**")
@@ -594,102 +775,164 @@ if choice == "1. AI Route Planner":
                 st.session_state.force_bypass = True
                 st.rerun()
         else:
-            with st.spinner("Calculating 0-Experience priorities, health cards, and strict 6-month penalties..."):
-                history = load_table('history')
+            with st.spinner("Applying Weighted Scoring & predicting Future Replacements..."):
+                exp_cache = build_experience_cache()
+                vac_cache = build_vacation_cache()
                 
-                route_targets = areas.to_dict('records') if not areas.empty else []
+                run_query("DELETE FROM route_plan_reasons", table_name="route_plan_reasons", action="CLEAR_TABLE")
+                run_query("DELETE FROM vacation_predictions", table_name="vacation_predictions", action="CLEAR_TABLE")
+                
                 route_plan = []
                 used_drivers, used_helpers, used_vehicles = set(), set(), set()
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                for area in route_targets:
+                for _, area in areas.iterrows():
                     area_name = area['name']
                     req_sector = area.get('sector', 'Pharma')
-                    needs_helper_val = area.get('needs_helper', 'Yes')
-                    needs_helper = needs_helper_val in ['Yes', 'Optional']
+                    needs_helper = area.get('needs_helper', 'Yes') in ['Yes', 'Optional']
                     
                     div_cat = "PHARMA DIVISION"
                     if "2-8" in req_sector or "Govt" in req_sector or "Fleet" in req_sector: div_cat = "2-8 / URGENT ORDERS"
                     elif "Pick-Up" in req_sector or "Substitute" in req_sector or "Bulk" in req_sector: div_cat = "PICK-UPS / URGENT COLD CHAIN"
                     elif "Consumer" in req_sector: div_cat = "CONSUMER DIVISION"
-                        
+
+                    # Vehicle Requirement logic
+                    req_veh = "VAN"
+                    if "2-8" in req_sector or "COLD CHAIN" in area_name: req_veh = "2-8 VAN"
+                    elif "Govt" in req_sector or "GOVT" in area_name: req_veh = "BUS"
+                    elif "Pick-Up" in req_sector or "PICK UP" in area_name: req_veh = "PICK-UP"
+
                     prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
-                    a_d_code, a_d_name, a_h_code, a_h_name, a_v_num, log_reason = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "No pool left"
+                    a_d_code, a_d_name, a_h_code, a_h_name, a_v_num = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED"
 
-                    if rot_type == "Drivers":
-                        if needs_helper and not prev_assignment.empty and prev_assignment.iloc[0].get('helper_code') not in ["N/A", "UNASSIGNED", None]:
-                            a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
-                            used_helpers.add(a_h_code)
-                        elif needs_helper:
-                            avail_hl = all_h[~all_h['code'].isin(used_helpers)]
-                            best_h, _ = select_best_candidate(avail_hl, area_name, req_sector, month_target, history, vacs, role="Helper")
-                            if best_h is not None:
-                                a_h_code, a_h_name = best_h['code'], best_h['name']
-                                used_helpers.add(a_h_code)
-                        
-                        if not prev_assignment.empty and prev_assignment.iloc[0].get('veh_num') not in ["N/A", "UNASSIGNED", None]:
-                            a_v_num = prev_assignment.iloc[0]['veh_num']
-                            used_vehicles.add(a_v_num)
-
+                    # 1. ASSIGN DRIVER
+                    if rot_type == "Drivers" or prev_assignment.empty or prev_assignment.iloc[0].get('driver_code') in ["N/A", "UNASSIGNED", None]:
+                        best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                         avail_dr = all_d[~all_d['code'].isin(used_drivers)]
-                        best_d, d_reason = select_best_candidate(avail_dr, area_name, req_sector, month_target, history, vacs, role="Driver")
+                        
+                        for _, p in avail_dr.iterrows():
+                            score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Driver")
+                            if score is not None and score > best_d_score:
+                                best_d_score, best_d, d_reason = score, p, rsn
+                                
                         if best_d is not None:
-                            a_d_code, a_d_name, log_reason = best_d['code'], best_d['name'], f"DRIVER -> {d_reason}"
+                            a_d_code, a_d_name = best_d['code'], best_d['name']
                             used_drivers.add(a_d_code)
                             if best_d.get('needs_helper') == 'No': needs_helper = False
+                            run_query("INSERT INTO route_plan_reasons (plan_date, area, role, selected_person, score, reasons, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                                      (month_target.strftime("%Y-%m-%d"), area_name, "Driver", a_d_name, best_d_score, d_reason, timestamp), table_name="route_plan_reasons", action="INSERT", data={"plan_date":month_target.strftime("%Y-%m-%d"), "area":area_name, "role":"Driver", "selected_person":a_d_name, "score":best_d_score, "reasons":d_reason, "generated_at":timestamp})
                             
+                            # Future Replacement Check
+                            vac_start = vacation_within_3_months(a_d_code, month_target, vac_cache)
+                            if vac_start:
+                                repl_d, best_r_score, _ = None, -999999, ""
+                                for _, rp in all_d[~all_d['code'].isin([a_d_code])].iterrows():
+                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, vac_start, exp_cache, vac_cache, role="Driver")
+                                    if r_score is not None and r_score > best_r_score:
+                                        best_r_score, repl_d = r_score, rp
+                                repl_name = repl_d['name'] if repl_d is not None else "CRITICAL SHORTAGE"
+                                run_query("INSERT INTO vacation_predictions (person_code, person_name, role, suggested_start, reason, replacement_person, replacement_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                          (a_d_code, a_d_name, "Driver", vac_start.strftime("%Y-%m-%d"), "Scheduled Vacation", repl_name, vac_start.strftime("%Y-%m-%d")), table_name="vacation_predictions", action="INSERT", data={"person_code":a_d_code, "person_name":a_d_name, "role":"Driver", "suggested_start":vac_start.strftime("%Y-%m-%d"), "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start.strftime("%Y-%m-%d")})
                     else:
-                        if not prev_assignment.empty and prev_assignment.iloc[0].get('driver_code') not in ["N/A", "UNASSIGNED", None]:
-                            a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
-                            a_v_num = prev_assignment.iloc[0]['veh_num']
-                            used_drivers.add(a_d_code)
-                            used_vehicles.add(a_v_num)
-                            
-                            d_type_chk = all_d[all_d['code'] == a_d_code]['needs_helper'].values if not all_d.empty else []
-                            if len(d_type_chk) > 0 and d_type_chk[0] == 'No': needs_helper = False
-                        else:
-                            avail_dr = all_d[~all_d['code'].isin(used_drivers)]
-                            best_d, _ = select_best_candidate(avail_dr, area_name, req_sector, month_target, history, vacs, role="Driver")
-                            if best_d is not None:
-                                a_d_code, a_d_name = best_d['code'], best_d['name']
-                                used_drivers.add(a_d_code)
-                                if best_d.get('needs_helper') == 'No': needs_helper = False
-                            
-                        if needs_helper:
-                            avail_hl = all_h[~all_h['code'].isin(used_helpers)]
-                            best_h, h_reason = select_best_candidate(avail_hl, area_name, req_sector, month_target, history, vacs, role="Helper")
-                            if best_h is not None:
-                                a_h_code, a_h_name, log_reason = best_h['code'], best_h['name'], f"HELPER -> {h_reason}"
-                                used_helpers.add(a_h_code)
+                        a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
+                        used_drivers.add(a_d_code)
 
-                    if not needs_helper: a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
+                    # 2. ASSIGN HELPER
+                    if not needs_helper:
+                        a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
+                    elif rot_type == "Helpers" or prev_assignment.empty or prev_assignment.iloc[0].get('helper_code') in ["N/A", "UNASSIGNED", None]:
+                        best_h, best_h_score, h_reason = None, -999999, "No valid helpers"
+                        avail_hl = all_h[~all_h['code'].isin(used_helpers)]
+                        
+                        for _, p in avail_hl.iterrows():
+                            score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper")
+                            if score is not None and score > best_h_score:
+                                best_h_score, best_h, h_reason = score, p, rsn
+                                
+                        if best_h is not None:
+                            a_h_code, a_h_name = best_h['code'], best_h['name']
+                            used_helpers.add(a_h_code)
+                            run_query("INSERT INTO route_plan_reasons (plan_date, area, role, selected_person, score, reasons, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                                      (month_target.strftime("%Y-%m-%d"), area_name, "Helper", a_h_name, best_h_score, h_reason, timestamp), table_name="route_plan_reasons", action="INSERT", data={"plan_date":month_target.strftime("%Y-%m-%d"), "area":area_name, "role":"Helper", "selected_person":a_h_name, "score":best_h_score, "reasons":h_reason, "generated_at":timestamp})
+                            
+                            # Future Replacement Check
+                            vac_start = vacation_within_3_months(a_h_code, month_target, vac_cache)
+                            if vac_start:
+                                repl_h, best_r_score, _ = None, -999999, ""
+                                for _, rp in all_h[~all_h['code'].isin([a_h_code])].iterrows():
+                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, vac_start, exp_cache, vac_cache, role="Helper")
+                                    if r_score is not None and r_score > best_r_score:
+                                        best_r_score, repl_h = r_score, rp
+                                repl_name = repl_h['name'] if repl_h is not None else "CRITICAL SHORTAGE"
+                                run_query("INSERT INTO vacation_predictions (person_code, person_name, role, suggested_start, reason, replacement_person, replacement_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                          (a_h_code, a_h_name, "Helper", vac_start.strftime("%Y-%m-%d"), "Scheduled Vacation", repl_name, vac_start.strftime("%Y-%m-%d")), table_name="vacation_predictions", action="INSERT", data={"person_code":a_h_code, "person_name":a_h_name, "role":"Helper", "suggested_start":vac_start.strftime("%Y-%m-%d"), "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start.strftime("%Y-%m-%d")})
+                    else:
+                        a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
+                        used_helpers.add(a_h_code)
 
+                    # 3. ASSIGN VEHICLE
                     if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
-                        tvt = "2-8 VAN" if "2-8" in req_sector else ("BUS" if "Govt" in req_sector else ("PICK-UP" if "Pick-Up" in req_sector or "PICK UP" in area_name else d_type))
+                        tvt = req_veh if req_veh != "VAN" else d_type
                         
                         avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['anchor_area'] == area_name)]
                         if avail_v.empty: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['type'] == tvt) & (vehicles['anchor_area'] == "None")]
-                        if avail_v.empty and tvt in ["VAN", "PICK-UP"]: 
-                            avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['type'] == "VAN / PICK-UP") & (vehicles['anchor_area'] == "None")]
+                        if avail_v.empty and tvt in ["VAN", "PICK-UP"]: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['type'] == "VAN / PICK-UP") & (vehicles['anchor_area'] == "None")]
                         if avail_v.empty: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['anchor_area'] == "None")]
-                        
                         if not avail_v.empty:
                             a_v_num = avail_v.iloc[0]['number']
                             used_vehicles.add(a_v_num)
 
                     route_plan.append({
-                        "Driver Code": a_d_code, "Driver Name": a_d_name, 
-                        "Area Full Name": area_name, "Helper Code": a_h_code, "Helper Name": a_h_name, 
-                        "Vehicle Number": a_v_num, "Division Category": div_cat, "Area Code": area['code'], "Sector": req_sector
+                        "Driver Code": a_d_code, "Drivers Name": a_d_name, 
+                        "AREA": area_name, "Helper Code": a_h_code, "Helpers Name": a_h_name, 
+                        "VEH NO": a_v_num, "Division Category": div_cat, "Area Code": area['code'], "Sector": req_sector
                     })
 
                 run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
                 for index, r in enumerate(route_plan):
                     q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                    run_query(q_dr, (index+1, r['Area Code'], r['Area Full Name'], r['Sector'], r['Driver Code'], r['Driver Name'], r['Helper Code'], r['Helper Name'], r['Vehicle Number'], r['Division Category']), table_name="draft_routes", action="INSERT", data={"order_num":index+1, "area_code":r['Area Code'], "area_name":r['Area Full Name'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Driver Name'], "helper_code":r['Helper Code'], "helper_name":r['Helper Name'], "veh_num":r['Vehicle Number'], "div_cat":r['Division Category']})
+                    run_query(q_dr, (index+1, r['Area Code'], r['AREA'], r['Sector'], r['Driver Code'], r['Drivers Name'], r['Helper Code'], r['Helpers Name'], r['VEH NO'], r['Division Category']), table_name="draft_routes", action="INSERT", data={"order_num":index+1, "area_code":r['Area Code'], "area_name":r['AREA'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Drivers Name'], "helper_code":r['Helper Code'], "helper_name":r['Helpers Name'], "veh_num":r['VEH NO'], "div_cat":r['Division Category']})
                 
                 st.session_state.force_bypass = False
                 st.rerun()
+
+    # --- AI REASONING EXPLANATION TABLE ---
+    reasons_df = load_table('route_plan_reasons')
+    predict_df = load_table('vacation_predictions')
+    if not reasons_df.empty:
+        with st.expander("🤖 View AI Reasoning & Future Replacement Logs", expanded=False):
+            st.caption("Detailed breakdown of why the AI selected each candidate based on the weighted scoring logic.")
+            
+            explain_list = []
+            for area in load_table('areas')['name'].unique():
+                d_rsn = reasons_df[(reasons_df['area'] == area) & (reasons_df['role'] == 'Driver')]
+                h_rsn = reasons_df[(reasons_df['area'] == area) & (reasons_df['role'] == 'Helper')]
+                
+                d_name = d_rsn.iloc[0]['selected_person'] if not d_rsn.empty else "Kept Previous"
+                d_text = f"[{d_rsn.iloc[0]['score']}] {d_rsn.iloc[0]['reasons']}" if not d_rsn.empty else "N/A"
+                
+                h_name = h_rsn.iloc[0]['selected_person'] if not h_rsn.empty else "Kept Previous"
+                h_text = f"[{h_rsn.iloc[0]['score']}] {h_rsn.iloc[0]['reasons']}" if not h_rsn.empty else "N/A"
+                
+                # Check for replacements
+                repl_info, repl_date = "Safe", "-"
+                d_repl = predict_df[predict_df['person_name'] == d_name] if not predict_df.empty else pd.DataFrame()
+                h_repl = predict_df[predict_df['person_name'] == h_name] if not predict_df.empty else pd.DataFrame()
+                
+                if not d_repl.empty:
+                    repl_info = f"DRIVER Replace: {d_repl.iloc[0].get('replacement_person', 'UNK')}"
+                    repl_date = d_repl.iloc[0].get('replacement_date', '-')
+                elif not h_repl.empty:
+                    repl_info = f"HELPER Replace: {h_repl.iloc[0].get('replacement_person', 'UNK')}"
+                    repl_date = h_repl.iloc[0].get('replacement_date', '-')
+
+                explain_list.append({
+                    "Area": area, "Driver": d_name, "Driver Reason": d_text, "Helper": h_name, "Helper Reason": h_text,
+                    "Vacation Risk": "⚠️ Yes" if repl_info != "Safe" else "✅ None", "Future Replacement": repl_info, "Replacement Date": repl_date
+                })
+                
+            st.dataframe(pd.DataFrame(explain_list), use_container_width=True, hide_index=True)
 
 
 # ==========================================
@@ -697,12 +940,11 @@ if choice == "1. AI Route Planner":
 # ==========================================
 elif choice == "2. Database Management":
     st.header("🗄️ Manage Database")
-    
     areas_df = load_table('areas')
     area_list = ["None"] + (areas_df['name'].tolist() if not areas_df.empty else [])
-    
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Bulk Excel Sync"])
 
+    # DRIVERS TAB
     with tab1:
         st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
@@ -711,10 +953,8 @@ elif choice == "2. Database Management":
         search_d = st.text_input("🔍 Search Drivers by Code, Name, Area, etc.", key="search_drivers")
         if search_d and not disp_df.empty:
             disp_df = disp_df[disp_df.astype(str).apply(lambda x: x.str.contains(search_d, case=False, na=False)).any(axis=1)]
-            
         if not disp_df.empty: disp_df.insert(0, 'S/N', range(1, 1 + len(disp_df)))
         
-        # Merge pre-defined standard options with any custom options already existing in DB
         veh_opts = list(set(VEHICLE_OPTIONS + disp_df.get('veh_type', pd.Series()).dropna().unique().tolist()))
         sec_opts = list(set(SECTOR_OPTIONS + disp_df.get('sector', pd.Series()).dropna().unique().tolist()))
         anc_opts = list(set(area_list + disp_df.get('anchor_area', pd.Series()).dropna().unique().tolist()))
@@ -722,33 +962,26 @@ elif choice == "2. Database Management":
         edited_d = st.data_editor(
             disp_df, 
             column_config={
-                "id": None, # Hide Database ID visually
-                "S/N": st.column_config.NumberColumn(disabled=True),
+                "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "veh_type": st.column_config.SelectboxColumn("Vehicle Type", options=veh_opts),
                 "sector": st.column_config.SelectboxColumn("Sector", options=sec_opts),
                 "needs_helper": st.column_config.SelectboxColumn("Needs Helper", options=NEEDS_HELPER_OPTIONS),
                 "anchor_area": st.column_config.SelectboxColumn("Anchor Area", options=anc_opts)
-            },
-            use_container_width=True, height=250, hide_index=True, key="ed_drivers"
+            }, use_container_width=True, height=250, hide_index=True, key="ed_drivers"
         )
-        
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
-            changes_saved = 0
             for idx in disp_df.index:
                 row_id = disp_df.loc[idx, 'id']
                 if not disp_df.loc[idx].equals(edited_d.loc[idx]):
                     update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    vals = tuple(list(update_dict.values()) + [row_id])
-                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", vals, table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
-                    changes_saved += 1
-            if changes_saved > 0:
-                st.success(f"Successfully saved {changes_saved} driver updates!")
-                st.rerun()
-                
+                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
+            st.rerun()
+            
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
+            st.subheader("➕ Add Driver")
             st.caption("Don't see your custom Sector or Vehicle Type in the dropdown? Add a new driver here and the dropdown will automatically learn it.")
             d_name = st.text_input("New Driver Name", key="add_d_name")
             d_code = st.text_input("New Driver Code", key="add_d_code")
@@ -764,7 +997,8 @@ elif choice == "2. Database Management":
                     st.rerun()
 
         with c_edit:
-            st.caption("Manually Remove a Driver")
+            st.subheader("🗑️ Delete Driver")
+            st.caption("Manually Remove a Driver from the Database")
             sel_d_code = st.selectbox("Select Driver to Delete", drivers_df['code'].tolist() if not drivers_df.empty else [])
             if sel_d_code:
                 d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
@@ -773,47 +1007,38 @@ elif choice == "2. Database Management":
                         st.success("Driver Deleted!")
                         st.rerun()
 
+    # HELPERS TAB
     with tab2:
         st.subheader("📋 Full Helpers List")
         helpers_df = load_table('helpers')
         disp_h = helpers_df.drop(columns=['restriction'], errors='ignore').copy()
         
-        search_h = st.text_input("🔍 Search Helpers by Code, Name, Health Card...", key="search_helpers")
-        if search_h and not disp_h.empty:
-            disp_h = disp_h[disp_h.astype(str).apply(lambda x: x.str.contains(search_h, case=False, na=False)).any(axis=1)]
-            
+        search_h = st.text_input("🔍 Search Helpers", key="search_helpers")
+        if search_h and not disp_h.empty: disp_h = disp_h[disp_h.astype(str).apply(lambda x: x.str.contains(search_h, case=False, na=False)).any(axis=1)]
         if not disp_h.empty: disp_h.insert(0, 'S/N', range(1, 1 + len(disp_h)))
         
         h_anc_opts = list(set(area_list + disp_h.get('anchor_area', pd.Series()).dropna().unique().tolist()))
         
         edited_h = st.data_editor(
-            disp_h,
-            column_config={
-                "id": None,
-                "S/N": st.column_config.NumberColumn(disabled=True),
+            disp_h, column_config={
+                "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "health_card": st.column_config.SelectboxColumn("Health Card", options=["Yes", "No"]),
                 "anchor_area": st.column_config.SelectboxColumn("Anchor Area", options=h_anc_opts)
-            },
-            use_container_width=True, height=250, hide_index=True, key="ed_helpers"
+            }, use_container_width=True, height=250, hide_index=True, key="ed_helpers"
         )
-        
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
-            changes_saved = 0
             for idx in disp_h.index:
                 row_id = disp_h.loc[idx, 'id']
                 if not disp_h.loc[idx].equals(edited_h.loc[idx]):
                     update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    vals = tuple(list(update_dict.values()) + [row_id])
-                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", vals, table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
-                    changes_saved += 1
-            if changes_saved > 0:
-                st.success(f"Successfully saved {changes_saved} helper updates!")
-                st.rerun()
-                
+                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
+            st.rerun()
+
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
+            st.subheader("➕ Add Helper")
             h_name = st.text_input("New Helper Name", key="add_h_name")
             h_code = st.text_input("New Helper Code", key="add_h_code")
             h_health = st.selectbox("New Helper Health Card?", ["No", "Yes"], key="add_h_hc")
@@ -823,6 +1048,7 @@ elif choice == "2. Database Management":
                     st.success("Helper Added!")
                     st.rerun()
         with c_edit:
+            st.subheader("🗑️ Delete Helper")
             sel_h_code = st.selectbox("Select Helper to Delete", helpers_df['code'].tolist() if not helpers_df.empty else [])
             if sel_h_code:
                 h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
@@ -831,47 +1057,38 @@ elif choice == "2. Database Management":
                         st.success("Helper Deleted!")
                         st.rerun()
 
+    # AREAS TAB
     with tab3:
-        st.subheader("📋 Full Areas Route Template")
+        st.subheader("📋 Route Template Areas")
         a_df = load_table('areas')
         disp_a = a_df.drop(columns=['sort_order'], errors='ignore').copy()
         
-        search_a = st.text_input("🔍 Search Areas by Code, Name, Sector...", key="search_areas")
-        if search_a and not disp_a.empty:
-            disp_a = disp_a[disp_a.astype(str).apply(lambda x: x.str.contains(search_a, case=False, na=False)).any(axis=1)]
-            
+        search_a = st.text_input("🔍 Search Areas", key="search_areas")
+        if search_a and not disp_a.empty: disp_a = disp_a[disp_a.astype(str).apply(lambda x: x.str.contains(search_a, case=False, na=False)).any(axis=1)]
         if not disp_a.empty: disp_a.insert(0, 'S/N', range(1, 1 + len(disp_a)))
         
         a_sec_opts = list(set(SECTOR_OPTIONS + disp_a.get('sector', pd.Series()).dropna().unique().tolist()))
         
         edited_a = st.data_editor(
-            disp_a,
-            column_config={
-                "id": None,
-                "S/N": st.column_config.NumberColumn(disabled=True),
+            disp_a, column_config={
+                "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "sector": st.column_config.SelectboxColumn("Sector", options=a_sec_opts),
                 "needs_helper": st.column_config.SelectboxColumn("Needs Helper", options=NEEDS_HELPER_OPTIONS)
-            },
-            use_container_width=True, height=250, hide_index=True, key="ed_areas"
+            }, use_container_width=True, height=250, hide_index=True, key="ed_areas"
         )
-        
         if st.button("💾 Save Table Edits", key="save_table_areas"):
-            changes_saved = 0
             for idx in disp_a.index:
                 row_id = disp_a.loc[idx, 'id']
                 if not disp_a.loc[idx].equals(edited_a.loc[idx]):
                     update_dict = edited_a.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    vals = tuple(list(update_dict.values()) + [row_id])
-                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", vals, table_name="areas", action="UPDATE", doc_id=row_id, data=update_dict)
-                    changes_saved += 1
-            if changes_saved > 0:
-                st.success(f"Successfully saved {changes_saved} area updates!")
-                st.rerun()
-                
+                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="areas", action="UPDATE", doc_id=row_id, data=update_dict)
+            st.rerun()
+
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
+            st.subheader("➕ Add Area")
             a_name = st.text_input("New Area Name", key="add_a_name")
             a_code = st.text_input("New Area Code", key="add_a_code")
             col_s, col_n = st.columns(2)
@@ -883,6 +1100,7 @@ elif choice == "2. Database Management":
                     st.success("Area Added!")
                     st.rerun()
         with c_edit:
+            st.subheader("🗑️ Delete Area")
             sel_a = st.selectbox("Select Area to Delete", a_df['name'].tolist() if not a_df.empty else [])
             if sel_a:
                 a_data = a_df[a_df['name'] == sel_a].iloc[0]
@@ -891,48 +1109,39 @@ elif choice == "2. Database Management":
                         st.success("Area Deleted!")
                         st.rerun()
 
+    # VEHICLES TAB
     with tab4:
         st.subheader("📋 Full Vehicles List")
         v_df = load_table('vehicles')
         disp_v = v_df.copy()
         
-        search_v = st.text_input("🔍 Search Vehicles by Number, Type, Anchor...", key="search_vehicles")
-        if search_v and not disp_v.empty:
-            disp_v = disp_v[disp_v.astype(str).apply(lambda x: x.str.contains(search_v, case=False, na=False)).any(axis=1)]
-            
+        search_v = st.text_input("🔍 Search Vehicles", key="search_vehicles")
+        if search_v and not disp_v.empty: disp_v = disp_v[disp_v.astype(str).apply(lambda x: x.str.contains(search_v, case=False, na=False)).any(axis=1)]
         if not disp_v.empty: disp_v.insert(0, 'S/N', range(1, 1 + len(disp_v)))
         
         v_type_opts = list(set(VEHICLE_OPTIONS + disp_v.get('type', pd.Series()).dropna().unique().tolist()))
         v_anc_opts = list(set(area_list + disp_v.get('anchor_area', pd.Series()).dropna().unique().tolist()))
         
         edited_v = st.data_editor(
-            disp_v,
-            column_config={
-                "id": None,
-                "S/N": st.column_config.NumberColumn(disabled=True),
+            disp_v, column_config={
+                "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "type": st.column_config.SelectboxColumn("Type", options=v_type_opts),
                 "anchor_area": st.column_config.SelectboxColumn("Anchor Area", options=v_anc_opts)
-            },
-            use_container_width=True, height=250, hide_index=True, key="ed_vehicles"
+            }, use_container_width=True, height=250, hide_index=True, key="ed_vehicles"
         )
-        
         if st.button("💾 Save Table Edits", key="save_table_vehicles"):
-            changes_saved = 0
             for idx in disp_v.index:
                 row_id = disp_v.loc[idx, 'id']
                 if not disp_v.loc[idx].equals(edited_v.loc[idx]):
                     update_dict = edited_v.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    vals = tuple(list(update_dict.values()) + [row_id])
-                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", vals, table_name="vehicles", action="UPDATE", doc_id=row_id, data=update_dict)
-                    changes_saved += 1
-            if changes_saved > 0:
-                st.success(f"Successfully saved {changes_saved} vehicle updates!")
-                st.rerun()
-                
+                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vehicles", action="UPDATE", doc_id=row_id, data=update_dict)
+            st.rerun()
+
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
+            st.subheader("➕ Add Vehicle")
             v_num = st.text_input("New Vehicle Number", key="add_v_num")
             v_type = st.selectbox("New Vehicle Type", VEHICLE_OPTIONS, key="add_v_type")
             v_anchor = st.selectbox("New Vehicle Anchor Area", area_list, key="add_v_anc")
@@ -941,6 +1150,7 @@ elif choice == "2. Database Management":
                     st.success("Vehicle Added!")
                     st.rerun()
         with c_edit:
+            st.subheader("🗑️ Delete Vehicle")
             sel_v = st.selectbox("Select Vehicle to Delete", v_df['number'].tolist() if not v_df.empty else [])
             if sel_v:
                 v_data = v_df[v_df['number'] == sel_v].iloc[0]
@@ -948,13 +1158,14 @@ elif choice == "2. Database Management":
                     if run_query("DELETE FROM vehicles WHERE number=?", (sel_v,), table_name="vehicles", action="DELETE_DOC", doc_id=v_data['id']):
                         st.success("Vehicle Deleted!")
                         st.rerun()
-                
+
     with tab5:
-        st.subheader("📥 Export / 📤 Import Database")
+        st.subheader("📥 Export Database")
         dfs_to_export = [load_table(t) for t in ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations']]
         output = generate_excel_with_sn(dfs_to_export, ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations'])
         st.download_button("📥 Download Master Database (Excel)", data=output, file_name="Master_Database.xlsx", type="primary")
-        
+
+        st.divider()
         uploaded_file = st.file_uploader("Upload your modified Excel to Sync", type=['xlsx'])
         if uploaded_file and st.button("Sync Data to System", type="primary"):
             xls = pd.ExcelFile(uploaded_file)
@@ -972,13 +1183,13 @@ elif choice == "2. Database Management":
                     else:
                         run_query(None, table_name=sheet, action="INSERT", data=data_dict)
             st.success("Database synchronized successfully!")
-            
+
         st.divider()
         st.subheader("🚨 Emergency Route Template Restore")
-        st.warning("If your Areas got messed up, click this to reset the Route Template exactly to your Image Layout.")
-        if st.button("♻️ Restore 39-Row Route Layout", type="primary"):
+        st.warning("If your Areas or Vehicles got messed up, click this to reset the Route Template exactly to your Image Layout.")
+        if st.button("♻️ Restore 39-Row Route Layout & Vehicles", type="primary"):
             with st.spinner("Restoring layout..."):
-                auto_seed_database(force=True)
+                execute_global_init(force=True)
             st.success("Layout restored successfully!")
             st.rerun()
 
@@ -995,40 +1206,30 @@ elif choice == "3. Past Experience Builder":
     search_hist = st.text_input("🔍 Search History by Exact Date, Month, Year, Code, Name, or Area", "")
     disp_hist = history_df.sort_values(by="date", ascending=False).copy()
     
-    # Advanced global search covers ALL fields including exact/partial dates (e.g., "2024-05", "May")
     if search_hist and not disp_hist.empty:
         disp_hist = disp_hist[disp_hist.astype(str).apply(lambda x: x.str.contains(search_hist, case=False, na=False)).any(axis=1)]
-    
     if not disp_hist.empty: disp_hist.insert(0, 'S/N', range(1, 1 + len(disp_hist)))
     
     h_sec_opts = list(set(SECTOR_OPTIONS + disp_hist.get('sector', pd.Series()).dropna().unique().tolist()))
     h_area_opts = list(set(area_list + disp_hist.get('area', pd.Series()).dropna().unique().tolist()))
     
     edited_hist = st.data_editor(
-        disp_hist,
-        column_config={
-            "id": None,
-            "S/N": st.column_config.NumberColumn(disabled=True),
+        disp_hist, column_config={
+            "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
             "person_type": st.column_config.SelectboxColumn("Role", options=["Driver", "Helper"]),
             "sector": st.column_config.SelectboxColumn("Sector", options=h_sec_opts),
             "area": st.column_config.SelectboxColumn("Area", options=h_area_opts)
-        },
-        use_container_width=True, height=350, hide_index=True, key="ed_hist"
+        }, use_container_width=True, height=350, hide_index=True, key="ed_hist"
     )
     
     if st.button("💾 Save Table Edits", key="save_table_hist"):
-        changes_saved = 0
         for idx in disp_hist.index:
             row_id = disp_hist.loc[idx, 'id']
             if not disp_hist.loc[idx].equals(edited_hist.loc[idx]):
                 update_dict = edited_hist.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                vals = tuple(list(update_dict.values()) + [row_id])
-                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", vals, table_name="history", action="UPDATE", doc_id=row_id, data=update_dict)
-                changes_saved += 1
-        if changes_saved > 0:
-            st.success(f"Successfully saved {changes_saved} history updates!")
-            st.rerun()
+                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="history", action="UPDATE", doc_id=row_id, data=update_dict)
+        st.rerun()
 
     with st.expander("🚨 Emergency Data Restore"):
         st.warning("If your Past Experience data is empty or incorrect, click below to wipe current records and load the exact PDF data.")
@@ -1052,10 +1253,11 @@ elif choice == "3. Past Experience Builder":
     c_add, c_edit = st.columns(2)
     
     with c_add:
-        st.subheader("➕ Add Experience")
+        st.subheader("➕ Add Single Experience Manually")
         p_type = st.selectbox("Role", ["Driver", "Helper"])
         df_names = load_table('drivers') if p_type == "Driver" else load_table('helpers')
         person_list = [f"[{row.get('code', '')}] {row['name']}" for idx, row in df_names.iterrows()] if not df_names.empty else []
+        
         if person_list:
             p_person = st.selectbox("Select Person", person_list)
             p_area = st.selectbox("Area Experienced In", area_list)
@@ -1107,9 +1309,10 @@ elif choice == "3. Past Experience Builder":
 elif choice == "4. Vacation Schedule":
     st.header("🌴 Manage Vacation Schedule")
     vacs_df = load_table('vacations')
+    vac_cache = build_vacation_cache()
+    today = date.today()
 
     st.subheader("📊 Active Vacations Overview")
-    today = date.today()
     active_vacs = []
     if not vacs_df.empty and 'person_name' in vacs_df.columns:
         for _, row in vacs_df.iterrows():
@@ -1134,58 +1337,43 @@ elif choice == "4. Vacation Schedule":
         due_list = []
         for df, role in [(load_table('drivers'), "Driver"), (load_table('helpers'), "Helper")]:
             for _, p in df.iterrows():
-                if vacs_df.empty or 'person_name' not in vacs_df.columns:
-                    last_vac = pd.DataFrame()
+                code = p.get('code', '')
+                past_vacs = [end for start, end in vac_cache.get(code, [])]
+                if not past_vacs:
+                    due_list.append({"Code": code, "Name": p['name'], "Role": role, "Status": "NEVER Taken a Vacation!"})
                 else:
-                    last_vac = vacs_df[vacs_df['person_name'] == p['name']]
-                    
-                if last_vac.empty:
-                    due_list.append({"Code": p.get('code', ''), "Name": p['name'], "Role": role, "Status": "NEVER Taken a Vacation!"})
-                else:
-                    lv_date = safe_parse_date(last_vac.iloc[-1]['end_date'])
-                    days_since = (today - lv_date).days
+                    last_vac = max(past_vacs)
+                    days_since = (today - last_vac).days
                     if days_since > 300:
-                        due_list.append({"Code": p.get('code', ''), "Name": p['name'], "Role": role, "Status": f"Overdue by {days_since - 300} days (Last: {lv_date})"})
-        if due_list:
-            st.dataframe(pd.DataFrame(due_list), use_container_width=True, hide_index=True)
-        else:
-            st.success("Everyone seems well rested!")
+                        due_list.append({"Code": code, "Name": p['name'], "Role": role, "Status": f"Overdue by {days_since - 300} days (Last: {last_vac})"})
+        if due_list: st.dataframe(pd.DataFrame(due_list), use_container_width=True, hide_index=True)
+        else: st.success("Everyone seems well rested!")
 
     st.divider()
 
-    st.subheader("📋 Full Vacation Database")
-    
+    st.subheader("📋 Vacation Database")
     search_vac = st.text_input("🔍 Search Vacations by Date, Code, Name...", "")
     disp_vac = vacs_df.copy()
     
     if search_vac and not disp_vac.empty:
         disp_vac = disp_vac[disp_vac.astype(str).apply(lambda x: x.str.contains(search_vac, case=False, na=False)).any(axis=1)]
-        
     if not disp_vac.empty: disp_vac.insert(0, 'S/N', range(1, 1 + len(disp_vac)))
     
     edited_vac = st.data_editor(
-        disp_vac,
-        column_config={
-            "id": None,
-            "S/N": st.column_config.NumberColumn(disabled=True),
+        disp_vac, column_config={
+            "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
             "person_type": st.column_config.SelectboxColumn("Role", options=["Driver", "Helper"])
-        },
-        use_container_width=True, height=250, hide_index=True, key="ed_vac"
+        }, use_container_width=True, height=250, hide_index=True, key="ed_vac"
     )
     
     if st.button("💾 Save Table Edits", key="save_table_vacs"):
-        changes_saved = 0
         for idx in disp_vac.index:
             row_id = disp_vac.loc[idx, 'id']
             if not disp_vac.loc[idx].equals(edited_vac.loc[idx]):
                 update_dict = edited_vac.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                vals = tuple(list(update_dict.values()) + [row_id])
-                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", vals, table_name="vacations", action="UPDATE", doc_id=row_id, data=update_dict)
-                changes_saved += 1
-        if changes_saved > 0:
-            st.success(f"Successfully saved {changes_saved} vacation updates!")
-            st.rerun()
+                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vacations", action="UPDATE", doc_id=row_id, data=update_dict)
+        st.rerun()
 
     with st.expander("📥 Export / 📤 Import Vacation Data"):
         output = generate_excel_with_sn([vacs_df], ['vacations'])
