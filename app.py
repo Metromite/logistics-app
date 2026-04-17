@@ -170,7 +170,6 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 c.execute(query, params)
                 conn.commit()
                 
-        # Instantly wipe memory so the next screen shows the new data!
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -196,7 +195,7 @@ VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 NEEDS_HELPER_OPTIONS = ["Yes", "No", "None"]
 
-# NEW: Moved "Sector" explicitly to the right of "AREA" for full Cross-Training visibility
+# Adjusted to match the Image while keeping Pandas unique names
 ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Drivers Name", "AREA", "Sector", "Helper Code", "Helpers Name", "VEH NO", "Division Category"]
 
 # --- STRICT HARDCODED ALLOWLISTS ---
@@ -514,7 +513,7 @@ def months_until_next_vacation(person_code, vac_cache, target_date):
     return max(0, 365 - days_since) / 30.0
 
 
-# --- WEIGHTED AI SCORING ALGORITHM (WITH SECTOR CROSS TRAINING) ---
+# --- WEIGHTED AI SCORING ALGORITHM (WITH MULTI-ANCHOR) ---
 NEVER_WORKED_BONUS = 10000
 NEVER_WORKED_SECTOR_BONUS = 8000
 ANCHOR_MATCH_BONUS = 5000
@@ -536,17 +535,18 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
         p_veh = candidate.get('veh_type', 'None')
         if p_veh not in [req_veh, "None"] and not (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
             return None, f"Excluded: Vehicle Mismatch ({p_veh} != {req_veh})"
-        
-        # EXCLUDED Sector Hard Constraint to allow FULL Sector Cross-Training capability.
-        # Drivers/Helpers now freely swap between Consumer and Pharma based on experience time.
 
-    # 2. Anchor Logic (Strict Exclusion)
-    anchor = candidate.get('anchor_area')
-    if anchor == area['name']:
-        score += ANCHOR_MATCH_BONUS
-        reasons.append(f"Anchor Match (+{ANCHOR_MATCH_BONUS})")
-    elif anchor not in ["None", "", None] and type(anchor) == str:
-        return None, f"Excluded: Anchored strictly to {anchor}"
+    # 2. MULTI-ANCHOR Logic (Strict Exclusion & Bonuses)
+    anchors = [a.strip() for a in str(candidate.get('anchor_area', 'None')).split(',') if a.strip()]
+    if "None" in anchors and len(anchors) == 1: anchors = []
+
+    if anchors:
+        # If the candidate has ANY anchors, the route MUST match at least one of them
+        if any(a in [area['name'], req_sector, req_veh] for a in anchors):
+            score += ANCHOR_MATCH_BONUS
+            reasons.append(f"Anchor Match (+{ANCHOR_MATCH_BONUS})")
+        else:
+            return None, f"Excluded: Anchored strictly to {', '.join(anchors)}"
 
     # 3. Area Rotation Logic
     last_worked_area = exp_cache.get(code, {}).get('areas', {}).get(area['name'])
@@ -563,7 +563,7 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
             score += time_score
             reasons.append(f"{months_since:.1f}m since area (+{time_score})")
 
-    # 4. Sector Cross-Training Logic (New feature!)
+    # 4. Sector Cross-Training Logic
     last_worked_sector = exp_cache.get(code, {}).get('sectors', {}).get(req_sector)
     if not last_worked_sector:
         score += NEVER_WORKED_SECTOR_BONUS
@@ -622,6 +622,12 @@ def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vac_
         
     return errors
 
+
+# --- GLOBAL SHARED VARIABLES ---
+areas_df_global = load_table('areas')
+area_list_global = ["None"] + (areas_df_global['name'].tolist() if not areas_df_global.empty else [])
+multi_anchor_opts = list(set([a for a in area_list_global + SECTOR_OPTIONS + VEHICLE_OPTIONS if a != "None"]))
+multi_anchor_opts.sort()
 
 # --- APP ROUTING ---
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
@@ -893,17 +899,34 @@ if choice == "1. AI Route Planner":
                         a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
 
-                    # 3. ASSIGN VEHICLE (Strict anchor adherence applies here naturally)
+                    # 3. ASSIGN VEHICLE (Multi-Anchor Logic Included)
                     if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else d_type
                         
-                        avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['anchor_area'] == area_name)]
-                        if avail_v.empty: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['type'] == tvt) & (vehicles['anchor_area'] == "None")]
-                        if avail_v.empty and tvt in ["VAN", "PICK-UP"]: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['type'] == "VAN / PICK-UP") & (vehicles['anchor_area'] == "None")]
-                        if avail_v.empty: avail_v = vehicles[(~vehicles['number'].isin(used_vehicles)) & (vehicles['anchor_area'] == "None")]
-                        if not avail_v.empty:
-                            a_v_num = avail_v.iloc[0]['number']
+                        potential_vs = []
+                        for _, v in vehicles[~vehicles['number'].isin(used_vehicles)].iterrows():
+                            v_type = v.get('type', 'VAN')
+                            type_match = False
+                            if v_type == tvt: type_match = True
+                            elif tvt in ["VAN", "PICK-UP"] and v_type == "VAN / PICK-UP": type_match = True
+                            
+                            if not type_match: continue
+                            
+                            v_anchors = [a.strip() for a in str(v.get('anchor_area', 'None')).split(',') if a.strip()]
+                            if "None" in v_anchors and len(v_anchors) == 1: v_anchors = []
+                            
+                            if v_anchors:
+                                if any(a in [area_name, req_sector, tvt] for a in v_anchors):
+                                    potential_vs.append((v, True)) # Matched Anchor
+                            else:
+                                potential_vs.append((v, False)) # Unanchored Vehicle
+
+                        # Sort: Anchored matches go first, then normal unanchored ones
+                        potential_vs.sort(key=lambda x: x[1], reverse=True)
+
+                        if potential_vs:
+                            a_v_num = potential_vs[0][0]['number']
                             used_vehicles.add(a_v_num)
 
                     route_plan.append({
@@ -963,8 +986,6 @@ if choice == "1. AI Route Planner":
 # ==========================================
 elif choice == "2. Database Management":
     st.header("🗄️ Manage Database")
-    areas_df = load_table('areas')
-    area_list = ["None"] + (areas_df['name'].tolist() if not areas_df.empty else [])
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Bulk Excel Sync"])
 
     # DRIVERS TAB
@@ -980,7 +1001,6 @@ elif choice == "2. Database Management":
         
         veh_opts = list(set(VEHICLE_OPTIONS + disp_df.get('veh_type', pd.Series()).dropna().unique().tolist()))
         sec_opts = list(set(SECTOR_OPTIONS + disp_df.get('sector', pd.Series()).dropna().unique().tolist()))
-        anc_opts = list(set(area_list + disp_df.get('anchor_area', pd.Series()).dropna().unique().tolist()))
         
         edited_d = st.data_editor(
             disp_df, 
@@ -989,7 +1009,7 @@ elif choice == "2. Database Management":
                 "veh_type": st.column_config.SelectboxColumn("Vehicle Type", options=veh_opts),
                 "sector": st.column_config.SelectboxColumn("Sector", options=sec_opts),
                 "needs_helper": st.column_config.SelectboxColumn("Needs Helper", options=NEEDS_HELPER_OPTIONS),
-                "anchor_area": st.column_config.SelectboxColumn("Anchor Area", options=anc_opts)
+                "anchor_area": st.column_config.TextColumn("Anchor(s) (comma-separated)", help="Type Areas, Sectors, or Veh Types separated by commas")
             }, use_container_width=True, height=250, hide_index=True, key="ed_drivers"
         )
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
@@ -1012,10 +1032,13 @@ elif choice == "2. Database Management":
             d_type = col_t.selectbox("New Driver Veh Type", VEHICLE_OPTIONS, key="add_d_type")
             d_sec = col_s.selectbox("New Driver Sector", SECTOR_OPTIONS, key="add_d_sec")
             d_needs_h = col_h.selectbox("New Driver Needs Helper?", NEEDS_HELPER_OPTIONS, index=2, key="add_d_nh")
-            d_anchor = st.selectbox("New Driver Anchor Area", area_list, key="add_d_anchor")
+            
+            d_anchor_opts = st.multiselect("New Driver Anchor(s)", multi_anchor_opts, key="add_d_anchor")
+            d_anchor_str = ", ".join(d_anchor_opts) if d_anchor_opts else "None"
+            
             if st.button("➕ Add Driver", use_container_width=True):
                 if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                          (d_name, d_code, d_type, d_sec, d_needs_h, "None", d_anchor), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":d_type, "sector":d_sec, "needs_helper":d_needs_h, "restriction":"None", "anchor_area":d_anchor}):
+                          (d_name, d_code, d_type, d_sec, d_needs_h, "None", d_anchor_str), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":d_type, "sector":d_sec, "needs_helper":d_needs_h, "restriction":"None", "anchor_area":d_anchor_str}):
                     st.success("Driver Added!")
                     st.rerun()
 
@@ -1040,13 +1063,11 @@ elif choice == "2. Database Management":
         if search_h and not disp_h.empty: disp_h = disp_h[disp_h.astype(str).apply(lambda x: x.str.contains(search_h, case=False, na=False)).any(axis=1)]
         if not disp_h.empty: disp_h.insert(0, 'S/N', range(1, 1 + len(disp_h)))
         
-        h_anc_opts = list(set(area_list + disp_h.get('anchor_area', pd.Series()).dropna().unique().tolist()))
-        
         edited_h = st.data_editor(
             disp_h, column_config={
                 "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "health_card": st.column_config.SelectboxColumn("Health Card", options=["Yes", "No"]),
-                "anchor_area": st.column_config.SelectboxColumn("Anchor Area", options=h_anc_opts)
+                "anchor_area": st.column_config.TextColumn("Anchor(s) (comma-separated)", help="Type Areas, Sectors, or Veh Types separated by commas")
             }, use_container_width=True, height=250, hide_index=True, key="ed_helpers"
         )
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
@@ -1065,9 +1086,12 @@ elif choice == "2. Database Management":
             h_name = st.text_input("New Helper Name", key="add_h_name")
             h_code = st.text_input("New Helper Code", key="add_h_code")
             h_health = st.selectbox("New Helper Health Card?", ["No", "Yes"], key="add_h_hc")
-            h_anchor = st.selectbox("New Helper Anchor Area", area_list, key="add_h_anc")
+            
+            h_anchor_opts = st.multiselect("New Helper Anchor(s)", multi_anchor_opts, key="add_h_anc")
+            h_anchor_str = ", ".join(h_anchor_opts) if h_anchor_opts else "None"
+            
             if st.button("➕ Add Helper", use_container_width=True):
-                if run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area) VALUES (?, ?, ?, ?, ?)", (h_name, h_code, h_health, "None", h_anchor), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"None", "anchor_area":h_anchor}):
+                if run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area) VALUES (?, ?, ?, ?, ?)", (h_name, h_code, h_health, "None", h_anchor_str), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"None", "anchor_area":h_anchor_str}):
                     st.success("Helper Added!")
                     st.rerun()
         with c_edit:
@@ -1143,13 +1167,12 @@ elif choice == "2. Database Management":
         if not disp_v.empty: disp_v.insert(0, 'S/N', range(1, 1 + len(disp_v)))
         
         v_type_opts = list(set(VEHICLE_OPTIONS + disp_v.get('type', pd.Series()).dropna().unique().tolist()))
-        v_anc_opts = list(set(area_list + disp_v.get('anchor_area', pd.Series()).dropna().unique().tolist()))
         
         edited_v = st.data_editor(
             disp_v, column_config={
                 "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "type": st.column_config.SelectboxColumn("Type", options=v_type_opts),
-                "anchor_area": st.column_config.SelectboxColumn("Anchor Area", options=v_anc_opts)
+                "anchor_area": st.column_config.TextColumn("Anchor(s) (comma-separated)", help="Type Areas, Sectors, or Veh Types separated by commas")
             }, use_container_width=True, height=250, hide_index=True, key="ed_vehicles"
         )
         if st.button("💾 Save Table Edits", key="save_table_vehicles"):
@@ -1167,9 +1190,12 @@ elif choice == "2. Database Management":
             st.subheader("➕ Add Vehicle")
             v_num = st.text_input("New Vehicle Number", key="add_v_num")
             v_type = st.selectbox("New Vehicle Type", VEHICLE_OPTIONS, key="add_v_type")
-            v_anchor = st.selectbox("New Vehicle Anchor Area", area_list, key="add_v_anc")
+            
+            v_anchor_opts = st.multiselect("New Vehicle Anchor(s)", multi_anchor_opts, key="add_v_anc")
+            v_anchor_str = ", ".join(v_anchor_opts) if v_anchor_opts else "None"
+            
             if st.button("➕ Add Vehicle", use_container_width=True):
-                if run_query("INSERT INTO vehicles (number, type, anchor_area) VALUES (?, ?, ?)", (v_num, v_type, v_anchor), table_name="vehicles", action="INSERT", data={"number":v_num, "type":v_type, "anchor_area":v_anchor}):
+                if run_query("INSERT INTO vehicles (number, type, anchor_area) VALUES (?, ?, ?)", (v_num, v_type, v_anchor_str), table_name="vehicles", action="INSERT", data={"number":v_num, "type":v_type, "anchor_area":v_anchor_str}):
                     st.success("Vehicle Added!")
                     st.rerun()
         with c_edit:
