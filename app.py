@@ -1,4 +1,12 @@
 import streamlit as st
+
+# --- ANTI-SLEEP PING HANDLER ---
+# If an uptime bot visits your_app_url.streamlit.app/?ping=true
+# The app will wake up, say "App is awake", and stop BEFORE touching Firebase!
+if "ping" in st.query_params:
+    st.write("🟢 App is awake and Firebase quota is protected!")
+    st.stop()
+
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta, date
@@ -431,6 +439,7 @@ PRELOAD_HISTORY = [
     ("Driver", "D033", "2025-05-01", "2025-07-31", "RAK", "Consumer"), ("Driver", "D033", "2025-08-01", "2025-10-31", "JA", "Consumer")
 ]
 
+
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False):
         try:
@@ -723,7 +732,6 @@ if choice == "1. AI Route Planner":
         st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then click Approve.")
         disp_draft = draft_routes.copy()
         
-        # Mapping DB to Requested Visual Layout exactly
         disp_draft = disp_draft.rename(columns={"area_name": "AREA", "veh_num": "VEH NO", "sector": "Sector"})
         if "driver_name" in disp_draft.columns: disp_draft["Drivers Name"] = disp_draft["driver_name"]
         if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
@@ -852,7 +860,7 @@ if choice == "1. AI Route Planner":
                     prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED"
 
-                    # 1. ASSIGN DRIVER (Only generates new ones if "Drivers" is selected, otherwise keeps old one)
+                    # 1. ASSIGN DRIVER 
                     if rot_type == "Drivers" or prev_assignment.empty or prev_assignment.iloc[0].get('driver_code') in ["N/A", "UNASSIGNED", None]:
                         best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                         avail_dr = all_d[~all_d['code'].isin(used_drivers)]
@@ -884,7 +892,7 @@ if choice == "1. AI Route Planner":
                         a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
                         used_drivers.add(a_d_code)
 
-                    # 2. ASSIGN HELPER (Only generates new ones if "Helpers" is selected, otherwise keeps old one)
+                    # 2. ASSIGN HELPER 
                     if not needs_helper:
                         a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
                     elif rot_type == "Helpers" or prev_assignment.empty or prev_assignment.iloc[0].get('helper_code') in ["N/A", "UNASSIGNED", None]:
@@ -917,7 +925,7 @@ if choice == "1. AI Route Planner":
                         a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
 
-                    # 3. ASSIGN VEHICLE (Multi-Anchor Logic Included)
+                    # 3. ASSIGN VEHICLE 
                     if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else d_type
@@ -940,7 +948,6 @@ if choice == "1. AI Route Planner":
                             else:
                                 potential_vs.append((v, False)) # Unanchored Vehicle
 
-                        # Sort: Anchored matches go first, then normal unanchored ones
                         potential_vs.sort(key=lambda x: x[1], reverse=True)
 
                         if potential_vs:
