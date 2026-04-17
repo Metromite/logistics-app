@@ -1,23 +1,3 @@
-### Why did you hit the Firebase limit so fast?
-
-Firebase’s free tier allows **50,000 document reads per day**. While that sounds like a lot, Streamlit is a "reactive" framework—meaning **every time you type a letter in a search bar, check a box, or change a dropdown**, the entire script reruns from top to bottom.
-
-In the previous version, anytime you made a single edit (like adding one driver or generating a plan), the code called `st.cache_data.clear()`. This completely wiped the memory. On the next click, Streamlit had to re-download **every single database** (Drivers, Helpers, Areas, Vehicles, History, Vacations, etc.) which is about 300-400 reads per click. 
-* 400 reads × 125 clicks or code saves during your testing = 50,000 reads exhausted.
-
-### How this updated code permanently fixes it:
-1. **Targeted Cache Clearing:** Instead of wiping the whole memory, the system now uses `load_table.clear(table_name)`. If you edit a Driver, it *only* fetches the Drivers table from Firebase next time, saving 85% of your quota instantly.
-2. **Ping Throttling:** The connection "ping" test used to consume 1 read on *every single keystroke*. It is now cached for 1 hour.
-3. **Batch Deleting:** When the AI generates a new plan and clears the old Draft/Reasoning tables, it now uses Firebase `Batch` operations, making it significantly faster and less punishing on system limits.
-
-*(Note: Your quota resets at midnight Pacific Time / ~11:00 AM Dubai Time. For now, the app will automatically fall back to the offline SQLite mode so you can keep working until Firebase unpauses).*
-
-### Here is the fully Quota-Optimized Code:
-*(Just copy-paste this over your file. Everything else works exactly as you requested).*
-
-```python
---- START OF FILE ai_studio_code - Copy.py ---
-
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -1532,6 +1512,3 @@ elif choice == "4. Vacation Schedule":
                     if run_query("DELETE FROM vacations WHERE id=?", (vac_id,), table_name="vacations", action="DELETE_DOC", doc_id=vac_id):
                         st.success("Vacation Deleted!")
                         st.rerun()
-
---- END OF FILE ai_studio_code - Copy.py ---
-```
