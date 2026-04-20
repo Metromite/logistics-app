@@ -1,3 +1,10 @@
+import streamlit as st
+
+# --- ANTI-SLEEP PING HANDLER ---
+if "ping" in st.query_params:
+    st.write("🟢 App is awake and Firebase quota is protected!")
+    st.stop()
+
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta, date
