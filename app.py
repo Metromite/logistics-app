@@ -1,3 +1,10 @@
+import streamlit as st
+
+# --- ANTI-SLEEP PING HANDLER ---
+if "ping" in st.query_params:
+    st.write("🟢 App is awake and Firebase quota is protected!")
+    st.stop()
+
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta, date
@@ -55,15 +62,16 @@ if FIREBASE_READY:
 else:
     st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴 Firebase Disconnected</div>", unsafe_allow_html=True)
 
-# SQLite Fallback Initialization
+# --- SQLITE INITIALIZATION & STRICT DUPLICATE PREVENTION ---
 def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY, name TEXT, code TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY, number TEXT, type TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, area TEXT, date TEXT, end_date TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY, name TEXT UNIQUE, code TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY, number TEXT UNIQUE, type TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, area TEXT, date TEXT, end_date TEXT, sector TEXT)''')
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_history ON history(person_code, area, sector, date)''')
     c.execute('''CREATE TABLE IF NOT EXISTS vacations (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, start_date DATE, end_date DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS active_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT, start_date TEXT, end_date TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS draft_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT, start_date TEXT, end_date TEXT, div_cat TEXT, sector TEXT)''')
@@ -75,22 +83,13 @@ def init_sqlite_db():
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
         "ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'",
         "ALTER TABLE helpers ADD COLUMN health_card TEXT DEFAULT 'No'",
-        "ALTER TABLE history ADD COLUMN end_date TEXT",
-        "ALTER TABLE history ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'",
-        "ALTER TABLE history ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
         "ALTER TABLE areas ADD COLUMN sort_order INTEGER DEFAULT 99",
         "ALTER TABLE vehicles ADD COLUMN anchor_area TEXT DEFAULT 'None'",
         "ALTER TABLE vehicles ADD COLUMN status TEXT DEFAULT 'Active'",
         "ALTER TABLE vehicles ADD COLUMN permitted_areas TEXT DEFAULT 'All'",
-        "ALTER TABLE vehicles ADD COLUMN division TEXT DEFAULT 'Pharma'",
-        "ALTER TABLE active_routes ADD COLUMN start_date TEXT DEFAULT 'None'",
-        "ALTER TABLE active_routes ADD COLUMN end_date TEXT DEFAULT 'None'",
-        "ALTER TABLE draft_routes ADD COLUMN start_date TEXT DEFAULT 'None'",
-        "ALTER TABLE draft_routes ADD COLUMN end_date TEXT DEFAULT 'None'",
-        "ALTER TABLE vacations ADD COLUMN person_code TEXT DEFAULT 'UNKNOWN'",
-        "ALTER TABLE vacation_predictions ADD COLUMN replacement_date TEXT DEFAULT 'None'"
+        "ALTER TABLE vehicles ADD COLUMN division TEXT DEFAULT 'Pharma'"
     ]:
         try: c.execute(query)
         except sqlite3.OperationalError: pass
@@ -99,7 +98,6 @@ def init_sqlite_db():
 
 if not FIREBASE_READY:
     conn = init_sqlite_db()
-
 
 # --- SMART DB QUERY HANDLER ---
 def clear_cache():
@@ -270,34 +268,22 @@ RAW_NAME_MAP = {
     "H017": "Mujammal", "H126": "Subin Kovammal"
 }
 
-def parse_date_safe(d_str):
-    d_str = str(d_str).strip()
-    if not d_str or d_str == "None": return None
-    try: return datetime.strptime(d_str.split(" ")[0], "%d/%m/%Y").strftime("%Y-%m-%d")
-    except:
-        try: return datetime.strptime(d_str.split(" ")[0], "%Y-%m-%d").strftime("%Y-%m-%d")
-        except: return d_str
-
-def parse_history_payload():
-    records = []
-    for line in RAW_HISTORY_DATA.strip().split('\n'):
-        if not line.strip() or 'DATE FROM' in line.upper() or 'EXPERIENCE SUMMARY' in line.upper(): continue
-        parts = line.split('\t')
-        if len(parts) >= 6:
-            code = parts[0].strip()
-            name = parts[1].strip()
-            area = parts[2].strip()
-            division = parts[3].strip() if parts[3].strip() else "Pharma"
-            d_from = parts[4].strip()
-            d_to = parts[5].strip()
-            
-            ptype = "Helper" if code.startswith('H') else "Driver"
-            d_from_parsed = parse_date_safe(d_from)
-            d_to_parsed = parse_date_safe(d_to)
-            
-            if d_from_parsed and d_to_parsed:
-                records.append((ptype, code, name, area, division, d_from_parsed, d_to_parsed))
-    return records
+# Adjusted to load perfectly structured data into SQLite/Firebase directly without string parsing issues
+PRELOAD_HISTORY = [
+    ("Driver", "AD051", "ABDUL JALEEL", "ABU DHABI", "Pharma", "2026-02-26", "2026-04-08"),
+    ("Driver", "AD051", "ABDUL JALEEL", "JABEL ALI", "Pharma", "2026-02-24", "2026-02-24"),
+    ("Driver", "AD055", "AHAMAD JAN", "ABU DHABI", "Pharma", "2026-02-18", "2026-02-18"),
+    ("Driver", "AD025", "ALI AHAMAD", "JABEL ALI", "Pharma", "2026-03-04", "2026-03-14"),
+    ("Driver", "D049", "Abdul Jabbar", "AJMAN", "Consumer", "2026-01-27", "2026-02-16"),
+    ("Driver", "D049", "Abdul Jabbar", "AJMAN", "Pharma", "2024-10-03", "2025-11-21"),
+    ("Driver", "D049", "Abdul Jabbar", "ALQOUZ-1", "Consumer", "2026-02-06", "2026-04-10"),
+    ("Driver", "D049", "Abdul Jabbar", "ALQOUZ-1", "Pharma", "2024-07-24", "2026-01-05"),
+    ("Helper", "H070", "A. Harshad", "AJMAN", "2 - 8 VAN", "2026-02-23", "2026-02-23"),
+    ("Helper", "H070", "A. Harshad", "AJMAN", "Consumer", "2026-02-27", "2026-04-01"),
+    ("Helper", "H070", "A. Harshad", "ALQOUZ-1", "Pharma", "2025-05-05", "2025-05-05"),
+    ("Helper", "H109", "AL Ameen", "AJMAN", "Consumer", "2025-07-03", "2025-11-12"),
+    ("Helper", "H109", "AL Ameen", "AJMAN", "Pharma", "2024-09-24", "2025-06-09")
+]
 
 
 if "db_initialized" not in st.session_state:
@@ -312,7 +298,7 @@ if "db_initialized" not in st.session_state:
                 else:
                     c = conn.cursor()
                     c.execute("DELETE FROM areas")
-                    c.executemany("INSERT INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
+                    c.executemany("INSERT OR IGNORE INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
                     conn.commit()
             
             d_df = load_table('drivers')
@@ -322,7 +308,7 @@ if "db_initialized" not in st.session_state:
                 else:
                     c = conn.cursor()
                     d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "None", "None", "None", "None") for code in KEEP_DRIVERS]
-                    c.executemany("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed)
+                    c.executemany("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed)
                     conn.commit()
             
             h_df = load_table('helpers')
@@ -332,7 +318,7 @@ if "db_initialized" not in st.session_state:
                 else:
                     c = conn.cursor()
                     h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
-                    c.executemany("INSERT INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
+                    c.executemany("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
                     conn.commit()
 
             v_df = load_table('vehicles')
@@ -342,17 +328,16 @@ if "db_initialized" not in st.session_state:
                 else:
                     c = conn.cursor()
                     v_seed = [(v_num, v_type, permitted, division, "None", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
-                    c.executemany("INSERT INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed)
+                    c.executemany("INSERT OR IGNORE INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed)
                     conn.commit()
                     
             history_df = load_table('history')
             if history_df.empty:
-                parsed_records = parse_history_payload()
-                if parsed_records:
+                if PRELOAD_HISTORY:
                     if FIREBASE_READY:
                         batch = db_fs.batch()
                         count = 0
-                        for ptype, pcode, pname, parea, psec, pstart, pend in parsed_records:
+                        for ptype, pcode, pname, parea, psec, pstart, pend in PRELOAD_HISTORY:
                             doc_ref = db_fs.collection("history").document()
                             batch.set(doc_ref, {"person_type": ptype, "person_code": pcode, "person_name": pname, "area": parea, "sector": psec, "date": pstart, "end_date": pend})
                             count += 1
@@ -363,7 +348,7 @@ if "db_initialized" not in st.session_state:
                         if count > 0: batch.commit()
                     else:
                         c = conn.cursor()
-                        c.executemany("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", parsed_records)
+                        c.executemany("INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", PRELOAD_HISTORY)
                         conn.commit()
             
             st.cache_data.clear()
@@ -372,6 +357,10 @@ if "db_initialized" not in st.session_state:
             
     execute_global_init()
     st.session_state.db_initialized = True
+
+def safe_parse_date(date_str):
+    try: return datetime.strptime(str(date_str).split(" ")[0], "%Y-%m-%d").date()
+    except: return date.today()
 
 
 # --- HIGH PERFORMANCE SCORING HELPERS (WITH CROSS TRAINING SECTOR CACHE) ---
@@ -960,7 +949,6 @@ elif choice == "2. Database Management":
         c_add, c_edit = st.columns(2)
         with c_add:
             st.subheader("➕ Add Driver")
-            st.caption("Don't see your custom Sector or Vehicle Type in the dropdown? Add a new driver here and the dropdown will automatically learn it.")
             d_name = st.text_input("New Driver Name", key="add_d_name")
             d_code = st.text_input("New Driver Code", key="add_d_code").strip()
             col_t, col_s, col_h = st.columns(3)
@@ -982,7 +970,6 @@ elif choice == "2. Database Management":
 
         with c_edit:
             st.subheader("🗑️ Delete Driver")
-            st.caption("Manually Remove a Driver from the Database")
             sel_d_code = st.selectbox("Select Driver to Delete", drivers_df['code'].tolist() if not drivers_df.empty else [])
             if sel_d_code:
                 d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
@@ -1445,7 +1432,6 @@ elif choice == "4. Vacation Schedule":
                         st.success("Vacation Deleted!")
                         st.rerun()
 
-# --- PASTE YOUR RAW HISTORY EXCEL DATA HERE EXACTLY AS YOU DID IN THE PROMPT ---
 RAW_HISTORY_DATA = """
 AD051	ABDUL JALEEL	ABU DHABI		26/02/2026	08/04/2026
 AD051	ABDUL JALEEL	JABEL ALI		24/02/2026	24/02/2026
@@ -1457,170 +1443,170 @@ AD055	AHAMAD JAN	SHARJAH SANAYA		13/02/2026	17/04/2026
 AD025	ALI AHAMAD	JABEL ALI		04/03/2026	14/03/2026
 AD025	ALI AHAMAD	SHARJAH SANAYA		04/03/2026	13/04/2026
 AD066	ANSARI	SHARJAH SANAYA		19/02/2026	19/02/2026
-D049	Abdul Jabbar	AJMAN	CONSUMER	27/01/2026	16/02/2026
-D049	Abdul Jabbar	AJMAN	PHARMA	03/10/2024	21/11/2025
-D049	Abdul Jabbar	ALQOUZ-1	CONSUMER	06/02/2026	10/04/2026
-D049	Abdul Jabbar	ALQOUZ-1	PHARMA	24/07/2024	05/01/2026
+D049	Abdul Jabbar	AJMAN	Consumer	27/01/2026	16/02/2026
+D049	Abdul Jabbar	AJMAN	Pharma	03/10/2024	21/11/2025
+D049	Abdul Jabbar	ALQOUZ-1	Consumer	06/02/2026	10/04/2026
+D049	Abdul Jabbar	ALQOUZ-1	Pharma	24/07/2024	05/01/2026
 D049	Abdul Jabbar	ALQOUZ-1		12/07/2024	12/07/2024
-D049	Abdul Jabbar	ALQOUZ-2	PHARMA	15/08/2025	15/08/2025
-D049	Abdul Jabbar	BUR DUBAI	CONSUMER	05/02/2026	21/02/2026
-D049	Abdul Jabbar	BUR DUBAI	PHARMA	01/03/2024	17/04/2026
+D049	Abdul Jabbar	ALQOUZ-2	Pharma	15/08/2025	15/08/2025
+D049	Abdul Jabbar	BUR DUBAI	Consumer	05/02/2026	21/02/2026
+D049	Abdul Jabbar	BUR DUBAI	Pharma	01/03/2024	17/04/2026
 D049	Abdul Jabbar	BUR DUBAI		11/07/2024	18/07/2024
-D049	Abdul Jabbar	DEIRA	CONSUMER	16/02/2026	16/02/2026
-D049	Abdul Jabbar	DEIRA	PHARMA	04/01/2024	01/05/2025
-D049	Abdul Jabbar	FUJAIRAH	CONSUMER	24/02/2026	24/02/2026
-D049	Abdul Jabbar	FUJAIRAH	PHARMA	25/11/2025	25/11/2025
-D049	Abdul Jabbar	JABEL ALI	CONSUMER	08/01/2026	07/04/2026
-D049	Abdul Jabbar	JABEL ALI	PHARMA	30/04/2024	06/11/2025
+D049	Abdul Jabbar	DEIRA	Consumer	16/02/2026	16/02/2026
+D049	Abdul Jabbar	DEIRA	Pharma	04/01/2024	01/05/2025
+D049	Abdul Jabbar	FUJAIRAH	Consumer	24/02/2026	24/02/2026
+D049	Abdul Jabbar	FUJAIRAH	Pharma	25/11/2025	25/11/2025
+D049	Abdul Jabbar	JABEL ALI	Consumer	08/01/2026	07/04/2026
+D049	Abdul Jabbar	JABEL ALI	Pharma	30/04/2024	06/11/2025
 D049	Abdul Jabbar	JABEL ALI		30/08/2024	03/09/2024
-D049	Abdul Jabbar	JUMAIRAH	PHARMA	13/02/2024	28/05/2025
-D049	Abdul Jabbar	MIRDIF	CONSUMER	13/01/2026	31/03/2026
-D049	Abdul Jabbar	MIRDIF	PHARMA	03/01/2024	13/04/2026
+D049	Abdul Jabbar	JUMAIRAH	Pharma	13/02/2024	28/05/2025
+D049	Abdul Jabbar	MIRDIF	Consumer	13/01/2026	31/03/2026
+D049	Abdul Jabbar	MIRDIF	Pharma	03/01/2024	13/04/2026
 D049	Abdul Jabbar	MIRDIF		11/07/2024	17/07/2024
-D049	Abdul Jabbar	QUSAIS	CONSUMER	29/01/2026	16/03/2026
-D049	Abdul Jabbar	QUSAIS	PHARMA	25/05/2024	03/12/2025
-D049	Abdul Jabbar	RAK / UAQ	CONSUMER	06/01/2026	10/04/2026
-D049	Abdul Jabbar	RAK / UAQ	PHARMA	13/11/2024	13/11/2024
-D049	Abdul Jabbar	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	05/01/2024	03/02/2025
+D049	Abdul Jabbar	QUSAIS	Consumer	29/01/2026	16/03/2026
+D049	Abdul Jabbar	QUSAIS	Pharma	25/05/2024	03/12/2025
+D049	Abdul Jabbar	RAK / UAQ	Consumer	06/01/2026	10/04/2026
+D049	Abdul Jabbar	RAK / UAQ	Pharma	13/11/2024	13/11/2024
+D049	Abdul Jabbar	SHARJAH ( BUHAIRA & ROLLA)	Pharma	05/01/2024	03/02/2025
 D049	Abdul Jabbar	SHARJAH ( BUHAIRA & ROLLA)		15/07/2024	17/07/2024
-D049	Abdul Jabbar	SHARJAH SANAYA	PHARMA	15/01/2024	07/02/2026
+D049	Abdul Jabbar	SHARJAH SANAYA	Pharma	15/01/2024	07/02/2026
 D086	Abdul Jaleel Nadakkavu	JABEL ALI		31/03/2026	14/04/2026
-D050	Abdul Mansoor	AJMAN	CONSUMER	11/02/2025	11/12/2025
-D050	Abdul Mansoor	AJMAN	PHARMA	24/09/2024	16/10/2025
+D050	Abdul Mansoor	AJMAN	Consumer	11/02/2025	11/12/2025
+D050	Abdul Mansoor	AJMAN	Pharma	24/09/2024	16/10/2025
 D050	Abdul Mansoor	ALQOUZ-1	2 - 8 VAN	14/04/2026	14/04/2026
-D050	Abdul Mansoor	ALQOUZ-1	CONSUMER	11/02/2025	14/04/2025
-D050	Abdul Mansoor	ALQOUZ-1	PHARMA	01/08/2024	28/10/2025
-D050	Abdul Mansoor	ALQOUZ-2	PHARMA	09/07/2025	09/07/2025
+D050	Abdul Mansoor	ALQOUZ-1	Consumer	11/02/2025	14/04/2025
+D050	Abdul Mansoor	ALQOUZ-1	Pharma	01/08/2024	28/10/2025
+D050	Abdul Mansoor	ALQOUZ-2	Pharma	09/07/2025	09/07/2025
 D050	Abdul Mansoor	BUR DUBAI	2 - 8 VAN	13/04/2026	17/04/2026
-D050	Abdul Mansoor	BUR DUBAI	CONSUMER	10/03/2025	03/12/2025
-D050	Abdul Mansoor	BUR DUBAI	PHARMA	15/04/2024	05/02/2026
-D050	Abdul Mansoor	DEIRA	CONSUMER	15/04/2025	29/04/2025
-D050	Abdul Mansoor	DEIRA	PHARMA	29/10/2024	27/10/2025
-D050	Abdul Mansoor	FUJAIRAH	CONSUMER	08/05/2024	09/12/2025
-D050	Abdul Mansoor	FUJAIRAH	PHARMA	01/05/2024	28/11/2025
+D050	Abdul Mansoor	BUR DUBAI	Consumer	10/03/2025	03/12/2025
+D050	Abdul Mansoor	BUR DUBAI	Pharma	15/04/2024	05/02/2026
+D050	Abdul Mansoor	DEIRA	Consumer	15/04/2025	29/04/2025
+D050	Abdul Mansoor	DEIRA	Pharma	29/10/2024	27/10/2025
+D050	Abdul Mansoor	FUJAIRAH	Consumer	08/05/2024	09/12/2025
+D050	Abdul Mansoor	FUJAIRAH	Pharma	01/05/2024	28/11/2025
 D050	Abdul Mansoor	JABEL ALI	2 - 8 VAN	15/04/2026	16/04/2026
-D050	Abdul Mansoor	JABEL ALI	CONSUMER	03/03/2025	29/12/2025
-D050	Abdul Mansoor	JABEL ALI	PHARMA	19/08/2024	28/02/2026
-D050	Abdul Mansoor	JUMAIRAH	PHARMA	22/02/2024	10/04/2026
+D050	Abdul Mansoor	JABEL ALI	Consumer	03/03/2025	29/12/2025
+D050	Abdul Mansoor	JABEL ALI	Pharma	19/08/2024	28/02/2026
+D050	Abdul Mansoor	JUMAIRAH	Pharma	22/02/2024	10/04/2026
 D050	Abdul Mansoor	MIRDIF	2 - 8 VAN	13/04/2026	13/04/2026
-D050	Abdul Mansoor	MIRDIF	CONSUMER	12/02/2025	22/12/2025
-D050	Abdul Mansoor	MIRDIF	PHARMA	09/01/2024	27/01/2026
+D050	Abdul Mansoor	MIRDIF	Consumer	12/02/2025	22/12/2025
+D050	Abdul Mansoor	MIRDIF	Pharma	09/01/2024	27/01/2026
 D050	Abdul Mansoor	QUSAIS	2 - 8 VAN	14/04/2026	14/04/2026
-D050	Abdul Mansoor	QUSAIS	CONSUMER	14/03/2025	18/12/2025
-D050	Abdul Mansoor	QUSAIS	PHARMA	11/12/2024	13/10/2025
-D050	Abdul Mansoor	RAK / UAQ	CONSUMER	05/02/2025	03/10/2025
-D050	Abdul Mansoor	RAK / UAQ	PHARMA	01/02/2024	01/02/2024
-D050	Abdul Mansoor	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	08/04/2025	11/12/2025
-D050	Abdul Mansoor	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	17/02/2024	24/09/2025
-D050	Abdul Mansoor	SHARJAH SANAYA	CONSUMER	14/02/2025	16/04/2025
-D050	Abdul Mansoor	SHARJAH SANAYA	PHARMA	03/01/2024	29/09/2025
-D034	Adil Hassan	AJMAN	CONSUMER	20/04/2024	09/04/2026
-D034	Adil Hassan	AJMAN	PHARMA	08/05/2024	15/12/2025
+D050	Abdul Mansoor	QUSAIS	Consumer	14/03/2025	18/12/2025
+D050	Abdul Mansoor	QUSAIS	Pharma	11/12/2024	13/10/2025
+D050	Abdul Mansoor	RAK / UAQ	Consumer	05/02/2025	03/10/2025
+D050	Abdul Mansoor	RAK / UAQ	Pharma	01/02/2024	01/02/2024
+D050	Abdul Mansoor	SHARJAH ( BUHAIRA & ROLLA)	Consumer	08/04/2025	11/12/2025
+D050	Abdul Mansoor	SHARJAH ( BUHAIRA & ROLLA)	Pharma	17/02/2024	24/09/2025
+D050	Abdul Mansoor	SHARJAH SANAYA	Consumer	14/02/2025	16/04/2025
+D050	Abdul Mansoor	SHARJAH SANAYA	Pharma	03/01/2024	29/09/2025
+D034	Adil Hassan	AJMAN	Consumer	20/04/2024	09/04/2026
+D034	Adil Hassan	AJMAN	Pharma	08/05/2024	15/12/2025
 D034	Adil Hassan	AJMAN		03/01/2024	01/11/2024
-D034	Adil Hassan	ALQOUZ-1	CONSUMER	04/12/2025	19/01/2026
-D034	Adil Hassan	ALQOUZ-1	PHARMA	29/01/2024	16/12/2025
-D034	Adil Hassan	ALQOUZ-2	PHARMA	04/11/2024	04/08/2025
-D034	Adil Hassan	BUR DUBAI	CONSUMER	15/10/2025	10/04/2026
-D034	Adil Hassan	BUR DUBAI	PHARMA	29/11/2024	17/12/2025
-D034	Adil Hassan	JABEL ALI	CONSUMER	10/12/2025	26/03/2026
-D034	Adil Hassan	JABEL ALI	PHARMA	20/05/2024	31/12/2024
-D034	Adil Hassan	JUMAIRAH	CONSUMER	02/05/2024	30/12/2025
-D034	Adil Hassan	MIRDIF	CONSUMER	16/01/2026	06/03/2026
-D034	Adil Hassan	MIRDIF	PHARMA	10/07/2025	18/07/2025
-D034	Adil Hassan	QUSAIS	CONSUMER	29/12/2025	09/03/2026
-D034	Adil Hassan	QUSAIS	PHARMA	30/08/2024	14/08/2025
-D034	Adil Hassan	RAK / UAQ	CONSUMER	03/11/2025	03/11/2025
-D034	Adil Hassan	RAK / UAQ	PHARMA	30/01/2024	17/04/2026
+D034	Adil Hassan	ALQOUZ-1	Consumer	04/12/2025	19/01/2026
+D034	Adil Hassan	ALQOUZ-1	Pharma	29/01/2024	16/12/2025
+D034	Adil Hassan	ALQOUZ-2	Pharma	04/11/2024	04/08/2025
+D034	Adil Hassan	BUR DUBAI	Consumer	15/10/2025	10/04/2026
+D034	Adil Hassan	BUR DUBAI	Pharma	29/11/2024	17/12/2025
+D034	Adil Hassan	JABEL ALI	Consumer	10/12/2025	26/03/2026
+D034	Adil Hassan	JABEL ALI	Pharma	20/05/2024	31/12/2024
+D034	Adil Hassan	JUMAIRAH	Consumer	02/05/2024	30/12/2025
+D034	Adil Hassan	MIRDIF	Consumer	16/01/2026	06/03/2026
+D034	Adil Hassan	MIRDIF	Pharma	10/07/2025	18/07/2025
+D034	Adil Hassan	QUSAIS	Consumer	29/12/2025	09/03/2026
+D034	Adil Hassan	QUSAIS	Pharma	30/08/2024	14/08/2025
+D034	Adil Hassan	RAK / UAQ	Consumer	03/11/2025	03/11/2025
+D034	Adil Hassan	RAK / UAQ	Pharma	30/01/2024	17/04/2026
 D034	Adil Hassan	RAK / UAQ		29/02/2024	06/03/2024
-D034	Adil Hassan	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	24/10/2025	07/04/2026
-D034	Adil Hassan	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	18/11/2024	03/09/2025
-D034	Adil Hassan	SHARJAH SANAYA	CONSUMER	22/08/2024	30/03/2026
-D034	Adil Hassan	SHARJAH SANAYA	PHARMA	05/07/2024	09/02/2026
+D034	Adil Hassan	SHARJAH ( BUHAIRA & ROLLA)	Consumer	24/10/2025	07/04/2026
+D034	Adil Hassan	SHARJAH ( BUHAIRA & ROLLA)	Pharma	18/11/2024	03/09/2025
+D034	Adil Hassan	SHARJAH SANAYA	Consumer	22/08/2024	30/03/2026
+D034	Adil Hassan	SHARJAH SANAYA	Pharma	05/07/2024	09/02/2026
 D030	Ahamed Diab	SHARJAH SANAYA		24/01/2024	14/06/2024
 D096	Ahmad Jan Mughal	JABEL ALI		13/02/2026	16/04/2026
-D047	Ahmed Faraj	ALQOUZ-1	PHARMA	09/02/2024	06/11/2024
+D047	Ahmed Faraj	ALQOUZ-1	Pharma	09/02/2024	06/11/2024
 D047	Ahmed Faraj	ALQOUZ-1		01/08/2024	01/08/2024
-D047	Ahmed Faraj	BUR DUBAI	PHARMA	16/06/2025	20/01/2026
-D047	Ahmed Faraj	DEIRA	PHARMA	17/02/2025	12/06/2025
-D047	Ahmed Faraj	JABEL ALI	PHARMA	10/06/2024	26/06/2025
+D047	Ahmed Faraj	BUR DUBAI	Pharma	16/06/2025	20/01/2026
+D047	Ahmed Faraj	DEIRA	Pharma	17/02/2025	12/06/2025
+D047	Ahmed Faraj	JABEL ALI	Pharma	10/06/2024	26/06/2025
 D047	Ahmed Faraj	JABEL ALI		01/11/2024	03/02/2025
 D047	Ahmed Faraj	JUMAIRAH		02/06/2025	02/06/2025
-D047	Ahmed Faraj	PICK-UP	CONSUMER	31/10/2024	13/10/2025
-D047	Ahmed Faraj	PICK-UP	PHARMA	03/01/2024	17/04/2026
-D047	Ahmed Faraj	QUSAIS	PHARMA	26/08/2024	26/08/2024
-D047	Ahmed Faraj	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	26/08/2024	26/08/2024
+D047	Ahmed Faraj	PICK-UP	Consumer	31/10/2024	13/10/2025
+D047	Ahmed Faraj	PICK-UP	Pharma	03/01/2024	17/04/2026
+D047	Ahmed Faraj	QUSAIS	Pharma	26/08/2024	26/08/2024
+D047	Ahmed Faraj	SHARJAH ( BUHAIRA & ROLLA)	Pharma	26/08/2024	26/08/2024
 D047	Ahmed Faraj	SHARJAH ( BUHAIRA & ROLLA)		01/03/2024	15/08/2024
-D047	Ahmed Faraj	SHARJAH SANAYA	CONSUMER	02/02/2024	02/02/2024
+D047	Ahmed Faraj	SHARJAH SANAYA	Consumer	02/02/2024	02/02/2024
 D047	Ahmed Faraj	SHARJAH SANAYA		01/02/2024	01/02/2024
-D063	Ajmal Ali Akbar	AJMAN	PHARMA	24/01/2024	04/09/2025
+D063	Ajmal Ali Akbar	AJMAN	Pharma	24/01/2024	04/09/2025
 D063	Ajmal Ali Akbar	ALQOUZ-1	2 - 8 VAN	18/07/2025	18/07/2025
-D063	Ajmal Ali Akbar	ALQOUZ-1	CONSUMER	19/05/2025	04/06/2025
-D063	Ajmal Ali Akbar	ALQOUZ-1	PHARMA	13/01/2024	10/04/2026
-D063	Ajmal Ali Akbar	ALQOUZ-2	PHARMA	17/02/2024	24/01/2026
+D063	Ajmal Ali Akbar	ALQOUZ-1	Consumer	19/05/2025	04/06/2025
+D063	Ajmal Ali Akbar	ALQOUZ-1	Pharma	13/01/2024	10/04/2026
+D063	Ajmal Ali Akbar	ALQOUZ-2	Pharma	17/02/2024	24/01/2026
 D063	Ajmal Ali Akbar	BUR DUBAI	2 - 8 VAN	07/05/2025	18/07/2025
-D063	Ajmal Ali Akbar	BUR DUBAI	CONSUMER	15/01/2025	15/01/2025
-D063	Ajmal Ali Akbar	BUR DUBAI	PHARMA	06/03/2024	28/11/2025
+D063	Ajmal Ali Akbar	BUR DUBAI	Consumer	15/01/2025	15/01/2025
+D063	Ajmal Ali Akbar	BUR DUBAI	Pharma	06/03/2024	28/11/2025
 D063	Ajmal Ali Akbar	DEIRA	2 - 8 VAN	11/02/2025	11/02/2025
-D063	Ajmal Ali Akbar	DEIRA	PHARMA	17/01/2024	29/12/2025
+D063	Ajmal Ali Akbar	DEIRA	Pharma	17/01/2024	29/12/2025
 D063	Ajmal Ali Akbar	FUJAIRAH	2 - 8 VAN	22/07/2025	28/07/2025
-D063	Ajmal Ali Akbar	FUJAIRAH	PHARMA	02/08/2024	15/07/2025
+D063	Ajmal Ali Akbar	FUJAIRAH	Pharma	02/08/2024	15/07/2025
 D063	Ajmal Ali Akbar	JABEL ALI	2 - 8 VAN	08/05/2025	17/07/2025
-D063	Ajmal Ali Akbar	JABEL ALI	PHARMA	23/12/2024	16/01/2026
-D063	Ajmal Ali Akbar	JUMAIRAH	CONSUMER	05/02/2024	05/02/2024
-D063	Ajmal Ali Akbar	JUMAIRAH	PHARMA	25/12/2024	04/02/2026
+D063	Ajmal Ali Akbar	JABEL ALI	Pharma	23/12/2024	16/01/2026
+D063	Ajmal Ali Akbar	JUMAIRAH	Consumer	05/02/2024	05/02/2024
+D063	Ajmal Ali Akbar	JUMAIRAH	Pharma	25/12/2024	04/02/2026
 D063	Ajmal Ali Akbar	MIRDIF	2 - 8 VAN	03/03/2025	21/07/2025
-D063	Ajmal Ali Akbar	MIRDIF	PHARMA	20/05/2024	06/04/2026
+D063	Ajmal Ali Akbar	MIRDIF	Pharma	20/05/2024	06/04/2026
 D063	Ajmal Ali Akbar	QUSAIS	2 - 8 VAN	11/02/2025	28/07/2025
-D063	Ajmal Ali Akbar	QUSAIS	CONSUMER	04/11/2024	02/06/2025
-D063	Ajmal Ali Akbar	QUSAIS	PHARMA	02/01/2024	31/03/2026
-D063	Ajmal Ali Akbar	RAK / UAQ	PHARMA	03/01/2024	13/11/2024
+D063	Ajmal Ali Akbar	QUSAIS	Consumer	04/11/2024	02/06/2025
+D063	Ajmal Ali Akbar	QUSAIS	Pharma	02/01/2024	31/03/2026
+D063	Ajmal Ali Akbar	RAK / UAQ	Pharma	03/01/2024	13/11/2024
 D063	Ajmal Ali Akbar	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	07/04/2025	25/07/2025
-D063	Ajmal Ali Akbar	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	15/02/2024	13/06/2024
+D063	Ajmal Ali Akbar	SHARJAH ( BUHAIRA & ROLLA)	Pharma	15/02/2024	13/06/2024
 D063	Ajmal Ali Akbar	SHARJAH SANAYA	2 - 8 VAN	16/07/2025	18/07/2025
-D063	Ajmal Ali Akbar	SHARJAH SANAYA	CONSUMER	05/02/2024	12/11/2024
-D063	Ajmal Ali Akbar	SHARJAH SANAYA	PHARMA	01/08/2024	16/04/2026
+D063	Ajmal Ali Akbar	SHARJAH SANAYA	Consumer	05/02/2024	12/11/2024
+D063	Ajmal Ali Akbar	SHARJAH SANAYA	Pharma	01/08/2024	16/04/2026
 D063	Ajmal Ali Akbar	SHARJAH SANAYA		26/03/2026	26/03/2026
 D068	Ali Ahamed	JABEL ALI		02/04/2026	13/04/2026
 D108	Ansari Ithayathullah	JABEL ALI		05/02/2026	16/03/2026
-D046	Azeez Abdulla	AJMAN	CONSUMER	17/01/2024	30/12/2025
-D046	Azeez Abdulla	AJMAN	PHARMA	08/03/2024	18/07/2025
-D046	Azeez Abdulla	ALQOUZ-1	CONSUMER	17/10/2025	17/10/2025
-D046	Azeez Abdulla	ALQOUZ-1	PHARMA	04/05/2024	17/07/2024
-D046	Azeez Abdulla	ALQOUZ-2	CONSUMER	26/03/2026	02/04/2026
-D046	Azeez Abdulla	ALQOUZ-2	PHARMA	01/05/2024	31/07/2024
-D046	Azeez Abdulla	BUR DUBAI	CONSUMER	06/10/2025	08/01/2026
-D046	Azeez Abdulla	BUR DUBAI	PHARMA	02/08/2024	31/10/2024
-D046	Azeez Abdulla	DEIRA	CONSUMER	03/11/2025	03/11/2025
-D046	Azeez Abdulla	FUJAIRAH	CONSUMER	27/01/2025	13/02/2025
-D046	Azeez Abdulla	FUJAIRAH	PHARMA	05/12/2024	07/02/2025
-D046	Azeez Abdulla	JABEL ALI	CONSUMER	10/01/2024	03/12/2025
-D046	Azeez Abdulla	JABEL ALI	PHARMA	23/09/2024	31/03/2026
-D046	Azeez Abdulla	JUMAIRAH	CONSUMER	21/08/2025	07/02/2026
-D046	Azeez Abdulla	JUMAIRAH	PHARMA	29/09/2025	29/09/2025
-D046	Azeez Abdulla	MIRDIF	CONSUMER	26/01/2024	17/04/2026
-D046	Azeez Abdulla	MIRDIF	PHARMA	19/03/2024	19/03/2024
-D046	Azeez Abdulla	QUSAIS	PHARMA	12/05/2025	03/06/2025
-D046	Azeez Abdulla	RAK / UAQ	CONSUMER	03/01/2024	30/04/2024
-D046	Azeez Abdulla	RAK / UAQ	PHARMA	08/03/2024	20/08/2025
-D046	Azeez Abdulla	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	20/11/2025	03/02/2026
-D029	Baderudheen	AJMAN	PHARMA	13/04/2026	17/04/2026
-D029	Baderudheen	ALQOUZ-1	PHARMA	07/10/2024	08/11/2025
-D029	Baderudheen	ALQOUZ-2	PHARMA	20/09/2024	05/05/2025
-D029	Baderudheen	BUR DUBAI	PHARMA	02/01/2024	28/03/2026
-D029	Baderudheen	DEIRA	CONSUMER	06/12/2024	06/12/2024
-D029	Baderudheen	DEIRA	PHARMA	03/07/2024	14/01/2025
-D029	Baderudheen	FUJAIRAH	PHARMA	09/05/2024	10/04/2026
-D029	Baderudheen	JABEL ALI	CONSUMER	02/10/2025	02/10/2025
-D029	Baderudheen	JABEL ALI	PHARMA	03/01/2024	26/08/2025
-D029	Baderudheen	JUMAIRAH	PHARMA	04/12/2024	03/12/2025
-D029	Baderudheen	MIRDIF	PHARMA	14/06/2024	24/01/2026
-D029	Baderudheen	QUSAIS	CONSUMER	01/10/2024	01/10/2024
-D029	Baderudheen	QUSAIS	PHARMA	01/05/2024	09/06/2025
+D046	Azeez Abdulla	AJMAN	Consumer	17/01/2024	30/12/2025
+D046	Azeez Abdulla	AJMAN	Pharma	08/03/2024	18/07/2025
+D046	Azeez Abdulla	ALQOUZ-1	Consumer	17/10/2025	17/10/2025
+D046	Azeez Abdulla	ALQOUZ-1	Pharma	04/05/2024	17/07/2024
+D046	Azeez Abdulla	ALQOUZ-2	Consumer	26/03/2026	02/04/2026
+D046	Azeez Abdulla	ALQOUZ-2	Pharma	01/05/2024	31/07/2024
+D046	Azeez Abdulla	BUR DUBAI	Consumer	06/10/2025	08/01/2026
+D046	Azeez Abdulla	BUR DUBAI	Pharma	02/08/2024	31/10/2024
+D046	Azeez Abdulla	DEIRA	Consumer	03/11/2025	03/11/2025
+D046	Azeez Abdulla	FUJAIRAH	Consumer	27/01/2025	13/02/2025
+D046	Azeez Abdulla	FUJAIRAH	Pharma	05/12/2024	07/02/2025
+D046	Azeez Abdulla	JABEL ALI	Consumer	10/01/2024	03/12/2025
+D046	Azeez Abdulla	JABEL ALI	Pharma	23/09/2024	31/03/2026
+D046	Azeez Abdulla	JUMAIRAH	Consumer	21/08/2025	07/02/2026
+D046	Azeez Abdulla	JUMAIRAH	Pharma	29/09/2025	29/09/2025
+D046	Azeez Abdulla	MIRDIF	Consumer	26/01/2024	17/04/2026
+D046	Azeez Abdulla	MIRDIF	Pharma	19/03/2024	19/03/2024
+D046	Azeez Abdulla	QUSAIS	Pharma	12/05/2025	03/06/2025
+D046	Azeez Abdulla	RAK / UAQ	Consumer	03/01/2024	30/04/2024
+D046	Azeez Abdulla	RAK / UAQ	Pharma	08/03/2024	20/08/2025
+D046	Azeez Abdulla	SHARJAH ( BUHAIRA & ROLLA)	Consumer	20/11/2025	03/02/2026
+D029	Baderudheen	AJMAN	Pharma	13/04/2026	17/04/2026
+D029	Baderudheen	ALQOUZ-1	Pharma	07/10/2024	08/11/2025
+D029	Baderudheen	ALQOUZ-2	Pharma	20/09/2024	05/05/2025
+D029	Baderudheen	BUR DUBAI	Pharma	02/01/2024	28/03/2026
+D029	Baderudheen	DEIRA	Consumer	06/12/2024	06/12/2024
+D029	Baderudheen	DEIRA	Pharma	03/07/2024	14/01/2025
+D029	Baderudheen	FUJAIRAH	Pharma	09/05/2024	10/04/2026
+D029	Baderudheen	JABEL ALI	Consumer	02/10/2025	02/10/2025
+D029	Baderudheen	JABEL ALI	Pharma	03/01/2024	26/08/2025
+D029	Baderudheen	JUMAIRAH	Pharma	04/12/2024	03/12/2025
+D029	Baderudheen	MIRDIF	Pharma	14/06/2024	24/01/2026
+D029	Baderudheen	QUSAIS	Consumer	01/10/2024	01/10/2024
+D029	Baderudheen	QUSAIS	Pharma	01/05/2024	09/06/2025
 D029	Baderudheen	QUSAIS		29/08/2024	29/08/2024
-D029	Baderudheen	RAK / UAQ	PHARMA	25/09/2024	29/08/2025
-D029	Baderudheen	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	25/04/2024	03/03/2026
-D029	Baderudheen	SHARJAH SANAYA	CONSUMER	01/10/2024	01/10/2024
-D029	Baderudheen	SHARJAH SANAYA	PHARMA	01/05/2024	01/04/2026
+D029	Baderudheen	RAK / UAQ	Pharma	25/09/2024	29/08/2025
+D029	Baderudheen	SHARJAH ( BUHAIRA & ROLLA)	Pharma	25/04/2024	03/03/2026
+D029	Baderudheen	SHARJAH SANAYA	Consumer	01/10/2024	01/10/2024
+D029	Baderudheen	SHARJAH SANAYA	Pharma	01/05/2024	01/04/2026
 CPC001	Danish Mohammed	SHARJAH SANAYA		04/02/2026	04/02/2026
 AD064	FAYAZ KHAN	ABU DHABI		17/03/2026	17/03/2026
 AD064	FAYAZ KHAN	DUBAI (GENERAL)		27/02/2026	01/04/2026
@@ -1630,700 +1616,189 @@ D090	Faisal Mahmood	JABEL ALI		06/04/2026	06/04/2026
 D105	Fayaz Khan RS	JABEL ALI		10/02/2026	26/02/2026
 D071	Fazal Naeem Abdur Rahim	JABEL ALI		06/02/2026	27/02/2026
 D042	Gulam Khan Mohammad	AJMAN	2 - 8 VAN	13/10/2025	18/12/2025
-D042	Gulam Khan Mohammad	AJMAN	PHARMA	20/05/2024	07/08/2025
+D042	Gulam Khan Mohammad	AJMAN	Pharma	20/05/2024	07/08/2025
 D042	Gulam Khan Mohammad	ALQOUZ-1	2 - 8 VAN	20/06/2025	20/12/2025
-D042	Gulam Khan Mohammad	ALQOUZ-1	PHARMA	18/01/2024	19/09/2025
+D042	Gulam Khan Mohammad	ALQOUZ-1	Pharma	18/01/2024	19/09/2025
 D042	Gulam Khan Mohammad	ALQOUZ-2	2 - 8 VAN	10/12/2025	10/02/2026
-D042	Gulam Khan Mohammad	ALQOUZ-2	PHARMA	09/07/2024	07/05/2025
+D042	Gulam Khan Mohammad	ALQOUZ-2	Pharma	09/07/2024	07/05/2025
 D042	Gulam Khan Mohammad	BUR DUBAI	2 - 8 VAN	18/12/2024	10/02/2026
-D042	Gulam Khan Mohammad	BUR DUBAI	PHARMA	11/01/2024	18/02/2026
+D042	Gulam Khan Mohammad	BUR DUBAI	Pharma	11/01/2024	18/02/2026
 D042	Gulam Khan Mohammad	BUR DUBAI		01/10/2024	01/10/2024
 D042	Gulam Khan Mohammad	DEIRA	2 - 8 VAN	10/07/2025	10/07/2025
-D042	Gulam Khan Mohammad	DEIRA	PHARMA	25/06/2024	02/10/2025
+D042	Gulam Khan Mohammad	DEIRA	Pharma	25/06/2024	02/10/2025
 D042	Gulam Khan Mohammad	FUJAIRAH	2 - 8 VAN	09/06/2025	09/06/2025
-D042	Gulam Khan Mohammad	FUJAIRAH	PHARMA	05/01/2024	30/12/2024
+D042	Gulam Khan Mohammad	FUJAIRAH	Pharma	05/01/2024	30/12/2024
 D042	Gulam Khan Mohammad	FUJAIRAH		02/01/2024	01/10/2024
 D042	Gulam Khan Mohammad	JABEL ALI	2 - 8 VAN	06/05/2025	09/02/2026
-D042	Gulam Khan Mohammad	JABEL ALI	PHARMA	12/01/2024	15/04/2026
+D042	Gulam Khan Mohammad	JABEL ALI	Pharma	12/01/2024	15/04/2026
 D042	Gulam Khan Mohammad	JABEL ALI		04/01/2024	29/11/2025
 D042	Gulam Khan Mohammad	JUMAIRAH	2 - 8 VAN	22/12/2025	22/12/2025
-D042	Gulam Khan Mohammad	JUMAIRAH	PHARMA	14/05/2024	02/03/2026
+D042	Gulam Khan Mohammad	JUMAIRAH	Pharma	14/05/2024	02/03/2026
 D042	Gulam Khan Mohammad	MIRDIF	2 - 8 VAN	02/06/2025	26/01/2026
-D042	Gulam Khan Mohammad	MIRDIF	PHARMA	03/01/2024	03/09/2025
+D042	Gulam Khan Mohammad	MIRDIF	Pharma	03/01/2024	03/09/2025
 D042	Gulam Khan Mohammad	PICK-UP	2 - 8 VAN	06/01/2026	20/01/2026
-D042	Gulam Khan Mohammad	PICK-UP	CONSUMER	17/09/2025	06/10/2025
-D042	Gulam Khan Mohammad	PICK-UP	PHARMA	30/03/2024	05/02/2026
+D042	Gulam Khan Mohammad	PICK-UP	Consumer	17/09/2025	06/10/2025
+D042	Gulam Khan Mohammad	PICK-UP	Pharma	30/03/2024	05/02/2026
 D042	Gulam Khan Mohammad	QUSAIS	2 - 8 VAN	20/06/2025	23/01/2026
-D042	Gulam Khan Mohammad	QUSAIS	PHARMA	08/01/2024	13/03/2026
+D042	Gulam Khan Mohammad	QUSAIS	Pharma	08/01/2024	13/03/2026
 D042	Gulam Khan Mohammad	RAK / UAQ	2 - 8 VAN	04/07/2025	27/10/2025
-D042	Gulam Khan Mohammad	RAK / UAQ	PHARMA	31/01/2024	21/04/2025
+D042	Gulam Khan Mohammad	RAK / UAQ	Pharma	31/01/2024	21/04/2025
 D042	Gulam Khan Mohammad	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	28/05/2025	29/12/2025
-D042	Gulam Khan Mohammad	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	06/06/2024	08/10/2025
+D042	Gulam Khan Mohammad	SHARJAH ( BUHAIRA & ROLLA)	Pharma	06/06/2024	08/10/2025
 D042	Gulam Khan Mohammad	SHARJAH SANAYA	2 - 8 VAN	19/05/2025	26/01/2026
-D042	Gulam Khan Mohammad	SHARJAH SANAYA	PHARMA	09/02/2024	17/04/2026
+D042	Gulam Khan Mohammad	SHARJAH SANAYA	Pharma	09/02/2024	17/04/2026
 AD039	H. SAGUL AMEED	ABU DHABI		14/04/2026	14/04/2026
 AD039	H. SAGUL AMEED	DUBAI (GENERAL)		31/03/2026	31/03/2026
 AD039	H. SAGUL AMEED	SHARJAH SANAYA		24/03/2026	17/04/2026
-D016	Hajaz	AJMAN	PHARMA	27/06/2024	04/12/2024
-D016	Hajaz	ALQOUZ-1	PHARMA	02/01/2024	25/02/2025
-D016	Hajaz	BUR DUBAI	PHARMA	12/01/2024	27/02/2025
-D016	Hajaz	DEIRA	PHARMA	15/10/2024	15/10/2024
-D016	Hajaz	FUJAIRAH	CONSUMER	04/02/2025	04/02/2025
-D016	Hajaz	FUJAIRAH	PHARMA	20/05/2024	20/05/2024
-D016	Hajaz	JABEL ALI	CONSUMER	11/06/2024	11/06/2024
-D016	Hajaz	JABEL ALI	PHARMA	04/04/2024	31/07/2024
-D016	Hajaz	JUMAIRAH	PHARMA	15/02/2024	05/03/2024
-D016	Hajaz	MIRDIF	PHARMA	03/01/2024	13/02/2025
+D016	Hajaz	AJMAN	Pharma	27/06/2024	04/12/2024
+D016	Hajaz	ALQOUZ-1	Pharma	02/01/2024	25/02/2025
+D016	Hajaz	BUR DUBAI	Pharma	12/01/2024	27/02/2025
+D016	Hajaz	DEIRA	Pharma	15/10/2024	15/10/2024
+D016	Hajaz	FUJAIRAH	Consumer	04/02/2025	04/02/2025
+D016	Hajaz	FUJAIRAH	Pharma	20/05/2024	20/05/2024
+D016	Hajaz	JABEL ALI	Consumer	11/06/2024	11/06/2024
+D016	Hajaz	JABEL ALI	Pharma	04/04/2024	31/07/2024
+D016	Hajaz	JUMAIRAH	Pharma	15/02/2024	05/03/2024
+D016	Hajaz	MIRDIF	Pharma	03/01/2024	13/02/2025
 D016	Hajaz	MIRDIF		03/04/2024	03/04/2024
-D016	Hajaz	RAK / UAQ	CONSUMER	11/05/2024	14/06/2024
-D016	Hajaz	RAK / UAQ	PHARMA	27/03/2024	09/07/2024
-D016	Hajaz	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	14/10/2024	14/10/2024
-D016	Hajaz	SHARJAH SANAYA	PHARMA	28/03/2024	10/02/2025
+D016	Hajaz	RAK / UAQ	Consumer	11/05/2024	14/06/2024
+D016	Hajaz	RAK / UAQ	Pharma	27/03/2024	09/07/2024
+D016	Hajaz	SHARJAH ( BUHAIRA & ROLLA)	Pharma	14/10/2024	14/10/2024
+D016	Hajaz	SHARJAH SANAYA	Pharma	28/03/2024	10/02/2025
 D040	Hussain Mohammed	AJMAN	2 - 8 VAN	11/03/2025	11/09/2025
-D040	Hussain Mohammed	AJMAN	PHARMA	22/04/2025	03/04/2026
+D040	Hussain Mohammed	AJMAN	Pharma	22/04/2025	03/04/2026
 D040	Hussain Mohammed	ALQOUZ-1	2 - 8 VAN	11/09/2025	11/12/2025
-D040	Hussain Mohammed	ALQOUZ-1	CONSUMER	02/03/2024	02/07/2024
-D040	Hussain Mohammed	ALQOUZ-1	PHARMA	02/08/2024	28/07/2025
+D040	Hussain Mohammed	ALQOUZ-1	Consumer	02/03/2024	02/07/2024
+D040	Hussain Mohammed	ALQOUZ-1	Pharma	02/08/2024	28/07/2025
 D040	Hussain Mohammed	ALQOUZ-2	2 - 8 VAN	16/09/2025	12/11/2025
-D040	Hussain Mohammed	ALQOUZ-2	CONSUMER	27/05/2024	27/05/2024
-D040	Hussain Mohammed	ALQOUZ-2	PHARMA	27/08/2024	23/04/2025
+D040	Hussain Mohammed	ALQOUZ-2	Consumer	27/05/2024	27/05/2024
+D040	Hussain Mohammed	ALQOUZ-2	Pharma	27/08/2024	23/04/2025
 D040	Hussain Mohammed	ALQOUZ-2		01/07/2024	01/07/2024
 D040	Hussain Mohammed	BUR DUBAI	2 - 8 VAN	08/03/2025	16/12/2025
-D040	Hussain Mohammed	BUR DUBAI	CONSUMER	08/04/2024	22/08/2025
-D040	Hussain Mohammed	BUR DUBAI	PHARMA	02/01/2024	03/04/2026
+D040	Hussain Mohammed	BUR DUBAI	Consumer	08/04/2024	22/08/2025
+D040	Hussain Mohammed	BUR DUBAI	Pharma	02/01/2024	03/04/2026
 D040	Hussain Mohammed	BUR DUBAI		16/03/2024	16/03/2024
 D040	Hussain Mohammed	DEIRA	2 - 8 VAN	10/03/2025	11/12/2025
-D040	Hussain Mohammed	DEIRA	CONSUMER	13/05/2024	31/07/2024
-D040	Hussain Mohammed	DEIRA	PHARMA	04/07/2024	28/03/2026
+D040	Hussain Mohammed	DEIRA	Consumer	13/05/2024	31/07/2024
+D040	Hussain Mohammed	DEIRA	Pharma	04/07/2024	28/03/2026
 D040	Hussain Mohammed	DEIRA		02/01/2025	02/01/2025
 D040	Hussain Mohammed	FUJAIRAH	2 - 8 VAN	08/07/2025	05/11/2025
-D040	Hussain Mohammed	FUJAIRAH	PHARMA	03/04/2025	04/02/2026
+D040	Hussain Mohammed	FUJAIRAH	Pharma	03/04/2025	04/02/2026
 D040	Hussain Mohammed	JABEL ALI	2 - 8 VAN	11/03/2025	30/12/2025
-D040	Hussain Mohammed	JABEL ALI	CONSUMER	22/05/2024	01/06/2024
-D040	Hussain Mohammed	JABEL ALI	PHARMA	20/05/2024	28/02/2026
+D040	Hussain Mohammed	JABEL ALI	Consumer	22/05/2024	01/06/2024
+D040	Hussain Mohammed	JABEL ALI	Pharma	20/05/2024	28/02/2026
 D040	Hussain Mohammed	JABEL ALI		19/03/2025	19/03/2025
 D040	Hussain Mohammed	JUMAIRAH	2 - 8 VAN	30/01/2025	08/11/2025
-D040	Hussain Mohammed	JUMAIRAH	CONSUMER	19/04/2024	20/08/2025
-D040	Hussain Mohammed	JUMAIRAH	PHARMA	28/09/2024	17/04/2025
+D040	Hussain Mohammed	JUMAIRAH	Consumer	19/04/2024	20/08/2025
+D040	Hussain Mohammed	JUMAIRAH	Pharma	28/09/2024	17/04/2025
 D040	Hussain Mohammed	MIRDIF	2 - 8 VAN	10/03/2025	31/12/2025
-D040	Hussain Mohammed	MIRDIF	CONSUMER	22/02/2024	22/08/2025
-D040	Hussain Mohammed	MIRDIF	PHARMA	19/01/2024	17/04/2026
+D040	Hussain Mohammed	MIRDIF	Consumer	22/02/2024	22/08/2025
+D040	Hussain Mohammed	MIRDIF	Pharma	19/01/2024	17/04/2026
 D040	Hussain Mohammed	MIRDIF		15/03/2024	15/03/2024
 D040	Hussain Mohammed	QUSAIS	2 - 8 VAN	03/02/2025	16/12/2025
-D040	Hussain Mohammed	QUSAIS	CONSUMER	20/04/2024	21/08/2025
-D040	Hussain Mohammed	QUSAIS	PHARMA	25/09/2024	02/09/2025
+D040	Hussain Mohammed	QUSAIS	Consumer	20/04/2024	21/08/2025
+D040	Hussain Mohammed	QUSAIS	Pharma	25/09/2024	02/09/2025
 D040	Hussain Mohammed	QUSAIS		30/03/2024	30/03/2024
 D040	Hussain Mohammed	RAK / UAQ	2 - 8 VAN	17/03/2025	06/10/2025
-D040	Hussain Mohammed	RAK / UAQ	CONSUMER	06/03/2025	06/03/2025
-D040	Hussain Mohammed	RAK / UAQ	PHARMA	10/10/2024	10/10/2024
+D040	Hussain Mohammed	RAK / UAQ	Consumer	06/03/2025	06/03/2025
+D040	Hussain Mohammed	RAK / UAQ	Pharma	10/10/2024	10/10/2024
 D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	31/07/2025	16/10/2025
-D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	26/02/2024	02/04/2026
-D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	04/01/2024	10/04/2026
+D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	Consumer	26/02/2024	02/04/2026
+D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	Pharma	04/01/2024	10/04/2026
 D040	Hussain Mohammed	SHARJAH SANAYA	2 - 8 VAN	07/07/2025	12/11/2025
-D040	Hussain Mohammed	SHARJAH SANAYA	CONSUMER	21/02/2024	02/04/2026
-D040	Hussain Mohammed	SHARJAH SANAYA	PHARMA	24/02/2024	10/04/2026
-D011	Imran Khan	AJMAN	PHARMA	16/08/2024	05/06/2025
-D011	Imran Khan	ALQOUZ-1	PHARMA	17/05/2024	29/05/2024
-D011	Imran Khan	BUR DUBAI	PHARMA	02/02/2024	20/02/2026
-D011	Imran Khan	FUJAIRAH	PHARMA	12/06/2024	12/06/2024
-D011	Imran Khan	JABEL ALI		22/03/2024	22/03/2024
-D011	Imran Khan	PICK-UP	PHARMA	12/08/2024	13/09/2025
-D011	Imran Khan	QUSAIS	CONSUMER	13/06/2024	13/06/2024
-D011	Imran Khan	QUSAIS	PHARMA	17/05/2024	14/02/2026
-D011	Imran Khan	QUSAIS		21/03/2025	21/03/2025
-D011	Imran Khan	RAK / UAQ	PHARMA	30/05/2024	30/05/2024
-D011	Imran Khan	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	04/07/2024	30/05/2025
-D011	Imran Khan	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	03/01/2024	17/04/2026
-D011	Imran Khan	SHARJAH ( BUHAIRA & ROLLA)		13/02/2024	31/05/2024
-D011	Imran Khan	SHARJAH SANAYA	CONSUMER	17/07/2024	02/06/2025
-D011	Imran Khan	SHARJAH SANAYA	PHARMA	15/01/2024	08/04/2026
-D038	Ismail Korokkaran	AJMAN	2 - 8 VAN	20/11/2025	28/11/2025
-D038	Ismail Korokkaran	AJMAN	CONSUMER	26/03/2024	29/09/2025
-D038	Ismail Korokkaran	AJMAN	PHARMA	09/12/2025	12/12/2025
-D038	Ismail Korokkaran	ALQOUZ-1	CONSUMER	16/01/2024	07/02/2026
-D038	Ismail Korokkaran	ALQOUZ-1	PHARMA	03/12/2025	17/04/2026
-D038	Ismail Korokkaran	ALQOUZ-2	CONSUMER	14/02/2024	13/06/2025
-D038	Ismail Korokkaran	ALQOUZ-2	PHARMA	15/12/2025	15/12/2025
-D038	Ismail Korokkaran	BUR DUBAI	2 - 8 VAN	24/11/2025	24/11/2025
-D038	Ismail Korokkaran	BUR DUBAI	CONSUMER	03/01/2024	03/04/2026
-D038	Ismail Korokkaran	BUR DUBAI	PHARMA	21/02/2024	22/12/2025
-D038	Ismail Korokkaran	DEIRA	2 - 8 VAN	19/11/2025	19/11/2025
-D038	Ismail Korokkaran	DEIRA	CONSUMER	12/01/2024	02/07/2025
-D038	Ismail Korokkaran	DEIRA	PHARMA	22/02/2024	18/12/2025
-D038	Ismail Korokkaran	DUBAI (GENERAL)	CONSUMER	09/02/2026	09/02/2026
-D038	Ismail Korokkaran	FUJAIRAH	CONSUMER	04/01/2024	12/06/2025
-D038	Ismail Korokkaran	FUJAIRAH	PHARMA	04/12/2025	25/12/2025
-D038	Ismail Korokkaran	JABEL ALI	2 - 8 VAN	06/11/2025	29/11/2025
-D038	Ismail Korokkaran	JABEL ALI	CONSUMER	09/01/2024	31/03/2026
-D038	Ismail Korokkaran	JABEL ALI	PHARMA	23/02/2024	02/04/2026
-D038	Ismail Korokkaran	JUMAIRAH	2 - 8 VAN	13/11/2025	13/11/2025
-D038	Ismail Korokkaran	JUMAIRAH	CONSUMER	04/09/2025	09/02/2026
-D038	Ismail Korokkaran	JUMAIRAH	PHARMA	15/04/2026	15/04/2026
-D038	Ismail Korokkaran	MIRDIF	2 - 8 VAN	12/11/2025	14/11/2025
-D038	Ismail Korokkaran	MIRDIF	CONSUMER	05/01/2024	08/04/2026
-D038	Ismail Korokkaran	MIRDIF	PHARMA	21/02/2024	25/12/2025
-D038	Ismail Korokkaran	QUSAIS	2 - 8 VAN	17/11/2025	27/11/2025
-D038	Ismail Korokkaran	QUSAIS	CONSUMER	22/01/2024	20/01/2026
-D038	Ismail Korokkaran	QUSAIS	PHARMA	12/12/2025	26/12/2025
-D038	Ismail Korokkaran	RAK / UAQ	CONSUMER	26/01/2024	02/10/2025
-D038	Ismail Korokkaran	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	24/11/2025	27/11/2025
-D038	Ismail Korokkaran	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	11/01/2024	10/03/2026
-D038	Ismail Korokkaran	SHARJAH SANAYA	2 - 8 VAN	07/11/2025	25/11/2025
-D038	Ismail Korokkaran	SHARJAH SANAYA	CONSUMER	24/01/2024	10/04/2026
-D038	Ismail Korokkaran	SHARJAH SANAYA	PHARMA	29/04/2024	11/12/2025
-D026	Jahaberudheen	BUR DUBAI	PHARMA	09/05/2024	03/04/2026
-D026	Jahaberudheen	FUJAIRAH	PHARMA	29/05/2025	29/05/2025
-D026	Jahaberudheen	JUMAIRAH	PHARMA	04/03/2026	04/03/2026
-D026	Jahaberudheen	MIRDIF	PHARMA	06/04/2024	15/01/2026
-D026	Jahaberudheen	QUSAIS	PHARMA	08/05/2025	30/03/2026
-D026	Jahaberudheen	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	22/03/2024	22/03/2024
-D026	Jahaberudheen	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	20/11/2025	20/11/2025
-D026	Jahaberudheen	SHARJAH SANAYA	PHARMA	07/05/2024	05/11/2025
-D026	Jahaberudheen	SHARJAH SANAYA		12/09/2024	13/01/2026
-D103	Jamseer PV Ibrahim	ABU DHABI	CONSUMER	07/02/2026	07/02/2026
-D103	Jamseer PV Ibrahim	AJMAN	CONSUMER	05/11/2024	01/07/2025
-D103	Jamseer PV Ibrahim	AJMAN	PHARMA	26/12/2024	30/12/2025
-D103	Jamseer PV Ibrahim	ALQOUZ-1	CONSUMER	07/02/2025	17/04/2026
-D103	Jamseer PV Ibrahim	ALQOUZ-1	PHARMA	26/02/2025	24/09/2025
-D103	Jamseer PV Ibrahim	ALQOUZ-2	CONSUMER	23/06/2025	23/03/2026
-D103	Jamseer PV Ibrahim	BUR DUBAI	CONSUMER	30/12/2024	05/03/2026
-D103	Jamseer PV Ibrahim	BUR DUBAI	PHARMA	14/02/2025	11/01/2026
-D103	Jamseer PV Ibrahim	DEIRA	CONSUMER	02/09/2024	08/07/2025
-D103	Jamseer PV Ibrahim	DEIRA	PHARMA	14/02/2025	22/08/2025
-D103	Jamseer PV Ibrahim	FUJAIRAH	CONSUMER	12/12/2024	20/02/2025
-D103	Jamseer PV Ibrahim	JABEL ALI	CONSUMER	19/11/2024	10/04/2026
-D103	Jamseer PV Ibrahim	JABEL ALI	PHARMA	09/04/2025	07/01/2026
-D103	Jamseer PV Ibrahim	JUMAIRAH	PHARMA	03/12/2025	03/12/2025
-D103	Jamseer PV Ibrahim	MIRDIF	CONSUMER	01/08/2024	01/04/2026
-D103	Jamseer PV Ibrahim	MIRDIF	PHARMA	14/08/2024	05/01/2026
-D103	Jamseer PV Ibrahim	QUSAIS	CONSUMER	13/09/2024	21/07/2025
-D103	Jamseer PV Ibrahim	QUSAIS	PHARMA	08/05/2025	27/05/2025
-D103	Jamseer PV Ibrahim	RAK / UAQ	CONSUMER	04/11/2024	25/09/2025
-D103	Jamseer PV Ibrahim	RAK / UAQ	PHARMA	24/12/2024	27/12/2024
-D103	Jamseer PV Ibrahim	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	03/09/2024	28/07/2025
-D103	Jamseer PV Ibrahim	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	07/05/2025	04/08/2025
-D103	Jamseer PV Ibrahim	SHARJAH SANAYA	CONSUMER	08/08/2024	19/01/2026
-D103	Jamseer PV Ibrahim	SHARJAH SANAYA	PHARMA	30/07/2024	05/08/2025
-D089	Jisam K Saleem	AJMAN	CONSUMER	04/01/2024	25/04/2025
-D089	Jisam K Saleem	AJMAN	PHARMA	05/02/2024	10/07/2025
-D089	Jisam K Saleem	ALQOUZ-1	2 - 8 VAN	24/02/2026	17/03/2026
-D089	Jisam K Saleem	ALQOUZ-1	CONSUMER	17/01/2024	06/01/2025
-D089	Jisam K Saleem	ALQOUZ-1	PHARMA	20/02/2024	05/11/2025
-D089	Jisam K Saleem	BUR DUBAI	2 - 8 VAN	12/01/2026	02/03/2026
-D089	Jisam K Saleem	BUR DUBAI	CONSUMER	09/02/2024	29/10/2024
-D089	Jisam K Saleem	BUR DUBAI	PHARMA	16/02/2024	05/01/2026
-D089	Jisam K Saleem	BUR DUBAI		25/12/2024	25/12/2024
-D089	Jisam K Saleem	DEIRA	CONSUMER	23/01/2024	13/04/2026
-D089	Jisam K Saleem	DEIRA	PHARMA	02/04/2024	10/04/2026
-D089	Jisam K Saleem	FUJAIRAH	CONSUMER	05/01/2024	13/08/2024
-D089	Jisam K Saleem	JABEL ALI	2 - 8 VAN	07/01/2026	26/03/2026
-D089	Jisam K Saleem	JABEL ALI	CONSUMER	03/01/2024	13/12/2024
-D089	Jisam K Saleem	JABEL ALI	PHARMA	10/02/2024	23/09/2025
-D089	Jisam K Saleem	JUMAIRAH	CONSUMER	02/02/2024	14/02/2024
-D089	Jisam K Saleem	JUMAIRAH	PHARMA	22/01/2025	09/01/2026
-D089	Jisam K Saleem	MIRDIF	2 - 8 VAN	06/01/2026	18/03/2026
-D089	Jisam K Saleem	MIRDIF	CONSUMER	13/02/2024	25/10/2024
-D089	Jisam K Saleem	MIRDIF	PHARMA	27/02/2024	01/04/2026
-D089	Jisam K Saleem	PICK-UP	CONSUMER	14/11/2024	14/11/2024
-D089	Jisam K Saleem	QUSAIS	2 - 8 VAN	12/01/2026	12/01/2026
-D089	Jisam K Saleem	QUSAIS	CONSUMER	16/01/2024	12/12/2024
-D089	Jisam K Saleem	QUSAIS	PHARMA	28/02/2024	08/04/2026
-D089	Jisam K Saleem	RAK / UAQ	CONSUMER	28/03/2024	17/04/2026
-D089	Jisam K Saleem	RAK / UAQ	PHARMA	19/12/2024	23/12/2025
-D089	Jisam K Saleem	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	05/01/2024	10/07/2024
-D089	Jisam K Saleem	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	16/05/2024	20/02/2026
-D089	Jisam K Saleem	SHARJAH SANAYA	2 - 8 VAN	09/01/2026	09/01/2026
-D089	Jisam K Saleem	SHARJAH SANAYA	CONSUMER	09/01/2024	20/05/2025
-D089	Jisam K Saleem	SHARJAH SANAYA	PHARMA	20/06/2024	11/12/2025
-D089	Jisam K Saleem	SHARJAH SANAYA		07/02/2026	07/02/2026
-MED1	Kathleen Grace	SHARJAH SANAYA		10/01/2024	21/01/2026
-AD069	MOH KUNHI	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	09/02/2026	09/02/2026
-AD022	MOHAMMED GHANI	ABU DHABI		10/03/2026	10/03/2026
-AD022	MOHAMMED GHANI	DUBAI (GENERAL)		16/02/2026	18/03/2026
-AD022	MOHAMMED GHANI	SHARJAH SANAYA		18/02/2026	18/02/2026
-AD063	MOHAMMED SHEREEF	ABU DHABI		25/02/2026	25/02/2026
-AD046	MUSTHAFA . KA	SHARJAH SANAYA		13/02/2026	13/02/2026
-D104	Mahammed Ansar	ABU DHABI		23/10/2024	23/10/2024
-D104	Mahammed Ansar	AJMAN	2 - 8 VAN	29/05/2025	29/05/2025
-D104	Mahammed Ansar	AJMAN	CONSUMER	06/01/2025	17/01/2025
-D104	Mahammed Ansar	AJMAN	PHARMA	10/09/2024	09/04/2026
-D104	Mahammed Ansar	AJMAN		30/07/2025	09/12/2025
-D104	Mahammed Ansar	ALQOUZ-1	CONSUMER	13/01/2025	13/01/2025
-D104	Mahammed Ansar	ALQOUZ-1	PHARMA	01/10/2024	30/03/2026
-D104	Mahammed Ansar	ALQOUZ-1		05/09/2024	10/12/2024
-D104	Mahammed Ansar	BUR DUBAI	2 - 8 VAN	11/07/2025	11/07/2025
-D104	Mahammed Ansar	BUR DUBAI	CONSUMER	30/09/2024	23/01/2025
-D104	Mahammed Ansar	BUR DUBAI	PHARMA	10/09/2024	17/04/2026
-D104	Mahammed Ansar	BUR DUBAI		28/10/2025	08/12/2025
-D104	Mahammed Ansar	DEIRA	PHARMA	04/11/2024	07/04/2026
-D104	Mahammed Ansar	DUBAI (GENERAL)	PHARMA	23/02/2026	10/04/2026
-D104	Mahammed Ansar	FUJAIRAH	PHARMA	11/10/2024	28/01/2025
-D104	Mahammed Ansar	JABEL ALI	2 - 8 VAN	03/02/2025	20/02/2026
-D104	Mahammed Ansar	JABEL ALI	CONSUMER	14/01/2025	22/01/2025
-D104	Mahammed Ansar	JABEL ALI	PHARMA	15/10/2024	19/02/2025
-D104	Mahammed Ansar	JABEL ALI		31/12/2024	29/11/2025
-D104	Mahammed Ansar	JUMAIRAH	PHARMA	07/11/2024	04/03/2026
-D104	Mahammed Ansar	MIRDIF	PHARMA	10/10/2024	02/04/2026
-D104	Mahammed Ansar	PICK-UP	CONSUMER	06/09/2024	02/06/2025
-D104	Mahammed Ansar	PICK-UP	PHARMA	09/12/2024	30/12/2025
-D104	Mahammed Ansar	QUSAIS	CONSUMER	10/01/2025	10/01/2025
-D104	Mahammed Ansar	QUSAIS	PHARMA	05/02/2025	06/04/2026
-D104	Mahammed Ansar	QUSAIS		09/11/2024	29/07/2025
-D104	Mahammed Ansar	RAK / UAQ	PHARMA	12/03/2026	12/03/2026
-D104	Mahammed Ansar	RAK / UAQ		25/09/2024	25/09/2024
-D104	Mahammed Ansar	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	11/07/2025	11/07/2025
-D104	Mahammed Ansar	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	24/01/2025	24/01/2025
-D104	Mahammed Ansar	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	26/09/2024	16/03/2026
-D104	Mahammed Ansar	SHARJAH SANAYA	CONSUMER	07/01/2025	09/04/2026
-D104	Mahammed Ansar	SHARJAH SANAYA	PHARMA	14/10/2024	14/07/2025
-D104	Mahammed Ansar	SHARJAH SANAYA		18/11/2025	18/11/2025
-D070	Mohamed Ghani	BUR DUBAI		28/05/2024	28/05/2024
-D070	Mohamed Ghani	JABEL ALI		23/01/2024	28/03/2026
-D051	Mohammed Ibrahim	AJMAN	CONSUMER	05/06/2024	13/04/2026
-D051	Mohammed Ibrahim	AJMAN	PHARMA	05/08/2024	06/01/2026
-D051	Mohammed Ibrahim	AJMAN		28/03/2024	28/03/2024
-D051	Mohammed Ibrahim	ALQOUZ-1	CONSUMER	05/02/2024	13/04/2026
-D051	Mohammed Ibrahim	ALQOUZ-1	PHARMA	03/01/2024	10/02/2026
-D051	Mohammed Ibrahim	ALQOUZ-2	PHARMA	01/04/2024	02/03/2026
-D051	Mohammed Ibrahim	BUR DUBAI	CONSUMER	20/05/2024	03/10/2024
-D051	Mohammed Ibrahim	BUR DUBAI	PHARMA	20/02/2024	10/04/2026
-D051	Mohammed Ibrahim	DEIRA	CONSUMER	25/05/2024	21/10/2024
-D051	Mohammed Ibrahim	DEIRA	PHARMA	29/08/2024	10/10/2025
-D051	Mohammed Ibrahim	FUJAIRAH	2 - 8 VAN	23/07/2025	23/07/2025
-D051	Mohammed Ibrahim	FUJAIRAH	CONSUMER	08/10/2024	07/01/2026
-D051	Mohammed Ibrahim	FUJAIRAH	PHARMA	11/02/2025	11/02/2025
-D051	Mohammed Ibrahim	JABEL ALI	2 - 8 VAN	21/05/2025	21/05/2025
-D051	Mohammed Ibrahim	JABEL ALI	CONSUMER	26/08/2024	17/04/2026
-D051	Mohammed Ibrahim	JABEL ALI	PHARMA	26/02/2024	03/03/2026
-D051	Mohammed Ibrahim	JUMAIRAH	PHARMA	06/03/2024	14/02/2026
-D051	Mohammed Ibrahim	JUMAIRAH		27/03/2024	30/03/2024
-D051	Mohammed Ibrahim	MIRDIF	2 - 8 VAN	14/07/2025	14/07/2025
-D051	Mohammed Ibrahim	MIRDIF	CONSUMER	30/05/2024	18/03/2025
-D051	Mohammed Ibrahim	MIRDIF	PHARMA	16/01/2024	16/03/2026
-D051	Mohammed Ibrahim	QUSAIS	CONSUMER	02/08/2024	20/09/2024
-D051	Mohammed Ibrahim	QUSAIS	PHARMA	29/04/2024	30/03/2026
-D051	Mohammed Ibrahim	RAK / UAQ	CONSUMER	24/12/2024	27/12/2024
-D051	Mohammed Ibrahim	RAK / UAQ	PHARMA	14/11/2024	26/12/2025
-D051	Mohammed Ibrahim	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	28/06/2024	31/10/2024
-D051	Mohammed Ibrahim	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	13/02/2024	24/12/2025
-D051	Mohammed Ibrahim	SHARJAH SANAYA	CONSUMER	04/07/2024	02/06/2025
-D051	Mohammed Ibrahim	SHARJAH SANAYA	PHARMA	29/02/2024	31/10/2025
-D102	Mohammed Nasiruddeen	AJMAN	PHARMA	20/06/2024	31/07/2025
-D102	Mohammed Nasiruddeen	ALQOUZ-1	2 - 8 VAN	14/02/2026	14/02/2026
-D102	Mohammed Nasiruddeen	ALQOUZ-1	CONSUMER	02/08/2024	02/08/2024
-D102	Mohammed Nasiruddeen	ALQOUZ-1	PHARMA	14/06/2024	03/12/2025
-D102	Mohammed Nasiruddeen	ALQOUZ-2	PHARMA	05/11/2024	29/12/2025
-D102	Mohammed Nasiruddeen	BUR DUBAI	2 - 8 VAN	12/02/2026	13/02/2026
-D102	Mohammed Nasiruddeen	BUR DUBAI	PHARMA	25/06/2024	13/04/2026
-D102	Mohammed Nasiruddeen	DEIRA	PHARMA	30/07/2024	14/07/2025
-D102	Mohammed Nasiruddeen	FUJAIRAH	PHARMA	04/02/2026	04/02/2026
-D102	Mohammed Nasiruddeen	JABEL ALI	2 - 8 VAN	11/02/2026	16/02/2026
-D102	Mohammed Nasiruddeen	JABEL ALI	PHARMA	12/06/2024	18/07/2025
-D102	Mohammed Nasiruddeen	JABEL ALI		29/11/2025	29/11/2025
-D102	Mohammed Nasiruddeen	JUMAIRAH	CONSUMER	02/08/2024	03/10/2024
-D102	Mohammed Nasiruddeen	JUMAIRAH	PHARMA	28/06/2024	16/04/2026
-D102	Mohammed Nasiruddeen	MIRDIF	2 - 8 VAN	13/02/2026	13/02/2026
-D102	Mohammed Nasiruddeen	MIRDIF	CONSUMER	12/09/2025	12/09/2025
-D102	Mohammed Nasiruddeen	MIRDIF	PHARMA	16/07/2024	07/03/2026
-D102	Mohammed Nasiruddeen	QUSAIS	2 - 8 VAN	17/02/2026	18/02/2026
-D102	Mohammed Nasiruddeen	QUSAIS	PHARMA	19/06/2024	23/12/2025
-D102	Mohammed Nasiruddeen	RAK / UAQ	PHARMA	25/07/2024	12/06/2025
-D102	Mohammed Nasiruddeen	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	25/09/2025	25/09/2025
-D102	Mohammed Nasiruddeen	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	19/06/2024	30/12/2025
-D102	Mohammed Nasiruddeen	SHARJAH SANAYA	2 - 8 VAN	15/07/2025	15/07/2025
-D102	Mohammed Nasiruddeen	SHARJAH SANAYA	CONSUMER	02/07/2025	03/10/2025
-D102	Mohammed Nasiruddeen	SHARJAH SANAYA	PHARMA	19/06/2024	29/08/2025
-D106	Mohammed Shereef K V	JABEL ALI		14/03/2026	14/03/2026
-D048	Moideen Azeez	AJMAN	PHARMA	18/03/2024	28/10/2025
-D048	Moideen Azeez	AJMAN		02/08/2024	07/10/2024
-D048	Moideen Azeez	ALQOUZ-1	PHARMA	12/01/2024	10/04/2026
-D048	Moideen Azeez	ALQOUZ-2	PHARMA	03/01/2024	28/02/2026
-D048	Moideen Azeez	BUR DUBAI	CONSUMER	05/02/2025	05/02/2025
-D048	Moideen Azeez	BUR DUBAI	PHARMA	07/06/2024	17/04/2026
-D048	Moideen Azeez	DEIRA	PHARMA	01/05/2024	27/10/2025
-D048	Moideen Azeez	FUJAIRAH	PHARMA	10/02/2025	05/05/2025
-D048	Moideen Azeez	JABEL ALI	CONSUMER	04/11/2024	07/02/2025
-D048	Moideen Azeez	JABEL ALI	PHARMA	18/11/2024	01/04/2026
-D048	Moideen Azeez	JUMAIRAH	PHARMA	13/01/2024	17/04/2026
-D048	Moideen Azeez	MIRDIF	PHARMA	18/07/2025	18/12/2025
-D048	Moideen Azeez	QUSAIS	2 - 8 VAN	16/04/2025	30/10/2025
-D048	Moideen Azeez	RAK / UAQ	2 - 8 VAN	30/10/2025	30/10/2025
-D048	Moideen Azeez	RAK / UAQ	PHARMA	03/06/2024	08/02/2026
-D048	Moideen Azeez	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	11/11/2024	11/11/2024
-D048	Moideen Azeez	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	27/04/2024	21/11/2025
-D048	Moideen Azeez	SHARJAH SANAYA	CONSUMER	14/11/2024	14/11/2024
-D048	Moideen Azeez	SHARJAH SANAYA	PHARMA	01/05/2024	14/11/2025
-D048	Moideen Azeez	SHARJAH SANAYA		02/09/2024	02/09/2024
-D098	Muhammed Aslam K	AJMAN	PHARMA	07/01/2026	10/04/2026
-D098	Muhammed Aslam K	ALQOUZ-1	CONSUMER	26/11/2024	24/04/2025
-D098	Muhammed Aslam K	ALQOUZ-1	PHARMA	15/08/2024	03/03/2026
-D098	Muhammed Aslam K	ALQOUZ-2	CONSUMER	03/06/2024	04/06/2024
-D098	Muhammed Aslam K	ALQOUZ-2	PHARMA	03/01/2025	31/05/2025
-D098	Muhammed Aslam K	BUR DUBAI	2 - 8 VAN	22/08/2025	01/09/2025
-D098	Muhammed Aslam K	BUR DUBAI	CONSUMER	01/07/2024	13/12/2024
-D098	Muhammed Aslam K	BUR DUBAI	PHARMA	22/08/2024	07/02/2025
-D098	Muhammed Aslam K	BUR DUBAI		16/08/2024	16/08/2024
-D098	Muhammed Aslam K	DEIRA	CONSUMER	21/11/2024	21/11/2024
-D098	Muhammed Aslam K	FUJAIRAH	PHARMA	15/08/2024	30/12/2025
-D098	Muhammed Aslam K	JABEL ALI	2 - 8 VAN	05/08/2025	29/08/2025
-D098	Muhammed Aslam K	JABEL ALI	CONSUMER	22/11/2024	05/12/2024
-D098	Muhammed Aslam K	JABEL ALI	PHARMA	20/11/2024	12/01/2026
-D098	Muhammed Aslam K	JUMAIRAH	CONSUMER	01/05/2024	31/07/2024
-D098	Muhammed Aslam K	JUMAIRAH	PHARMA	17/01/2025	05/04/2025
-D098	Muhammed Aslam K	MIRDIF	CONSUMER	28/11/2024	28/05/2025
-D098	Muhammed Aslam K	MIRDIF	PHARMA	05/05/2025	17/01/2026
-D098	Muhammed Aslam K	MIRDIF		19/11/2024	19/11/2024
-D098	Muhammed Aslam K	QUSAIS	CONSUMER	16/02/2024	30/04/2024
-D098	Muhammed Aslam K	QUSAIS	PHARMA	03/01/2024	06/01/2026
-D098	Muhammed Aslam K	RAK / UAQ	PHARMA	01/08/2024	10/10/2024
-D098	Muhammed Aslam K	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	26/12/2024	20/12/2025
-D098	Muhammed Aslam K	SHARJAH SANAYA	CONSUMER	27/11/2024	17/04/2026
-D098	Muhammed Aslam K	SHARJAH SANAYA	PHARMA	14/11/2024	06/02/2025
-D019	Muhammed Kunji	AJMAN	2 - 8 VAN	19/01/2026	03/04/2026
-D019	Muhammed Kunji	AJMAN	CONSUMER	25/12/2024	08/07/2025
-D019	Muhammed Kunji	AJMAN	PHARMA	26/03/2024	15/04/2024
-D019	Muhammed Kunji	ALQOUZ-1	2 - 8 VAN	21/01/2026	05/02/2026
-D019	Muhammed Kunji	ALQOUZ-1	CONSUMER	06/05/2025	01/08/2025
-D019	Muhammed Kunji	ALQOUZ-1	PHARMA	02/01/2024	05/01/2026
-D019	Muhammed Kunji	ALQOUZ-2	2 - 8 VAN	17/01/2026	17/01/2026
-D019	Muhammed Kunji	ALQOUZ-2	PHARMA	10/01/2024	15/01/2024
-D019	Muhammed Kunji	BUR DUBAI	2 - 8 VAN	07/01/2026	28/03/2026
-D019	Muhammed Kunji	BUR DUBAI	CONSUMER	26/12/2024	01/07/2025
-D019	Muhammed Kunji	BUR DUBAI	PHARMA	03/05/2024	18/11/2025
-D019	Muhammed Kunji	DEIRA	2 - 8 VAN	25/03/2026	25/03/2026
-D019	Muhammed Kunji	DEIRA	CONSUMER	04/03/2025	04/03/2025
-D019	Muhammed Kunji	DEIRA	PHARMA	29/01/2024	19/02/2025
-D019	Muhammed Kunji	FUJAIRAH	2 - 8 VAN	15/01/2026	30/03/2026
-D019	Muhammed Kunji	FUJAIRAH	CONSUMER	31/12/2024	31/12/2024
-D019	Muhammed Kunji	FUJAIRAH	PHARMA	06/05/2024	10/10/2025
-D019	Muhammed Kunji	FUJAIRAH		26/02/2024	26/02/2024
-D019	Muhammed Kunji	JABEL ALI	2 - 8 VAN	09/01/2026	31/03/2026
-D019	Muhammed Kunji	JABEL ALI	CONSUMER	31/07/2025	31/07/2025
-D019	Muhammed Kunji	JABEL ALI	PHARMA	04/05/2024	29/12/2025
-D019	Muhammed Kunji	JABEL ALI		20/04/2024	31/12/2025
-D019	Muhammed Kunji	JUMAIRAH	CONSUMER	25/03/2025	25/03/2025
-D019	Muhammed Kunji	JUMAIRAH	PHARMA	28/03/2024	28/03/2025
-D019	Muhammed Kunji	MIRDIF	2 - 8 VAN	07/01/2026	16/02/2026
-D019	Muhammed Kunji	MIRDIF	PHARMA	01/05/2024	11/02/2025
-D019	Muhammed Kunji	QUSAIS	2 - 8 VAN	08/01/2026	09/04/2026
-D019	Muhammed Kunji	QUSAIS	PHARMA	12/06/2024	17/04/2026
-D019	Muhammed Kunji	RAK / UAQ	2 - 8 VAN	02/04/2026	09/04/2026
-D019	Muhammed Kunji	RAK / UAQ	PHARMA	07/05/2024	06/02/2025
-D019	Muhammed Kunji	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	06/01/2026	06/04/2026
-D019	Muhammed Kunji	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	14/04/2025	22/07/2025
-D019	Muhammed Kunji	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	28/02/2025	18/08/2025
-D019	Muhammed Kunji	SHARJAH SANAYA	2 - 8 VAN	06/01/2026	10/04/2026
-D019	Muhammed Kunji	SHARJAH SANAYA	CONSUMER	01/07/2024	01/07/2024
-D019	Muhammed Kunji	SHARJAH SANAYA	PHARMA	06/05/2024	24/02/2025
-D099	Muhammed Noushad P	AJMAN	PHARMA	20/12/2024	20/12/2024
-D099	Muhammed Noushad P	ALQOUZ-1		01/06/2024	11/12/2025
-D099	Muhammed Noushad P	BUR DUBAI	PHARMA	06/02/2024	13/02/2026
-D099	Muhammed Noushad P	BUR DUBAI		23/09/2024	23/09/2024
-D099	Muhammed Noushad P	DEIRA	PHARMA	05/09/2025	09/09/2025
-D099	Muhammed Noushad P	FUJAIRAH	PHARMA	03/07/2024	03/07/2024
-D099	Muhammed Noushad P	JABEL ALI	PHARMA	16/09/2024	15/04/2026
-D099	Muhammed Noushad P	JABEL ALI		03/04/2024	10/03/2026
-D099	Muhammed Noushad P	MIRDIF	PHARMA	20/01/2026	13/02/2026
-D099	Muhammed Noushad P	MIRDIF		09/10/2025	09/10/2025
-D099	Muhammed Noushad P	PICK-UP	2 - 8 VAN	03/01/2024	28/12/2024
-D099	Muhammed Noushad P	PICK-UP	CONSUMER	17/05/2025	24/01/2026
-D099	Muhammed Noushad P	PICK-UP	PHARMA	04/01/2024	17/04/2026
-D099	Muhammed Noushad P	QUSAIS	PHARMA	20/01/2026	31/03/2026
-D099	Muhammed Noushad P	QUSAIS		16/07/2024	19/12/2024
-D099	Muhammed Noushad P	SHARJAH ( BUHAIRA & ROLLA)		04/07/2024	09/10/2025
-D099	Muhammed Noushad P	SHARJAH SANAYA	CONSUMER	02/09/2025	02/09/2025
-D099	Muhammed Noushad P	SHARJAH SANAYA	PHARMA	08/05/2025	08/05/2025
-D099	Muhammed Noushad P	SHARJAH SANAYA		30/01/2024	30/01/2024
-D107	Muneeb Hussain	AJMAN	CONSUMER	11/08/2025	28/01/2026
-D107	Muneeb Hussain	AJMAN	PHARMA	12/09/2025	29/12/2025
-D107	Muneeb Hussain	ALQOUZ-1	CONSUMER	13/08/2025	06/04/2026
-D107	Muneeb Hussain	ALQOUZ-1	PHARMA	29/09/2025	07/11/2025
-D107	Muneeb Hussain	ALQOUZ-2	CONSUMER	31/07/2025	31/07/2025
-D107	Muneeb Hussain	ALQOUZ-2	PHARMA	20/10/2025	17/04/2026
-D107	Muneeb Hussain	BUR DUBAI	CONSUMER	25/07/2025	04/02/2026
-D107	Muneeb Hussain	BUR DUBAI	PHARMA	29/08/2025	26/12/2025
-D107	Muneeb Hussain	DEIRA	CONSUMER	14/08/2025	31/03/2026
-D107	Muneeb Hussain	DEIRA	PHARMA	21/10/2025	22/10/2025
-D107	Muneeb Hussain	JABEL ALI	CONSUMER	04/08/2025	16/03/2026
-D107	Muneeb Hussain	JABEL ALI	PHARMA	29/08/2025	07/11/2025
-D107	Muneeb Hussain	JUMAIRAH	CONSUMER	22/07/2025	17/01/2026
-D107	Muneeb Hussain	JUMAIRAH	PHARMA	01/09/2025	24/10/2025
-D107	Muneeb Hussain	MIRDIF	2 - 8 VAN	06/10/2025	06/10/2025
-D107	Muneeb Hussain	MIRDIF	CONSUMER	24/07/2025	10/04/2026
-D107	Muneeb Hussain	MIRDIF	PHARMA	09/10/2025	24/02/2026
-D107	Muneeb Hussain	PICK-UP	PHARMA	02/10/2025	02/10/2025
-D107	Muneeb Hussain	QUSAIS	CONSUMER	31/07/2025	06/04/2026
-D107	Muneeb Hussain	QUSAIS	PHARMA	06/10/2025	11/12/2025
-D107	Muneeb Hussain	RAK / UAQ	PHARMA	02/09/2025	03/10/2025
-D107	Muneeb Hussain	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	07/08/2025	05/03/2026
-D107	Muneeb Hussain	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	19/08/2025	30/12/2025
-D107	Muneeb Hussain	SHARJAH SANAYA	CONSUMER	28/07/2025	01/08/2025
-D107	Muneeb Hussain	SHARJAH SANAYA	PHARMA	05/08/2025	30/12/2025
-AD014	NISAAR AHMED	SHARJAH SANAYA		14/02/2026	16/04/2026
-D033	Naeem Fazal	AJMAN	2 - 8 VAN	05/03/2026	17/03/2026
-D033	Naeem Fazal	AJMAN	CONSUMER	19/11/2024	30/12/2025
-D033	Naeem Fazal	AJMAN	PHARMA	22/05/2024	13/03/2025
-D033	Naeem Fazal	AJMAN		20/05/2024	31/07/2024
-D033	Naeem Fazal	ALQOUZ-1	CONSUMER	25/11/2024	04/11/2025
-D033	Naeem Fazal	ALQOUZ-1	PHARMA	15/05/2024	19/02/2026
-D033	Naeem Fazal	ALQOUZ-2	CONSUMER	10/10/2025	10/10/2025
-D033	Naeem Fazal	BUR DUBAI	2 - 8 VAN	12/03/2026	12/03/2026
-D033	Naeem Fazal	BUR DUBAI	CONSUMER	07/11/2024	27/10/2025
-D033	Naeem Fazal	BUR DUBAI	PHARMA	04/01/2024	19/02/2026
-D033	Naeem Fazal	DEIRA	2 - 8 VAN	04/03/2026	16/03/2026
-D033	Naeem Fazal	DEIRA	CONSUMER	08/11/2024	23/12/2025
-D033	Naeem Fazal	DEIRA	PHARMA	01/08/2024	23/02/2026
-D033	Naeem Fazal	FUJAIRAH	CONSUMER	27/11/2024	29/12/2025
-D033	Naeem Fazal	FUJAIRAH	PHARMA	04/01/2024	22/01/2025
-D033	Naeem Fazal	JABEL ALI	2 - 8 VAN	13/03/2026	17/03/2026
-D033	Naeem Fazal	JABEL ALI	CONSUMER	04/11/2024	09/12/2025
-D033	Naeem Fazal	JABEL ALI	PHARMA	10/06/2024	03/03/2026
-D033	Naeem Fazal	JABEL ALI		03/11/2025	03/11/2025
-D033	Naeem Fazal	JUMAIRAH	CONSUMER	29/08/2025	29/08/2025
-D033	Naeem Fazal	JUMAIRAH	PHARMA	17/10/2024	24/01/2026
-D033	Naeem Fazal	MIRDIF	2 - 8 VAN	05/03/2026	10/03/2026
-D033	Naeem Fazal	MIRDIF	CONSUMER	29/11/2024	26/12/2025
-D033	Naeem Fazal	MIRDIF	PHARMA	03/01/2024	28/02/2026
-D033	Naeem Fazal	MIRDIF		01/07/2024	01/07/2024
-D033	Naeem Fazal	QUSAIS	2 - 8 VAN	16/03/2026	18/03/2026
-D033	Naeem Fazal	QUSAIS	CONSUMER	06/05/2025	11/12/2025
-D033	Naeem Fazal	QUSAIS	PHARMA	19/08/2024	24/02/2026
-D033	Naeem Fazal	RAK / UAQ	CONSUMER	27/11/2024	01/08/2025
-D033	Naeem Fazal	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	13/03/2026	13/03/2026
-D033	Naeem Fazal	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	12/11/2024	15/08/2025
-D033	Naeem Fazal	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	07/10/2024	17/02/2026
-D033	Naeem Fazal	SHARJAH SANAYA	2 - 8 VAN	04/03/2026	12/03/2026
-D033	Naeem Fazal	SHARJAH SANAYA	CONSUMER	07/11/2024	05/01/2026
-D033	Naeem Fazal	SHARJAH SANAYA	PHARMA	20/02/2024	02/03/2026
-D010	Nasar	AJMAN	2 - 8 VAN	19/05/2025	29/09/2025
-D010	Nasar	AJMAN	CONSUMER	08/02/2026	08/02/2026
-D010	Nasar	AJMAN	PHARMA	30/03/2024	21/05/2025
-D010	Nasar	ALQOUZ-1	2 - 8 VAN	27/05/2025	02/09/2025
-D010	Nasar	ALQOUZ-1	CONSUMER	20/01/2025	20/01/2025
-D010	Nasar	ALQOUZ-1	PHARMA	10/02/2024	16/04/2026
-D010	Nasar	ALQOUZ-2	2 - 8 VAN	04/06/2025	23/06/2025
-D010	Nasar	BUR DUBAI	2 - 8 VAN	08/05/2025	18/03/2026
-D010	Nasar	BUR DUBAI	PHARMA	06/11/2024	01/04/2026
-D010	Nasar	DEIRA	2 - 8 VAN	07/05/2025	16/09/2025
-D010	Nasar	DEIRA	PHARMA	02/08/2024	01/08/2025
-D010	Nasar	DEIRA		04/09/2024	04/09/2024
-D010	Nasar	FUJAIRAH	2 - 8 VAN	06/05/2025	25/09/2025
-D010	Nasar	FUJAIRAH	CONSUMER	22/02/2024	30/04/2024
-D010	Nasar	FUJAIRAH	PHARMA	03/01/2024	29/01/2025
-D010	Nasar	JABEL ALI	2 - 8 VAN	12/05/2025	02/10/2025
-D010	Nasar	JABEL ALI	PHARMA	14/11/2024	10/04/2026
-D010	Nasar	JABEL ALI		26/12/2024	26/12/2024
-D010	Nasar	JUMAIRAH	2 - 8 VAN	08/08/2025	03/10/2025
-D010	Nasar	JUMAIRAH	PHARMA	12/09/2024	30/12/2025
-D010	Nasar	MIRDIF	2 - 8 VAN	20/05/2025	17/09/2025
-D010	Nasar	MIRDIF	CONSUMER	29/05/2025	29/05/2025
-D010	Nasar	MIRDIF	PHARMA	30/09/2024	14/04/2026
-D010	Nasar	QUSAIS	2 - 8 VAN	07/05/2025	29/09/2025
-D010	Nasar	QUSAIS	PHARMA	01/05/2024	06/03/2025
-D010	Nasar	RAK / UAQ	2 - 8 VAN	11/08/2025	30/09/2025
-D010	Nasar	RAK / UAQ	PHARMA	07/07/2025	31/07/2025
-D010	Nasar	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	08/05/2025	25/09/2025
-D010	Nasar	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	25/03/2025	03/04/2025
-D010	Nasar	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	16/01/2024	24/03/2026
-D010	Nasar	SHARJAH SANAYA	2 - 8 VAN	30/05/2025	03/10/2025
-D010	Nasar	SHARJAH SANAYA	CONSUMER	07/03/2025	05/05/2025
-D010	Nasar	SHARJAH SANAYA	PHARMA	08/04/2024	07/03/2026
-D037	Nijavudeen	AJMAN	CONSUMER	01/05/2024	08/08/2025
-D037	Nijavudeen	AJMAN	PHARMA	02/09/2024	23/10/2025
-D037	Nijavudeen	ALQOUZ-1	PHARMA	27/01/2024	26/12/2025
-D037	Nijavudeen	ALQOUZ-2	PHARMA	02/05/2025	28/01/2026
-D037	Nijavudeen	BUR DUBAI	CONSUMER	25/07/2024	20/11/2024
-D037	Nijavudeen	BUR DUBAI	PHARMA	10/02/2024	02/03/2026
-D037	Nijavudeen	DEIRA	CONSUMER	24/07/2024	26/09/2025
-D037	Nijavudeen	DEIRA	PHARMA	10/07/2024	18/03/2026
-D037	Nijavudeen	FUJAIRAH	PHARMA	19/11/2024	04/11/2025
-D037	Nijavudeen	JABEL ALI	PHARMA	01/08/2024	30/04/2025
-D037	Nijavudeen	JUMAIRAH	CONSUMER	09/09/2025	09/09/2025
-D037	Nijavudeen	JUMAIRAH	PHARMA	31/12/2024	10/04/2025
-D037	Nijavudeen	MIRDIF	CONSUMER	20/02/2024	29/08/2025
-D037	Nijavudeen	MIRDIF	PHARMA	03/01/2024	26/12/2025
-D037	Nijavudeen	PICK-UP	CONSUMER	05/05/2025	05/05/2025
-D037	Nijavudeen	QUSAIS	CONSUMER	19/09/2025	19/09/2025
-D037	Nijavudeen	QUSAIS	PHARMA	05/08/2024	06/01/2026
-D037	Nijavudeen	RAK / UAQ	CONSUMER	13/05/2024	17/07/2024
-D037	Nijavudeen	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	12/07/2024	03/10/2025
-D037	Nijavudeen	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	25/01/2024	13/10/2025
-D037	Nijavudeen	SHARJAH SANAYA	2 - 8 VAN	22/08/2025	22/08/2025
-D037	Nijavudeen	SHARJAH SANAYA	CONSUMER	16/07/2024	03/10/2025
-D037	Nijavudeen	SHARJAH SANAYA	PHARMA	26/01/2024	03/11/2025
-D074	Nisar Ahamed Shah	JABEL ALI		16/02/2026	16/04/2026
-D052	Noushad Ali	AJMAN	PHARMA	19/08/2025	19/08/2025
-D052	Noushad Ali	BUR DUBAI		01/11/2024	01/11/2024
-D052	Noushad Ali	JABEL ALI	PHARMA	23/09/2025	10/02/2026
-D052	Noushad Ali	JABEL ALI		08/03/2024	12/08/2025
-D052	Noushad Ali	MIRDIF	PHARMA	05/02/2025	05/02/2025
-D052	Noushad Ali	PICK-UP	2 - 8 VAN	02/02/2024	17/04/2026
-D052	Noushad Ali	PICK-UP	CONSUMER	18/03/2024	14/03/2026
-D052	Noushad Ali	PICK-UP	PHARMA	26/02/2024	14/02/2026
-D052	Noushad Ali	QUSAIS	CONSUMER	15/12/2025	15/12/2025
-D052	Noushad Ali	QUSAIS		27/02/2024	27/02/2024
-D052	Noushad Ali	SHARJAH ( BUHAIRA & ROLLA)		10/06/2024	24/01/2025
-D052	Noushad Ali	SHARJAH SANAYA	PHARMA	18/08/2025	28/10/2025
-D052	Noushad Ali	SHARJAH SANAYA		02/01/2025	02/01/2025
-AD038	RAHAMATULLAH	ABU DHABI		19/02/2026	19/02/2026
-AD038	RAHAMATULLAH	JABEL ALI		14/02/2026	14/02/2026
-D085	Rahul R.P	AJMAN	2 - 8 VAN	16/12/2024	24/04/2025
-D085	Rahul R.P	AJMAN	CONSUMER	26/09/2025	26/09/2025
-D085	Rahul R.P	AJMAN	PHARMA	02/04/2024	02/10/2025
-D085	Rahul R.P	AJMAN		01/11/2024	01/10/2025
-D085	Rahul R.P	ALQOUZ-1	2 - 8 VAN	12/11/2024	24/02/2025
-D085	Rahul R.P	ALQOUZ-1	CONSUMER	17/03/2025	18/03/2025
-D085	Rahul R.P	ALQOUZ-1	PHARMA	03/01/2024	01/04/2026
-D085	Rahul R.P	ALQOUZ-1		04/04/2024	04/04/2024
-D085	Rahul R.P	ALQOUZ-2	2 - 8 VAN	24/06/2025	24/06/2025
-D085	Rahul R.P	ALQOUZ-2	PHARMA	06/05/2025	03/04/2026
-D085	Rahul R.P	BUR DUBAI	2 - 8 VAN	08/11/2024	25/04/2025
-D085	Rahul R.P	BUR DUBAI	CONSUMER	04/10/2024	25/09/2025
-D085	Rahul R.P	BUR DUBAI	PHARMA	02/01/2024	10/04/2026
-D085	Rahul R.P	BUR DUBAI		23/07/2024	23/07/2024
-D085	Rahul R.P	DEIRA	2 - 8 VAN	12/02/2025	28/04/2025
-D085	Rahul R.P	DEIRA	CONSUMER	13/03/2025	13/03/2025
-D085	Rahul R.P	DEIRA	PHARMA	10/05/2024	15/01/2026
-D085	Rahul R.P	DEIRA		22/07/2024	22/07/2024
-D085	Rahul R.P	FUJAIRAH	2 - 8 VAN	11/11/2024	23/04/2025
-D085	Rahul R.P	FUJAIRAH	CONSUMER	05/10/2024	20/03/2025
-D085	Rahul R.P	FUJAIRAH	PHARMA	04/01/2024	17/04/2026
-D085	Rahul R.P	FUJAIRAH		17/07/2024	17/07/2024
-D085	Rahul R.P	JABEL ALI	2 - 8 VAN	08/11/2024	02/05/2025
-D085	Rahul R.P	JABEL ALI	CONSUMER	22/04/2024	26/09/2025
-D085	Rahul R.P	JABEL ALI	PHARMA	08/01/2024	24/02/2026
-D085	Rahul R.P	JABEL ALI		07/10/2024	04/03/2025
-D085	Rahul R.P	JUMAIRAH	2 - 8 VAN	15/04/2025	17/04/2025
-D085	Rahul R.P	JUMAIRAH	CONSUMER	14/03/2025	14/03/2025
-D085	Rahul R.P	JUMAIRAH	PHARMA	20/01/2024	10/04/2026
-D085	Rahul R.P	MIRDIF	2 - 8 VAN	11/11/2024	28/12/2024
-D085	Rahul R.P	MIRDIF	CONSUMER	12/03/2025	07/04/2025
-D085	Rahul R.P	MIRDIF	PHARMA	26/01/2024	31/03/2026
-D085	Rahul R.P	MIRDIF		31/07/2024	09/11/2024
-D085	Rahul R.P	PICK-UP	CONSUMER	24/01/2024	27/12/2025
-D085	Rahul R.P	PICK-UP	PHARMA	07/11/2024	18/01/2026
-D085	Rahul R.P	QUSAIS	2 - 8 VAN	25/11/2024	01/05/2025
-D085	Rahul R.P	QUSAIS	CONSUMER	11/10/2024	11/10/2024
-D085	Rahul R.P	QUSAIS	PHARMA	17/01/2024	20/01/2026
-D085	Rahul R.P	QUSAIS		01/10/2025	01/10/2025
-D085	Rahul R.P	RAK / UAQ	2 - 8 VAN	09/12/2024	05/05/2025
-D085	Rahul R.P	RAK / UAQ	PHARMA	24/02/2024	11/07/2024
-D085	Rahul R.P	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	13/01/2025	23/12/2025
-D085	Rahul R.P	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	08/10/2024	08/10/2024
-D085	Rahul R.P	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	04/01/2024	08/04/2026
-D085	Rahul R.P	SHARJAH SANAYA	2 - 8 VAN	30/12/2024	21/04/2025
-D085	Rahul R.P	SHARJAH SANAYA	CONSUMER	13/03/2025	13/03/2025
-D085	Rahul R.P	SHARJAH SANAYA	PHARMA	17/01/2024	31/03/2026
-D036	Rashid Baderzaman	AJMAN	CONSUMER	16/05/2024	25/06/2024
-D036	Rashid Baderzaman	AJMAN	PHARMA	26/08/2025	22/10/2025
-D036	Rashid Baderzaman	AJMAN		11/01/2024	26/07/2024
-D036	Rashid Baderzaman	ALQOUZ-1	PHARMA	28/11/2024	28/11/2024
-D036	Rashid Baderzaman	ALQOUZ-1		26/01/2024	30/04/2024
-D036	Rashid Baderzaman	BUR DUBAI	PHARMA	12/12/2024	21/01/2026
-D036	Rashid Baderzaman	BUR DUBAI		15/03/2024	29/10/2025
-D036	Rashid Baderzaman	DEIRA	CONSUMER	17/05/2024	04/03/2025
-D036	Rashid Baderzaman	DEIRA	PHARMA	04/09/2025	08/10/2025
-D036	Rashid Baderzaman	DEIRA		15/01/2024	15/07/2024
-D036	Rashid Baderzaman	FUJAIRAH	CONSUMER	03/01/2024	05/06/2025
-D036	Rashid Baderzaman	FUJAIRAH		30/07/2024	30/07/2024
-D036	Rashid Baderzaman	JABEL ALI	CONSUMER	11/05/2024	15/07/2025
-D036	Rashid Baderzaman	JABEL ALI	PHARMA	10/01/2024	09/01/2026
-D036	Rashid Baderzaman	JABEL ALI		12/01/2024	07/08/2024
-D036	Rashid Baderzaman	JUMAIRAH		01/02/2024	01/09/2025
-D036	Rashid Baderzaman	MIRDIF	CONSUMER	31/05/2024	16/06/2025
-D036	Rashid Baderzaman	MIRDIF	PHARMA	13/03/2024	20/01/2026
-D036	Rashid Baderzaman	MIRDIF		30/01/2024	31/07/2024
-D036	Rashid Baderzaman	PICK-UP	CONSUMER	08/04/2024	17/04/2026
-D036	Rashid Baderzaman	QUSAIS	CONSUMER	05/07/2024	16/06/2025
-D036	Rashid Baderzaman	QUSAIS	PHARMA	10/01/2024	08/10/2025
-D036	Rashid Baderzaman	QUSAIS		10/01/2024	05/07/2024
-D036	Rashid Baderzaman	RAK / UAQ	CONSUMER	16/07/2025	16/07/2025
-D036	Rashid Baderzaman	RAK / UAQ		21/02/2024	10/06/2024
-D036	Rashid Baderzaman	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	22/05/2024	22/05/2024
-D036	Rashid Baderzaman	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	09/12/2024	10/10/2025
-D036	Rashid Baderzaman	SHARJAH ( BUHAIRA & ROLLA)		12/02/2024	08/06/2024
-D036	Rashid Baderzaman	SHARJAH SANAYA	CONSUMER	15/05/2024	16/06/2025
-D036	Rashid Baderzaman	SHARJAH SANAYA	PHARMA	12/03/2024	10/10/2025
-D036	Rashid Baderzaman	SHARJAH SANAYA		04/01/2024	02/09/2025
-AD065	SABIR SHAH	QUSAIS	PHARMA	04/03/2026	04/03/2026
-AD057	SHEKKEER PH	ABU DHABI		17/03/2026	18/03/2026
-D023	Sabir Shah	AJMAN	2 - 8 VAN	31/01/2025	18/03/2025
-D023	Sabir Shah	AJMAN	CONSUMER	09/05/2024	23/01/2025
-D023	Sabir Shah	AJMAN	PHARMA	30/04/2024	28/04/2025
-D023	Sabir Shah	ALQOUZ-1	PHARMA	09/01/2024	25/02/2026
-D023	Sabir Shah	ALQOUZ-1		28/10/2025	28/10/2025
-D023	Sabir Shah	BUR DUBAI	CONSUMER	27/02/2025	28/02/2025
-D023	Sabir Shah	BUR DUBAI	PHARMA	29/01/2024	26/03/2026
-D023	Sabir Shah	BUR DUBAI		20/03/2024	20/03/2024
-D023	Sabir Shah	DEIRA	PHARMA	26/04/2024	22/10/2025
-D023	Sabir Shah	FUJAIRAH	CONSUMER	14/06/2024	26/02/2025
-D023	Sabir Shah	FUJAIRAH	PHARMA	25/04/2024	07/04/2026
-D023	Sabir Shah	JABEL ALI	PHARMA	16/05/2024	26/02/2026
-D023	Sabir Shah	JABEL ALI		13/03/2024	24/11/2025
-D023	Sabir Shah	JUMAIRAH	PHARMA	09/09/2025	09/09/2025
-D023	Sabir Shah	JUMAIRAH		14/08/2024	02/09/2025
-D023	Sabir Shah	MIRDIF	PHARMA	15/02/2024	03/04/2026
-D023	Sabir Shah	PICK-UP	CONSUMER	10/05/2024	08/11/2024
-D023	Sabir Shah	QUSAIS	2 - 8 VAN	23/03/2026	23/03/2026
-D023	Sabir Shah	QUSAIS	CONSUMER	06/12/2024	06/12/2024
-D023	Sabir Shah	QUSAIS	PHARMA	15/08/2024	17/04/2026
-D023	Sabir Shah	RAK / UAQ	CONSUMER	08/05/2024	08/05/2024
-D023	Sabir Shah	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	14/02/2024	09/01/2026
-D023	Sabir Shah	SHARJAH SANAYA	PHARMA	16/01/2024	26/02/2026
-D023	Sabir Shah	SHARJAH SANAYA		10/09/2024	07/05/2025
-D024	Sadiq Shah	ABU DHABI		10/09/2024	10/09/2024
-D024	Sadiq Shah	AJMAN	CONSUMER	05/06/2024	06/06/2024
-D024	Sadiq Shah	AJMAN	PHARMA	12/09/2024	28/02/2025
-D024	Sadiq Shah	ALQOUZ-1	PHARMA	05/09/2024	12/12/2025
-D024	Sadiq Shah	ALQOUZ-1		30/05/2024	08/08/2024
-D024	Sadiq Shah	ALQOUZ-2	PHARMA	24/03/2026	24/03/2026
-D024	Sadiq Shah	ALQOUZ-2		26/11/2024	26/11/2024
-D024	Sadiq Shah	BUR DUBAI	CONSUMER	27/06/2024	16/09/2025
-D024	Sadiq Shah	BUR DUBAI	PHARMA	06/04/2024	26/03/2026
-D024	Sadiq Shah	BUR DUBAI		31/05/2024	25/09/2024
-D024	Sadiq Shah	DEIRA	PHARMA	12/02/2026	23/02/2026
-D024	Sadiq Shah	FUJAIRAH	CONSUMER	21/03/2025	11/12/2025
-D024	Sadiq Shah	FUJAIRAH	PHARMA	20/09/2024	16/04/2026
-D024	Sadiq Shah	FUJAIRAH		19/09/2024	10/03/2025
-D024	Sadiq Shah	JABEL ALI	PHARMA	19/06/2024	30/03/2026
-D024	Sadiq Shah	JABEL ALI		08/01/2024	10/04/2026
-D024	Sadiq Shah	JUMAIRAH	PHARMA	17/12/2025	14/04/2026
-D024	Sadiq Shah	MIRDIF	PHARMA	14/06/2024	24/02/2026
-D024	Sadiq Shah	PICK-UP	CONSUMER	03/01/2024	11/04/2025
-D024	Sadiq Shah	PICK-UP	PHARMA	05/04/2024	15/01/2026
-D024	Sadiq Shah	QUSAIS	2 - 8 VAN	18/03/2025	20/03/2025
-D024	Sadiq Shah	QUSAIS	CONSUMER	26/03/2025	07/05/2025
-D024	Sadiq Shah	QUSAIS	PHARMA	16/05/2024	20/02/2026
-D024	Sadiq Shah	QUSAIS		27/05/2024	17/12/2025
-D024	Sadiq Shah	RAK / UAQ	CONSUMER	04/06/2024	25/02/2025
-D024	Sadiq Shah	RAK / UAQ	PHARMA	15/10/2025	15/10/2025
-D024	Sadiq Shah	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	28/05/2024	28/05/2024
-D024	Sadiq Shah	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	17/05/2024	23/10/2025
-D024	Sadiq Shah	SHARJAH ( BUHAIRA & ROLLA)		12/02/2024	23/10/2025
-D024	Sadiq Shah	SHARJAH SANAYA	2 - 8 VAN	19/03/2025	22/07/2025
-D024	Sadiq Shah	SHARJAH SANAYA	CONSUMER	04/06/2024	31/03/2026
-D024	Sadiq Shah	SHARJAH SANAYA	PHARMA	02/07/2024	30/03/2026
-D088	Saheer Ali V Z	AJMAN	2 - 8 VAN	02/04/2026	02/04/2026
-D088	Saheer Ali V Z	AJMAN	CONSUMER	05/03/2025	17/04/2026
-D088	Saheer Ali V Z	AJMAN	PHARMA	22/04/2024	22/09/2025
-D088	Saheer Ali V Z	ALQOUZ-1	CONSUMER	20/12/2025	23/12/2025
-D088	Saheer Ali V Z	ALQOUZ-1	PHARMA	26/02/2024	16/09/2025
-D088	Saheer Ali V Z	ALQOUZ-1		14/06/2025	14/06/2025
-D088	Saheer Ali V Z	ALQOUZ-2	CONSUMER	07/02/2024	07/02/2024
-D088	Saheer Ali V Z	ALQOUZ-2	PHARMA	27/12/2024	03/06/2025
-D088	Saheer Ali V Z	BUR DUBAI	CONSUMER	14/02/2024	10/04/2025
-D088	Saheer Ali V Z	BUR DUBAI	PHARMA	16/02/2024	29/01/2026
-D088	Saheer Ali V Z	BUR DUBAI		11/03/2024	11/03/2024
-D088	Saheer Ali V Z	DEIRA	CONSUMER	26/03/2025	23/10/2025
-D088	Saheer Ali V Z	DEIRA	PHARMA	01/02/2024	26/03/2026
-D088	Saheer Ali V Z	FUJAIRAH	CONSUMER	14/08/2024	16/12/2025
-D088	Saheer Ali V Z	FUJAIRAH	PHARMA	04/11/2024	04/09/2025
-D088	Saheer Ali V Z	JABEL ALI	2 - 8 VAN	23/03/2026	10/04/2026
-D088	Saheer Ali V Z	JABEL ALI	CONSUMER	13/02/2024	15/04/2026
-D088	Saheer Ali V Z	JABEL ALI	PHARMA	15/02/2024	12/03/2026
-D088	Saheer Ali V Z	JABEL ALI		28/02/2024	30/03/2024
-D088	Saheer Ali V Z	JUMAIRAH	CONSUMER	06/02/2024	12/12/2025
-D088	Saheer Ali V Z	JUMAIRAH	PHARMA	15/04/2025	28/03/2026
-D088	Saheer Ali V Z	MIRDIF	CONSUMER	25/03/2025	13/04/2026
-D088	Saheer Ali V Z	MIRDIF	PHARMA	20/02/2024	21/01/2026
-D088	Saheer Ali V Z	MIRDIF		05/03/2024	07/03/2
+D040	Hussain Mohammed	SHARJAH SANAYA	Consumer	21/02/2024	02/04/2026
+D040	Hussain Mohammed	SHARJAH SANAYA	Pharma	24/02/2024	10/04/2026
+H116	Munawir P Kabeer	ALQOUZ-1	Consumer	06/05/2025	06/05/2025
+H116	Munawir P Kabeer	ALQOUZ-2	Pharma	15/09/2025	15/09/2025
+H116	Munawir P Kabeer	BUR DUBAI	Pharma	07/06/2024	26/03/2026
+H116	Munawir P Kabeer	BUR DUBAI		06/06/2024	06/06/2024
+H116	Munawir P Kabeer	DEIRA	Consumer	10/06/2024	31/07/2024
+H116	Munawir P Kabeer	DEIRA	Pharma	04/07/2024	06/02/2026
+H116	Munawir P Kabeer	FUJAIRAH	Pharma	06/02/2026	17/04/2026
+H116	Munawir P Kabeer	JABEL ALI	2 - 8 VAN	15/05/2025	15/05/2025
+H116	Munawir P Kabeer	JABEL ALI	Consumer	29/03/2025	29/03/2025
+H116	Munawir P Kabeer	JUMAIRAH	Pharma	06/03/2025	29/12/2025
+H116	Munawir P Kabeer	MIRDIF	2 - 8 VAN	27/09/2025	27/09/2025
+H116	Munawir P Kabeer	MIRDIF	Consumer	04/11/2024	14/02/2026
+H116	Munawir P Kabeer	MIRDIF	Pharma	12/08/2024	18/12/2025
+H116	Munawir P Kabeer	QUSAIS	Pharma	05/06/2024	17/12/2025
+H116	Munawir P Kabeer	RAK / UAQ	Pharma	03/03/2026	03/03/2026
+H116	Munawir P Kabeer	SHARJAH SANAYA	Consumer	08/06/2024	08/06/2024
+H116	Munawir P Kabeer	SHARJAH SANAYA	Pharma	17/07/2025	17/07/2025
+H007	Nazim Kuttukkan	ALQOUZ-1	Pharma	20/06/2024	21/06/2024
+H007	Nazim Kuttukkan	BUR DUBAI	Consumer	08/04/2024	08/04/2024
+H007	Nazim Kuttukkan	BUR DUBAI	Pharma	03/01/2024	02/07/2024
+H007	Nazim Kuttukkan	BUR DUBAI		17/02/2024	16/03/2024
+H007	Nazim Kuttukkan	DEIRA	Pharma	04/06/2024	04/06/2024
+H007	Nazim Kuttukkan	JUMAIRAH	Pharma	20/06/2024	20/06/2024
+H007	Nazim Kuttukkan	MIRDIF	Consumer	15/04/2024	09/05/2024
+H007	Nazim Kuttukkan	RAK / UAQ	Pharma	14/06/2024	14/06/2024
+H007	Nazim Kuttukkan	SHARJAH SANAYA	Consumer	19/06/2024	24/06/2024
+H007	Nazim Kuttukkan	SHARJAH SANAYA	Pharma	01/05/2024	27/06/2024
+H003	Nihas Sainuddin	ALQOUZ-1	Pharma	02/01/2024	27/02/2024
+H003	Nihas Sainuddin	BUR DUBAI	Pharma	12/01/2024	05/04/2024
+H003	Nihas Sainuddin	MIRDIF	Consumer	06/03/2024	23/04/2024
+H003	Nihas Sainuddin	MIRDIF	Pharma	03/01/2024	01/02/2024
+H003	Nihas Sainuddin	SHARJAH ( BUHAIRA & ROLLA)	Pharma	15/03/2024	25/03/2024
+H003	Nihas Sainuddin	SHARJAH SANAYA	Consumer	13/03/2024	14/03/2024
+H003	Nihas Sainuddin	SHARJAH SANAYA	Pharma	04/04/2024	04/04/2024
+H003	Nihas Sainuddin	SHARJAH SANAYA		05/01/2024	05/01/2024
+H115	Omar AlSaeed	AJMAN	2 - 8 VAN	29/05/2025	29/05/2025
+H115	Omar AlSaeed	AJMAN	Consumer	05/03/2025	05/03/2025
+H115	Omar AlSaeed	AJMAN	Pharma	06/03/2025	17/04/2026
+H115	Omar AlSaeed	ALQOUZ-1	Pharma	11/10/2024	03/03/2026
+H115	Omar AlSaeed	ALQOUZ-2	Pharma	12/03/2025	12/03/2025
+H115	Omar AlSaeed	ALQOUZ-2		01/07/2024	01/07/2024
+H115	Omar AlSaeed	BUR DUBAI	Pharma	14/05/2024	16/02/2026
+H115	Omar AlSaeed	DEIRA	Consumer	13/03/2025	14/08/2025
+H115	Omar AlSaeed	DEIRA	Pharma	25/03/2025	25/03/2025
+H115	Omar AlSaeed	FUJAIRAH	Pharma	28/01/2025	31/10/2025
+H115	Omar AlSaeed	JABEL ALI	2 - 8 VAN	23/10/2025	28/10/2025
+H115	Omar AlSaeed	JABEL ALI	Consumer	10/03/2025	18/02/2026
+H115	Omar AlSaeed	JABEL ALI	Pharma	24/01/2025	17/02/2026
+H115	Omar AlSaeed	JUMAIRAH	2 - 8 VAN	30/01/2025	07/02/2025
+H115	Omar AlSaeed	JUMAIRAH	Pharma	19/06/2024	28/02/2025
+H115	Omar AlSaeed	MIRDIF	Consumer	12/09/2025	12/09/2025
+H115	Omar AlSaeed	MIRDIF	Pharma	26/03/2025	07/02/2026
+H115	Omar AlSaeed	PICK-UP	Consumer	26/05/2025	06/10/2025
+H115	Omar AlSaeed	PICK-UP	Pharma	06/05/2025	07/10/2025
+H115	Omar AlSaeed	QUSAIS	2 - 8 VAN	26/02/2025	20/08/2025
+H115	Omar AlSaeed	QUSAIS	Consumer	13/06/2024	21/08/2025
+H115	Omar AlSaeed	QUSAIS	Pharma	27/11/2024	14/02/2026
+H115	Omar AlSaeed	RAK / UAQ	Pharma	30/05/2024	30/05/2024
+H115	Omar AlSaeed	SHARJAH ( BUHAIRA & ROLLA)	Consumer	03/04/2025	03/04/2025
+H115	Omar AlSaeed	SHARJAH ( BUHAIRA & ROLLA)	Pharma	21/05/2024	15/10/2025
+H115	Omar AlSaeed	SHARJAH ( BUHAIRA & ROLLA)		15/07/2024	15/07/2024
+H115	Omar AlSaeed	SHARJAH SANAYA	2 - 8 VAN	19/03/2025	19/03/2025
+H115	Omar AlSaeed	SHARJAH SANAYA	Consumer	04/06/2024	09/10/2025
+H115	Omar AlSaeed	SHARJAH SANAYA	Pharma	29/05/2024	29/12/2025
+H129	Pratik Bista	ALQOUZ-1	Pharma	21/10/2025	21/10/2025
+H129	Pratik Bista	ALQOUZ-2	Pharma	16/07/2025	16/07/2025
+H129	Pratik Bista	BUR DUBAI	Consumer	27/10/2025	29/12/2025
+H129	Pratik Bista	BUR DUBAI	Pharma	23/06/2025	17/04/2026
+H129	Pratik Bista	DEIRA	2 - 8 VAN	10/06/2025	10/06/2025
+H129	Pratik Bista	DEIRA	Pharma	07/08/2025	30/03/2026
+H129	Pratik Bista	FUJAIRAH	2 - 8 VAN	04/07/2025	04/07/2025
+H129	Pratik Bista	FUJAIRAH	Pharma	23/07/2025	23/07/2025
+H129	Pratik Bista	JABEL ALI	Consumer	03/12/2025	03/12/2025
+H129	Pratik Bista	JABEL ALI	Pharma	30/06/2025	14/08/2025
+H129	Pratik Bista	JUMAIRAH	2 - 8 VAN	12/09/2025	12/09/2025
+H129	Pratik Bista	JUMAIRAH	Consumer	15/09/2025	03/10/2025
+H129	Pratik Bista	JUMAIRAH	Pharma	29/09/2025	12/02/2026
+H129	Pratik Bista	MIRDIF	2 - 8 VAN	01/09/2025	01/09/2025
+H129	Pratik Bista	MIRDIF	Consumer	06/08/2025	28/02/2026
+H129	Pratik Bista	MIRDIF	Pharma	31/07/2025	01/04/2026
+H129	Pratik Bista	PICK-UP	Consumer	07/10/2025	08/10/2025
+H129	Pratik Bista	PICK-UP	Pharma	12/06/2025	19/06/2025
+H129	Pratik Bista	QUSAIS	Pharma	11/07/2025	10/04/2026
+H129	Pratik Bista	RAK / UAQ	Pharma	11/08/2025	11/09/2025
+H129	Pratik Bista	SHARJAH ( BUHAIRA & ROLLA)	Consumer	20/11/2025	20/11/2025
+H129	Pratik Bista	SHARJAH SANAYA	2 - 8 VAN	03/07/2025	08/08/2025
+H129	Pratik Bista	SHARJAH SANAYA	Pharma	10/10/2025	10/10/2025
+H127	Rafsal Rafeek	AJMAN	Pharma	08/05/2025	08/05/2025
+H127	Rafsal Rafeek	BUR DUBAI	Pharma	09/04/2026	09/04/2026
+H127	Rafsal Rafeek	JUMAIRAH	Pharma	14/05/2025	14/05/2025
+H127	Rafsal Rafeek	MIRDIF	Pharma	13/04/2026	13/04/2026
+H127	Rafsal Rafeek	QUSAIS	Pharma	06/05/2025	17/02/2026
+H127	Rafsal Rafeek	SHARJAH SANAYA	Pharma	21/08/2025	21/08/2025
+"""
