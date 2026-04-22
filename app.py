@@ -1,5 +1,3 @@
---- START OF FILE ai_studio_code - Copy.py ---
-
 import streamlit as st
 
 # --- ANTI-SLEEP PING HANDLER ---
@@ -1481,5 +1479,3 @@ elif choice == "4. Vacation Schedule":
                     if run_query("DELETE FROM vacations WHERE id=?", (vac_id,), table_name="vacations", action="DELETE_DOC", doc_id=vac_id):
                         st.success("Vacation Deleted!")
                         st.rerun()
-
---- END OF FILE ai_studio_code - Copy.py ---
