@@ -24,22 +24,34 @@ except ImportError:
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Logistics AI Planner", layout="wide")
 
-# --- TEXT UNIFICATION ENGINE ---
+# --- AGGRESSIVE TEXT UNIFICATION ENGINE ---
+# This ensures absolute 0 duplicates in spelling, spacing, or capitalization.
 def unify_text(val):
     if pd.isna(val) or val is None: return "None"
     val = str(val).strip()
-    # Aggressively catch ANY variation of 2-8 VAN
-    if re.search(r'2\s*-\s*8', val): val = '2-8 VAN'
-    if val.upper() == 'PHARMA': val = 'Pharma'
-    if val.upper() == 'CONSUMER': val = 'Consumer'
+    if re.search(r'2\s*-\s*8', val, flags=re.IGNORECASE): return '2-8 VAN'
+    if val.upper() == 'PHARMA': return 'Pharma'
+    if val.upper() == 'CONSUMER': return 'Consumer'
+    if val.upper() == 'BUS': return 'BUS'
+    if val.upper() == 'PICK-UP' or val.upper() == 'PICK UP': return 'PICK-UP'
+    if val.upper() == 'VAN': return 'VAN'
     return val
 
 def unify_dataframe(df):
     if df.empty: return df
-    for col in df.columns:
-        if df[col].dtype == object:
+    target_cols = ['sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type']
+    for col in target_cols:
+        if col in df.columns:
             df[col] = df[col].apply(unify_text)
     return df
+
+def parse_date_safe(d_str):
+    if pd.isna(d_str) or not str(d_str).strip() or str(d_str) == "None": return None
+    d_str = str(d_str).strip().split(" ")[0]
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try: return datetime.strptime(d_str, fmt).strftime("%Y-%m-%d")
+        except ValueError: pass
+    return d_str
 
 # --- FIREBASE INITIALIZATION & DB ADAPTER ---
 FIREBASE_READY = False
@@ -210,7 +222,6 @@ SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt /
 NEEDS_HELPER_OPTIONS = ["Yes", "No", "None"]
 ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Drivers Name", "AREA", "Sector", "Helper Code", "Helpers Name", "VEH NO", "Division Category"]
 
-# --- STRICT HARDCODED ALLOWLISTS ---
 KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
 KEEP_DRIVERS = ["D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", "D089", "D054", "D088", "D098", "D033"]
 
@@ -281,13 +292,27 @@ RAW_NAME_MAP = {
     "H017": "Mujammal", "H126": "Subin Kovammal"
 }
 
-def parse_date_safe(d_str):
-    if pd.isna(d_str) or not str(d_str).strip() or str(d_str) == "None": return None
-    d_str = str(d_str).strip().split(" ")[0]
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
-        try: return datetime.strptime(d_str, fmt).strftime("%Y-%m-%d")
-        except ValueError: pass
-    return d_str
+def parse_history_payload():
+    records = []
+    for line in RAW_HISTORY_DATA.strip().split('\n'):
+        if not line.strip() or 'DATE FROM' in line.upper() or 'EXPERIENCE SUMMARY' in line.upper(): continue
+        parts = line.split('\t')
+        if len(parts) >= 6:
+            code = parts[0].strip()
+            name = parts[1].strip()
+            area = parts[2].strip()
+            division = parts[3].strip() if parts[3].strip() else "Pharma"
+            d_from = parts[4].strip()
+            d_to = parts[5].strip()
+            
+            ptype = "Helper" if code.startswith('H') else "Driver"
+            d_from_parsed = parse_date_safe(d_from)
+            d_to_parsed = parse_date_safe(d_to)
+            
+            if d_from_parsed and d_to_parsed:
+                records.append((ptype, code, name, area, unify_text(division), d_from_parsed, d_to_parsed))
+    return records
+
 
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False):
@@ -322,6 +347,14 @@ if "db_initialized" not in st.session_state:
                 v_seed = [(v_num, unify_text(v_type), permitted, unify_text(division), "None", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
                 c.executemany("INSERT OR IGNORE INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed)
                 conn.commit()
+                    
+            history_df = load_table('history')
+            if history_df.empty:
+                parsed_records = parse_history_payload()
+                if parsed_records:
+                    c = conn.cursor()
+                    c.executemany("INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", parsed_records)
+                    conn.commit()
             
             st.cache_data.clear()
         except Exception as e:
@@ -330,17 +363,19 @@ if "db_initialized" not in st.session_state:
     execute_global_init()
     st.session_state.db_initialized = True
 
-
 # --- HIGH PERFORMANCE SCORING HELPERS (WITH CROSS TRAINING SECTOR CACHE) ---
 def build_experience_cache():
     history_df = load_table('history')
     exp_cache = {}
     if not history_df.empty:
         for _, r in history_df.iterrows():
-            code, area, sector = r['person_code'], r['area'], r.get('sector', 'Pharma')
-            if pd.isna(sector) or sector == "nan": sector = "Pharma"
-            end_date = safe_parse_date(r['end_date'] if pd.notna(r.get('end_date')) and r['end_date'] != "None" else r['date'])
+            code = r['person_code']
+            area = unify_text(r['area'])
+            sector = unify_text(r.get('sector', 'Pharma'))
+            end_date = parse_date_safe(r['end_date'] if pd.notna(r.get('end_date')) and r['end_date'] != "None" else r['date'])
             
+            if not end_date: continue
+
             if code not in exp_cache: exp_cache[code] = {'areas': {}, 'sectors': {}}
             if area not in exp_cache[code]['areas'] or end_date > exp_cache[code]['areas'][area]:
                 exp_cache[code]['areas'][area] = end_date
@@ -355,27 +390,20 @@ def build_vacation_cache():
         for _, r in vacs_df.iterrows():
             code = r['person_code']
             if code not in vac_cache: vac_cache[code] = []
-            vac_cache[code].append((safe_parse_date(r['start_date']), safe_parse_date(r['end_date'])))
+            vac_cache[code].append((parse_date_safe(r['start_date']), parse_date_safe(r['end_date'])))
     return vac_cache
 
 def is_on_vacation(person_code, target_date, vac_cache):
     for start, end in vac_cache.get(person_code, []):
-        if start <= target_date <= end: return True
+        if start <= target_date.strftime("%Y-%m-%d") <= end: return True
     return False
 
 def vacation_within_3_months(person_code, target_date, vac_cache):
-    limit_date = target_date + timedelta(days=90)
+    limit_date = (target_date + timedelta(days=90)).strftime("%Y-%m-%d")
+    target_str = target_date.strftime("%Y-%m-%d")
     for start, end in vac_cache.get(person_code, []):
-        if target_date < start <= limit_date: return start
+        if target_str < start <= limit_date: return parse_date_safe(start)
     return None
-
-def months_until_next_vacation(person_code, vac_cache, target_date):
-    past_vacs = [end for start, end in vac_cache.get(person_code, []) if end < target_date]
-    if not past_vacs: return 0 
-    last_vac = max(past_vacs)
-    days_since = (target_date - last_vac).days
-    return max(0, 365 - days_since) / 30.0
-
 
 # --- WEIGHTED AI SCORING ALGORITHM (WITH MULTI-ANCHOR) ---
 NEVER_WORKED_BONUS = 10000
@@ -390,6 +418,7 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
     code = candidate['code']
     score = 0
     reasons = []
+    target_str = target_date.strftime("%Y-%m-%d")
 
     if is_on_vacation(code, target_date, vac_cache):
         return None, "Excluded: On Vacation"
@@ -399,22 +428,22 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
         if p_veh not in [req_veh, "None"] and not (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
             return None, f"Excluded: Vehicle Mismatch ({p_veh} != {req_veh})"
 
-    anchors = [a.strip() for a in str(candidate.get('anchor_area', 'None')).split(',') if a.strip()]
+    anchors = [unify_text(a) for a in str(candidate.get('anchor_area', 'None')).split(',') if a.strip()]
     if "None" in anchors and len(anchors) == 1: anchors = []
 
     if anchors:
-        if any(unify_text(a) in [unify_text(area['name']), req_sector, req_veh] for a in anchors):
+        if any(a in [unify_text(area['name']), req_sector, req_veh] for a in anchors):
             score += ANCHOR_MATCH_BONUS
             reasons.append(f"Anchor Match (+{ANCHOR_MATCH_BONUS})")
         else:
             return None, f"Excluded: Anchored strictly to {', '.join(anchors)}"
 
-    last_worked_area = exp_cache.get(code, {}).get('areas', {}).get(area['name'])
+    last_worked_area = exp_cache.get(code, {}).get('areas', {}).get(unify_text(area['name']))
     if not last_worked_area:
         score += NEVER_WORKED_BONUS
         reasons.append(f"Never worked Area (+{NEVER_WORKED_BONUS})")
     else:
-        months_since = (target_date - last_worked_area).days / 30.0
+        months_since = (datetime.strptime(target_str, "%Y-%m-%d") - datetime.strptime(last_worked_area, "%Y-%m-%d")).days / 30.0
         if months_since < 3:
             score += RECENT_AREA_PENALTY
             reasons.append(f"Recent Area Visit <3m ({RECENT_AREA_PENALTY})")
@@ -428,7 +457,7 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
         score += NEVER_WORKED_SECTOR_BONUS
         reasons.append(f"Never worked {req_sector} Sector (+{NEVER_WORKED_SECTOR_BONUS})")
     else:
-        months_since_sec = (target_date - last_worked_sector).days / 30.0
+        months_since_sec = (datetime.strptime(target_str, "%Y-%m-%d") - datetime.strptime(last_worked_sector, "%Y-%m-%d")).days / 30.0
         time_score_sec = int(months_since_sec * SECTOR_MONTHS_WEIGHT)
         score += time_score_sec
         reasons.append(f"{months_since_sec:.1f}m since {req_sector} Sector (+{time_score_sec})")
@@ -581,8 +610,8 @@ if choice == "1. AI Route Planner":
         plan_end_val = safe_parse_date(d_end_str) if d_end_str and d_end_str != "None" else today + timedelta(days=90)
         
         c_d1, c_d2 = st.columns(2)
-        plan_start = c_d1.date_input("Plan Start Date", value=plan_start_val)
-        plan_end = c_d2.date_input("Plan End Date", value=plan_end_val)
+        plan_start = c_d1.date_input("Plan Start Date", value=datetime.strptime(plan_start_val, "%Y-%m-%d").date() if isinstance(plan_start_val, str) else plan_start_val)
+        plan_end = c_d2.date_input("Plan End Date", value=datetime.strptime(plan_end_val, "%Y-%m-%d").date() if isinstance(plan_end_val, str) else plan_end_val)
         
         disp_draft = draft_routes.copy()
         
@@ -612,12 +641,6 @@ if choice == "1. AI Route Planner":
         col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
         
         if col_save.button("💾 Save Draft Plan", type="secondary"):
-            if "route_editor" in st.session_state:
-                changes = st.session_state["route_editor"].get("edited_rows", {})
-                for row_idx, col_changes in changes.items():
-                    for col_name, new_val in col_changes.items():
-                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
-                        
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
@@ -633,12 +656,6 @@ if choice == "1. AI Route Planner":
             st.rerun()
 
         if col_app.button("✅ Confirm Plan & Save Experiences", type="primary"):
-            if "route_editor" in st.session_state:
-                changes = st.session_state["route_editor"].get("edited_rows", {})
-                for row_idx, col_changes in changes.items():
-                    for col_name, new_val in col_changes.items():
-                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
-                        
             run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
@@ -777,11 +794,11 @@ if choice == "1. AI Route Planner":
                             if vac_start:
                                 repl_d, best_r_score, _ = None, -999999, ""
                                 for _, rp in all_d[~all_d['code'].isin([a_d_code])].iterrows():
-                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, vac_start, exp_cache, vac_cache, role="Driver")
+                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, datetime.strptime(vac_start, "%Y-%m-%d").date(), exp_cache, vac_cache, role="Driver")
                                     if r_score is not None and r_score > best_r_score:
                                         best_r_score, repl_d = r_score, rp
                                 repl_name = repl_d['name'] if repl_d is not None else "CRITICAL SHORTAGE"
-                                predict_data.append((a_d_code, a_d_name, "Driver", vac_start.strftime("%Y-%m-%d"), "Scheduled Vacation", repl_name, vac_start.strftime("%Y-%m-%d")))
+                                predict_data.append((a_d_code, a_d_name, "Driver", vac_start, "Scheduled Vacation", repl_name, vac_start))
                     else:
                         a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
                         used_drivers.add(a_d_code)
@@ -807,11 +824,11 @@ if choice == "1. AI Route Planner":
                             if vac_start:
                                 repl_h, best_r_score, _ = None, -999999, ""
                                 for _, rp in all_h[~all_h['code'].isin([a_h_code])].iterrows():
-                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, vac_start, exp_cache, vac_cache, role="Helper")
+                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, datetime.strptime(vac_start, "%Y-%m-%d").date(), exp_cache, vac_cache, role="Helper")
                                     if r_score is not None and r_score > best_r_score:
                                         best_r_score, repl_h = r_score, rp
                                 repl_name = repl_h['name'] if repl_h is not None else "CRITICAL SHORTAGE"
-                                predict_data.append((a_h_code, a_h_name, "Helper", vac_start.strftime("%Y-%m-%d"), "Scheduled Vacation", repl_name, vac_start.strftime("%Y-%m-%d")))
+                                predict_data.append((a_h_code, a_h_name, "Helper", vac_start, "Scheduled Vacation", repl_name, vac_start))
                     else:
                         a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
@@ -933,14 +950,18 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_drivers"
         )
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
-            if "ed_drivers" in st.session_state:
-                changes = st.session_state["ed_drivers"].get("edited_rows", {})
-                for row_idx, col_changes in changes.items():
-                    row_id = disp_df.iloc[row_idx]['id']
-                    sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
-                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="drivers", action="UPDATE", doc_id=row_id, data=col_changes)
-            st.success("Drivers saved successfully!")
-            st.rerun()
+            changes_saved = 0
+            for idx in disp_df.index:
+                row_id = disp_df.loc[idx, 'id']
+                if not disp_df.loc[idx].equals(edited_d.loc[idx]):
+                    update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                    sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
+                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
+                    changes_saved += 1
+            if changes_saved > 0:
+                st.success(f"Saved {changes_saved} updates!")
+                st.rerun()
             
         st.divider()
         c_add, c_edit = st.columns(2)
@@ -993,14 +1014,18 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_helpers"
         )
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
-            if "ed_helpers" in st.session_state:
-                changes = st.session_state["ed_helpers"].get("edited_rows", {})
-                for row_idx, col_changes in changes.items():
-                    row_id = disp_h.iloc[row_idx]['id']
-                    sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
-                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="helpers", action="UPDATE", doc_id=row_id, data=col_changes)
-            st.success("Helpers saved successfully!")
-            st.rerun()
+            changes_saved = 0
+            for idx in disp_h.index:
+                row_id = disp_h.loc[idx, 'id']
+                if not disp_h.loc[idx].equals(edited_h.loc[idx]):
+                    update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                    sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
+                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
+                    changes_saved += 1
+            if changes_saved > 0:
+                st.success(f"Saved {changes_saved} updates!")
+                st.rerun()
 
         st.divider()
         c_add, c_edit = st.columns(2)
@@ -1050,14 +1075,18 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_areas"
         )
         if st.button("💾 Save Table Edits", key="save_table_areas"):
-            if "ed_areas" in st.session_state:
-                changes = st.session_state["ed_areas"].get("edited_rows", {})
-                for row_idx, col_changes in changes.items():
-                    row_id = disp_a.iloc[row_idx]['id']
-                    sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
-                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="areas", action="UPDATE", doc_id=row_id, data=col_changes)
-            st.success("Areas saved successfully!")
-            st.rerun()
+            changes_saved = 0
+            for idx in disp_a.index:
+                row_id = disp_a.loc[idx, 'id']
+                if not disp_a.loc[idx].equals(edited_a.loc[idx]):
+                    update_dict = edited_a.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                    sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
+                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="areas", action="UPDATE", doc_id=row_id, data=update_dict)
+                    changes_saved += 1
+            if changes_saved > 0:
+                st.success(f"Saved {changes_saved} updates!")
+                st.rerun()
 
         st.divider()
         c_add, c_edit = st.columns(2)
@@ -1110,14 +1139,18 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_vehicles"
         )
         if st.button("💾 Save Table Edits", key="save_table_vehicles"):
-            if "ed_vehicles" in st.session_state:
-                changes = st.session_state["ed_vehicles"].get("edited_rows", {})
-                for row_idx, col_changes in changes.items():
-                    row_id = disp_v.iloc[row_idx]['id']
-                    sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
-                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="vehicles", action="UPDATE", doc_id=row_id, data=col_changes)
-            st.success("Vehicles saved successfully!")
-            st.rerun()
+            changes_saved = 0
+            for idx in disp_v.index:
+                row_id = disp_v.loc[idx, 'id']
+                if not disp_v.loc[idx].equals(edited_v.loc[idx]):
+                    update_dict = edited_v.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                    sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
+                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vehicles", action="UPDATE", doc_id=row_id, data=update_dict)
+                    changes_saved += 1
+            if changes_saved > 0:
+                st.success(f"Saved {changes_saved} updates!")
+                st.rerun()
 
         st.divider()
         c_add, c_edit = st.columns(2)
@@ -1209,14 +1242,18 @@ elif choice == "3. Past Experience Builder":
     )
     
     if st.button("💾 Save Table Edits", key="save_table_hist"):
-        if "ed_hist" in st.session_state:
-            changes = st.session_state["ed_hist"].get("edited_rows", {})
-            for row_idx, col_changes in changes.items():
-                row_id = disp_hist.iloc[row_idx]['id']
-                sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
-                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="history", action="UPDATE", doc_id=row_id, data=col_changes)
-        st.success("Experience saved successfully!")
-        st.rerun()
+        changes_saved = 0
+        for idx in disp_hist.index:
+            row_id = disp_hist.loc[idx, 'id']
+            if not disp_hist.loc[idx].equals(edited_hist.loc[idx]):
+                update_dict = edited_hist.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
+                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="history", action="UPDATE", doc_id=row_id, data=update_dict)
+                changes_saved += 1
+        if changes_saved > 0:
+            st.success(f"Saved {changes_saved} updates!")
+            st.rerun()
 
     with st.expander("🚨 Emergency Data Restore"):
         st.warning("Clicking this will wipe out ALL current Past Experience data from the system. (It defaults to empty).")
@@ -1231,6 +1268,8 @@ elif choice == "3. Past Experience Builder":
     
     # --- SMART BULK EXCEL/PDF SYNC ---
     st.subheader("📥 Smart Bulk Sync (Excel or PDF)")
+    if not PDF_ENABLED:
+        st.error("🚨 PyPDF2 library not found. To upload PDFs on Streamlit Cloud, create a file named `requirements.txt` in your repository and add `PyPDF2` to it.")
     st.info("Upload an Excel (.xlsx) or PDF file containing history data. The AI will parse it, unify formatting (e.g. 2-8 VAN), and strictly prevent duplicates.")
     bulk_file = st.file_uploader("Upload Experience Data", type=['xlsx', 'pdf'])
     
@@ -1294,8 +1333,6 @@ elif choice == "3. Past Experience Builder":
                             found_helper = next((h for h in h_list if str(h['name']).lower() in line.lower()), None)
                             if found_helper:
                                 new_records.append(("Helper", found_helper['code'], found_helper['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val))
-                else:
-                    st.error("PyPDF2 library not found. Please add 'PyPDF2' to requirements.txt")
 
             if new_records:
                 q_hist = "INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -1371,15 +1408,15 @@ elif choice == "4. Vacation Schedule":
     active_vacs = []
     if not vacs_df.empty and 'person_name' in vacs_df.columns:
         for _, row in vacs_df.iterrows():
-            sd = safe_parse_date(row['start_date'])
-            ed = safe_parse_date(row['end_date'])
-            if sd and ed and sd <= today <= ed:
+            sd = parse_date_safe(row['start_date'])
+            ed = parse_date_safe(row['end_date'])
+            if sd and ed and sd <= today.strftime("%Y-%m-%d") <= ed:
                 active_vacs.append({
                     "Role": row['person_type'],
                     "Code": row.get('person_code', 'UNK'),
                     "Name": row['person_name'],
-                    "Return Date": ed.strftime("%b %d, %Y"),
-                    "Days Left": (ed - today).days
+                    "Return Date": ed,
+                    "Days Left": (datetime.strptime(ed, "%Y-%m-%d").date() - today).days
                 })
     if active_vacs:
         dash_df = pd.DataFrame(active_vacs).sort_values(by="Days Left")
@@ -1398,7 +1435,7 @@ elif choice == "4. Vacation Schedule":
                     due_list.append({"Code": code, "Name": p['name'], "Role": role, "Status": "NEVER Taken a Vacation!"})
                 else:
                     last_vac = max(past_vacs)
-                    days_since = (today - last_vac).days
+                    days_since = (today - datetime.strptime(last_vac, "%Y-%m-%d").date()).days
                     if days_since > 300:
                         due_list.append({"Code": code, "Name": p['name'], "Role": role, "Status": f"Overdue by {days_since - 300} days (Last: {last_vac})"})
         if due_list: st.dataframe(pd.DataFrame(due_list), use_container_width=True, hide_index=True)
@@ -1422,14 +1459,18 @@ elif choice == "4. Vacation Schedule":
     )
     
     if st.button("💾 Save Table Edits", key="save_table_vacs"):
-        if "ed_vac" in st.session_state:
-            changes = st.session_state["ed_vac"].get("edited_rows", {})
-            for row_idx, col_changes in changes.items():
-                row_id = disp_vac.iloc[row_idx]['id']
-                sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
-                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="vacations", action="UPDATE", doc_id=row_id, data=col_changes)
-        st.success("Vacations saved successfully!")
-        st.rerun()
+        changes_saved = 0
+        for idx in disp_vac.index:
+            row_id = disp_vac.loc[idx, 'id']
+            if not disp_vac.loc[idx].equals(edited_vac.loc[idx]):
+                update_dict = edited_vac.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
+                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vacations", action="UPDATE", doc_id=row_id, data=update_dict)
+                changes_saved += 1
+        if changes_saved > 0:
+            st.success(f"Saved {changes_saved} updates!")
+            st.rerun()
 
     with st.expander("📥 Export / 📤 Import Vacation Data"):
         output = generate_excel_with_sn([vacs_df], ['vacations'])
