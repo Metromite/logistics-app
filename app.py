@@ -28,8 +28,8 @@ st.set_page_config(page_title="Logistics AI Planner", layout="wide")
 def unify_text(val):
     if pd.isna(val) or val is None: return "None"
     val = str(val).strip()
-    # Unify 2-8 VAN variations
-    val = re.sub(r'2\s*-\s*8\s*VAN', '2-8 VAN', val, flags=re.IGNORECASE)
+    # Aggressively catch ANY variation of 2-8 VAN
+    if re.search(r'2\s*-\s*8', val): val = '2-8 VAN'
     if val.upper() == 'PHARMA': val = 'Pharma'
     if val.upper() == 'CONSUMER': val = 'Consumer'
     return val
@@ -289,12 +289,11 @@ def parse_date_safe(d_str):
         except ValueError: pass
     return d_str
 
-# SAFELY CLOSED RAW STRING SO IT DOES NOT BREAK THE CODE
-RAW_HISTORY_DATA = """"""
-
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False):
         try:
+            if FIREBASE_READY: db_fs.collection("_system_ping").limit(1).get() 
+
             current_areas = load_table("areas")
             if force or len(current_areas) != 39:
                 c = conn.cursor()
@@ -323,7 +322,7 @@ if "db_initialized" not in st.session_state:
                 v_seed = [(v_num, unify_text(v_type), permitted, unify_text(division), "None", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
                 c.executemany("INSERT OR IGNORE INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed)
                 conn.commit()
-                    
+            
             st.cache_data.clear()
         except Exception as e:
             st.error(f"Initialization Error: {e}")
@@ -332,7 +331,7 @@ if "db_initialized" not in st.session_state:
     st.session_state.db_initialized = True
 
 
-# --- HIGH PERFORMANCE SCORING HELPERS ---
+# --- HIGH PERFORMANCE SCORING HELPERS (WITH CROSS TRAINING SECTOR CACHE) ---
 def build_experience_cache():
     history_df = load_table('history')
     exp_cache = {}
@@ -396,7 +395,7 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
         return None, "Excluded: On Vacation"
         
     if role == "Driver":
-        p_veh = candidate.get('veh_type', 'None')
+        p_veh = unify_text(candidate.get('veh_type', 'None'))
         if p_veh not in [req_veh, "None"] and not (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
             return None, f"Excluded: Vehicle Mismatch ({p_veh} != {req_veh})"
 
@@ -404,7 +403,7 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
     if "None" in anchors and len(anchors) == 1: anchors = []
 
     if anchors:
-        if any(a in [area['name'], req_sector, req_veh] for a in anchors):
+        if any(unify_text(a) in [unify_text(area['name']), req_sector, req_veh] for a in anchors):
             score += ANCHOR_MATCH_BONUS
             reasons.append(f"Anchor Match (+{ANCHOR_MATCH_BONUS})")
         else:
@@ -758,6 +757,7 @@ if choice == "1. AI Route Planner":
                     prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED"
 
+                    # 1. ASSIGN DRIVER
                     if rot_type == "Drivers" or prev_assignment.empty or prev_assignment.iloc[0].get('driver_code') in ["N/A", "UNASSIGNED", None]:
                         best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                         avail_dr = all_d[~all_d['code'].isin(used_drivers)]
@@ -786,6 +786,7 @@ if choice == "1. AI Route Planner":
                         a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
                         used_drivers.add(a_d_code)
 
+                    # 2. ASSIGN HELPER
                     if not needs_helper:
                         a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
                     elif rot_type == "Helpers" or prev_assignment.empty or prev_assignment.iloc[0].get('helper_code') in ["N/A", "UNASSIGNED", None]:
@@ -815,6 +816,7 @@ if choice == "1. AI Route Planner":
                         a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
 
+                    # 3. ASSIGN VEHICLE
                     if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else unify_text(d_type)
@@ -1268,17 +1270,30 @@ elif choice == "3. Past Experience Builder":
                     for page in pdf_reader.pages:
                         text += page.extract_text() + "\n"
                         
+                    # Find a global date if it's the "Dispatch Summary" format
+                    date_match = re.search(r"Date\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
+                    global_date = parse_date_safe(date_match.group(1)) if date_match else None
+                    
+                    d_list = load_table('drivers').to_dict('records')
+                    h_list = load_table('helpers').to_dict('records')
+                    a_list = load_table('areas').to_dict('records')
+                    
                     for line in text.split('\n'):
-                        match = re.search(r'([A-Z]{1,2}\d{3})\s+(.*?)\s+(.*?)\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})', line)
-                        if match:
-                            c_val = match.group(1).strip()
-                            n_val = match.group(2).strip()
-                            a_val = match.group(3).strip()
-                            d_val = "Pharma"
-                            f_val = parse_date_safe(match.group(4))
-                            t_val = parse_date_safe(match.group(5))
-                            ptype = "Helper" if c_val.startswith('H') else "Driver"
-                            new_records.append((ptype, c_val, n_val, a_val, d_val, f_val, t_val))
+                        line_dates = re.findall(r'\d{2}/\d{2}/\d{4}', line)
+                        f_val = parse_date_safe(line_dates[0]) if len(line_dates) > 0 else global_date
+                        t_val = parse_date_safe(line_dates[1]) if len(line_dates) > 1 else f_val
+                        
+                        if not f_val: continue
+                            
+                        found_area = next((a for a in a_list if str(a['name']).lower() in line.lower()), None)
+                        if found_area:
+                            found_driver = next((d for d in d_list if str(d['name']).lower() in line.lower()), None)
+                            if found_driver:
+                                new_records.append(("Driver", found_driver['code'], found_driver['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val))
+                            
+                            found_helper = next((h for h in h_list if str(h['name']).lower() in line.lower()), None)
+                            if found_helper:
+                                new_records.append(("Helper", found_helper['code'], found_helper['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val))
                 else:
                     st.error("PyPDF2 library not found. Please add 'PyPDF2' to requirements.txt")
 
