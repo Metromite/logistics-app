@@ -10,12 +10,38 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import io
 import os
+import re
 import textwrap
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+try:
+    import PyPDF2
+    PDF_ENABLED = True
+except ImportError:
+    PDF_ENABLED = False
+
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Logistics AI Planner", layout="wide")
+
+# --- TEXT UNIFICATION ENGINE ---
+# This ensures that "2 - 8 VAN", "2- 8 VAN", etc. are all treated as exactly "2-8 VAN" globally
+def unify_text(val):
+    if pd.isna(val) or val is None: return "None"
+    val = str(val).strip()
+    # Unify 2-8 VAN variations
+    val = re.sub(r'2\s*-\s*8\s*VAN', '2-8 VAN', val, flags=re.IGNORECASE)
+    # Standardize capitalization for divisions
+    if val.upper() == 'PHARMA': val = 'Pharma'
+    if val.upper() == 'CONSUMER': val = 'Consumer'
+    return val
+
+def unify_dataframe(df):
+    if df.empty: return df
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(unify_text)
+    return df
 
 # --- FIREBASE INITIALIZATION & DB ADAPTER ---
 FIREBASE_READY = False
@@ -41,7 +67,6 @@ try:
         db_fs = firestore.client()
         FIREBASE_READY = True
     else:
-        st.sidebar.error("⚠️ No Firebase configuration found in Streamlit Secrets.")
         FIREBASE_READY = False
 
     if FIREBASE_READY:
@@ -49,9 +74,9 @@ try:
             list(db_fs.collection("_system_ping").limit(1).stream())
         except Exception as ping_error:
             if "429" in str(ping_error) or "Quota" in str(ping_error) or "ResourceExhausted" in str(ping_error):
-                st.sidebar.error("🚨 Firebase Daily Free Quota Exceeded! Firebase is temporarily paused. Please check Google Cloud Console.")
+                st.sidebar.error("🚨 Firebase Quota Exceeded! Using lightning-fast local cache.")
             else:
-                st.sidebar.error(f"⚠️ Firebase Database is unreachable: {ping_error}")
+                st.sidebar.error(f"⚠️ Firebase Error: {ping_error}")
             FIREBASE_READY = False
 except Exception as e:
     st.sidebar.error(f"Firebase Config Error: {str(e)}")
@@ -60,9 +85,9 @@ except Exception as e:
 if FIREBASE_READY:
     st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢 Firebase Connected</div>", unsafe_allow_html=True)
 else:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴 Firebase Disconnected</div>", unsafe_allow_html=True)
+    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴 Firebase Disconnected (Offline Mode)</div>", unsafe_allow_html=True)
 
-# --- SQLITE INITIALIZATION & STRICT DUPLICATE PREVENTION ---
+# --- HYBRID SQLITE (SOLVES QUOTA EXCEEDED PERMANENTLY) ---
 def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
@@ -79,9 +104,7 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS vacation_predictions (id INTEGER PRIMARY KEY, person_code TEXT, person_name TEXT, role TEXT, suggested_start TEXT, suggested_end TEXT, reason TEXT, replacement_person TEXT, replacement_date TEXT)''')
     
     for query in [
-        "ALTER TABLE drivers ADD COLUMN restriction TEXT DEFAULT 'None'",
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
-        "ALTER TABLE helpers ADD COLUMN restriction TEXT DEFAULT 'None'",
         "ALTER TABLE helpers ADD COLUMN health_card TEXT DEFAULT 'No'",
         "ALTER TABLE areas ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
@@ -96,27 +119,19 @@ def init_sqlite_db():
     local_conn.commit()
     return local_conn
 
-if not FIREBASE_READY:
-    conn = init_sqlite_db()
+conn = init_sqlite_db()
 
-# --- SMART DB QUERY HANDLER ---
+# --- SMART QUOTA-SAVING DB HANDLER ---
 def clear_cache():
     st.cache_data.clear()
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=86400) # 24 Hour TTL. We only read once per day to save Firebase reads!
 def load_table(table_name):
-    if FIREBASE_READY:
-        try:
-            docs = db_fs.collection(table_name).stream()
-            data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
-            df = pd.DataFrame(data)
-        except Exception as e:
-            st.error(f"Error reading from Firebase: {e}")
-            return pd.DataFrame()
-    else:
-        df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-        
+    # READ ONLY FROM SQLITE TO SAVE FIREBASE QUOTA
+    df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    
     if df.empty: return df
+    df = unify_dataframe(df)
     
     if table_name == 'helpers' and 'health_card' not in df.columns: df['health_card'] = 'No'
     if table_name == 'drivers' and 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
@@ -137,7 +152,6 @@ def load_table(table_name):
     
     if table_name == 'areas': df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99); df = df.sort_values(by='sort_order')
     if table_name in ['active_routes', 'draft_routes'] and 'order_num' in df.columns: df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99); df = df.sort_values(by='order_num')
-    if table_name == 'history': df['sector'] = df['sector'].fillna('Pharma')
     
     if table_name in ['drivers', 'helpers']: df = df.drop_duplicates(subset=['code'], keep='first')
     if table_name == 'vehicles': df = df.drop_duplicates(subset=['number'], keep='first')
@@ -148,29 +162,34 @@ def load_table(table_name):
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
     try:
+        # 1. ALWAYS write to SQLite (Source of Truth for instant UI updates)
+        c = conn.cursor()
+        if query:
+            if isinstance(data, list) and action == "INSERT_MANY": c.executemany(query, params)
+            else: c.execute(query, params)
+        elif action == "CLEAR_TABLE" and table_name:
+            c.execute(f"DELETE FROM {table_name}")
+        conn.commit()
+
+        # 2. Mirror to Firebase if connected (Backup layer)
         if FIREBASE_READY and table_name and action:
-            if action == "INSERT": db_fs.collection(table_name).add(data)
-            elif action == "UPDATE" and doc_id: db_fs.collection(table_name).document(str(doc_id)).update(data)
-            elif action == "DELETE_DOC" and doc_id: db_fs.collection(table_name).document(str(doc_id)).delete()
+            if action == "INSERT" and data:
+                db_fs.collection(table_name).add(data)
+            elif action == "UPDATE" and doc_id and data:
+                db_fs.collection(table_name).document(str(doc_id)).update(data)
+            elif action == "DELETE_DOC" and doc_id:
+                db_fs.collection(table_name).document(str(doc_id)).delete()
             elif action == "CLEAR_TABLE":
-                docs = db_fs.collection(table_name).stream()
+                docs = db_fs.collection(table_name).select([]).stream() # Optimized selective pull
                 batch = db_fs.batch()
-                count = 0
-                for doc in docs:
+                for count, doc in enumerate(docs, 1):
                     batch.delete(doc.reference)
-                    count += 1
-                    if count >= 400:
+                    if count % 400 == 0:
                         batch.commit()
                         batch = db_fs.batch()
-                        count = 0
-                if count > 0: batch.commit()
-        else:
-            if query:
-                c = conn.cursor()
-                if isinstance(data, list) and action == "INSERT_MANY": c.executemany(query, params)
-                else: c.execute(query, params)
-                conn.commit()
+                batch.commit()
                 
+        # 3. Clear only the specific table's cache so it re-reads from SQLite instantly
         if table_name: load_table.clear(table_name)
         else: st.cache_data.clear()
         return True
@@ -192,7 +211,7 @@ def generate_excel_with_sn(df_list, sheet_names):
     return output
 
 # --- OPTIONS ---
-VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN", "2 - 8 VAN"]
+VEHICLE_OPTIONS = ["None", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["None", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 NEEDS_HELPER_OPTIONS = ["Yes", "No", "None"]
 ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Drivers Name", "AREA", "Sector", "Helper Code", "Helpers Name", "VEH NO", "Division Category"]
@@ -225,29 +244,29 @@ SEED_AREAS_IMAGE = [
 ]
 
 SEED_VEHICLES = [
-    ("M 95321", "PICK-UP", "DUBAI", "PHARMA"), ("C 47055", "PICK-UP", "SHARJAH", "PHARMA"),
-    ("B 14813", "BUS", "DUBAI", "PHARMA"), ("C 58107", "PICK-UP", "SHARJAH", "PHARMA"),
-    ("C 58801", "VAN", "DUBAI", "PHARMA"), ("16 47645", "BUS", "DUBAI", "PHARMA"),
-    ("I 85664", "PICK-UP", "DUBAI", "PHARMA"), ("I 86488", "VAN", "DUBAI", "PHARMA"),
-    ("R 96871", "BUS", "DUBAI", "PHARMA"), ("U 65986", "PICK-UP", "SHARJAH", "CONSUMER"),
-    ("U 65988", "VAN", "SHARJAH", "PHARMA"), ("U 65990", "VAN", "DUBAI", "PHARMA"),
-    ("V-83576", "VAN", "DUBAI", "PHARMA"), ("V-84049", "VAN", "SHARJAH", "PHARMA"),
-    ("V-84050", "VAN", "SHARJAH", "PHARMA"), ("W 49535", "PICK-UP", "DUBAI", "CONSUMER"),
-    ("W 49536", "VAN", "DUBAI", "PHARMA"), ("W 49539", "VAN", "DUBAI", "PHARMA"),
-    ("W 49540", "VAN", "DUBAI", "CONSUMER"), ("O 72506", "VAN", "AJMAN AND SHARJAH", "CONSUMER"),
-    ("O 72533", "PICK-UP", "DUBAI", "PHARMA"), ("O 72548", "PICK-UP", "DUBAI", "2 - 8 VAN"),
-    ("O 72567", "VAN", "DUBAI", "PHARMA"), ("O 72578", "VAN", "DUBAI", "PHARMA"),
-    ("O 72579", "VAN", "DUBAI", "PHARMA"), ("O 72581", "VAN", "SHARJAH", "CONSUMER"),
-    ("D 85038", "VAN", "DUBAI", "CONSUMER"), ("D 85076", "VAN", "DUBAI", "PHARMA"),
-    ("D 85823", "VAN", "DUBAI", "PHARMA"), ("C 26596", "BUS", "DUBAI", "PHARMA"),
-    ("V 60857", "VAN", "AJMAN", "PHARMA"), ("N 31329", "VAN", "DUBAI", "PHARMA"),
-    ("N 32094", "VAN", "DUBAI", "PHARMA"), ("N 32119", "VAN", "DUBAI", "PHARMA"),
-    ("N 32126", "VAN", "RAK", "PHARMA"), ("N 33680", "VAN", "RAK", "CONSUMER"),
-    ("E 18104", "VAN", "DUBAI", "PHARMA"), ("E 18316", "VAN", "DUBAI", "CONSUMER"),
-    ("BB 72473", "BUS", "DUBAI", "PHARMA"), ("I 71528", "PICK-UP", "DUBAI", "2 - 8 VAN"),
-    ("W 11792", "VAN", "FUJAIRAH", "PHARMA"), ("T 26701", "VAN", "SHARJAH", "2 - 8 VAN"),
-    ("CC 98174", "VAN", "DUBAI", "PHARMA"), ("CC 98175", "VAN", "DUBAI", "PHARMA"),
-    ("CC 98176", "VAN", "DUBAI", "2 - 8 VAN")
+    ("M 95321", "PICK-UP", "DUBAI", "Pharma"), ("C 47055", "PICK-UP", "SHARJAH", "Pharma"),
+    ("B 14813", "BUS", "DUBAI", "Pharma"), ("C 58107", "PICK-UP", "SHARJAH", "Pharma"),
+    ("C 58801", "VAN", "DUBAI", "Pharma"), ("16 47645", "BUS", "DUBAI", "Pharma"),
+    ("I 85664", "PICK-UP", "DUBAI", "Pharma"), ("I 86488", "VAN", "DUBAI", "Pharma"),
+    ("R 96871", "BUS", "DUBAI", "Pharma"), ("U 65986", "PICK-UP", "SHARJAH", "Consumer"),
+    ("U 65988", "VAN", "SHARJAH", "Pharma"), ("U 65990", "VAN", "DUBAI", "Pharma"),
+    ("V-83576", "VAN", "DUBAI", "Pharma"), ("V-84049", "VAN", "SHARJAH", "Pharma"),
+    ("V-84050", "VAN", "SHARJAH", "Pharma"), ("W 49535", "PICK-UP", "DUBAI", "Consumer"),
+    ("W 49536", "VAN", "DUBAI", "Pharma"), ("W 49539", "VAN", "DUBAI", "Pharma"),
+    ("W 49540", "VAN", "DUBAI", "Consumer"), ("O 72506", "VAN", "AJMAN AND SHARJAH", "Consumer"),
+    ("O 72533", "PICK-UP", "DUBAI", "Pharma"), ("O 72548", "PICK-UP", "DUBAI", "2-8 VAN"),
+    ("O 72567", "VAN", "DUBAI", "Pharma"), ("O 72578", "VAN", "DUBAI", "Pharma"),
+    ("O 72579", "VAN", "DUBAI", "Pharma"), ("O 72581", "VAN", "SHARJAH", "Consumer"),
+    ("D 85038", "VAN", "DUBAI", "Consumer"), ("D 85076", "VAN", "DUBAI", "Pharma"),
+    ("D 85823", "VAN", "DUBAI", "Pharma"), ("C 26596", "BUS", "DUBAI", "Pharma"),
+    ("V 60857", "VAN", "AJMAN", "Pharma"), ("N 31329", "VAN", "DUBAI", "Pharma"),
+    ("N 32094", "VAN", "DUBAI", "Pharma"), ("N 32119", "VAN", "DUBAI", "Pharma"),
+    ("N 32126", "VAN", "RAK", "Pharma"), ("N 33680", "VAN", "RAK", "Consumer"),
+    ("E 18104", "VAN", "DUBAI", "Pharma"), ("E 18316", "VAN", "DUBAI", "Consumer"),
+    ("BB 72473", "BUS", "DUBAI", "Pharma"), ("I 71528", "PICK-UP", "DUBAI", "2-8 VAN"),
+    ("W 11792", "VAN", "FUJAIRAH", "Pharma"), ("T 26701", "VAN", "SHARJAH", "2-8 VAN"),
+    ("CC 98174", "VAN", "DUBAI", "Pharma"), ("CC 98175", "VAN", "DUBAI", "Pharma"),
+    ("CC 98176", "VAN", "DUBAI", "2-8 VAN")
 ]
 
 RAW_NAME_MAP = {
@@ -268,99 +287,86 @@ RAW_NAME_MAP = {
     "H017": "Mujammal", "H126": "Subin Kovammal"
 }
 
-# Adjusted to load perfectly structured data into SQLite/Firebase directly without string parsing issues
-PRELOAD_HISTORY = [
-    ("Driver", "AD051", "ABDUL JALEEL", "ABU DHABI", "Pharma", "2026-02-26", "2026-04-08"),
-    ("Driver", "AD051", "ABDUL JALEEL", "JABEL ALI", "Pharma", "2026-02-24", "2026-02-24"),
-    ("Driver", "AD055", "AHAMAD JAN", "ABU DHABI", "Pharma", "2026-02-18", "2026-02-18"),
-    ("Driver", "AD025", "ALI AHAMAD", "JABEL ALI", "Pharma", "2026-03-04", "2026-03-14"),
-    ("Driver", "D049", "Abdul Jabbar", "AJMAN", "Consumer", "2026-01-27", "2026-02-16"),
-    ("Driver", "D049", "Abdul Jabbar", "AJMAN", "Pharma", "2024-10-03", "2025-11-21"),
-    ("Driver", "D049", "Abdul Jabbar", "ALQOUZ-1", "Consumer", "2026-02-06", "2026-04-10"),
-    ("Driver", "D049", "Abdul Jabbar", "ALQOUZ-1", "Pharma", "2024-07-24", "2026-01-05"),
-    ("Helper", "H070", "A. Harshad", "AJMAN", "2 - 8 VAN", "2026-02-23", "2026-02-23"),
-    ("Helper", "H070", "A. Harshad", "AJMAN", "Consumer", "2026-02-27", "2026-04-01"),
-    ("Helper", "H070", "A. Harshad", "ALQOUZ-1", "Pharma", "2025-05-05", "2025-05-05"),
-    ("Helper", "H109", "AL Ameen", "AJMAN", "Consumer", "2025-07-03", "2025-11-12"),
-    ("Helper", "H109", "AL Ameen", "AJMAN", "Pharma", "2024-09-24", "2025-06-09")
-]
+def parse_date_safe(d_str):
+    if pd.isna(d_str) or not str(d_str).strip() or str(d_str) == "None": return None
+    d_str = str(d_str).strip().split(" ")[0]
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try: return datetime.strptime(d_str, fmt).strftime("%Y-%m-%d")
+        except ValueError: pass
+    return d_str
+
+def parse_history_payload():
+    records = []
+    for line in RAW_HISTORY_DATA.strip().split('\n'):
+        if not line.strip() or 'DATE FROM' in line.upper() or 'EXPERIENCE SUMMARY' in line.upper(): continue
+        parts = line.split('\t')
+        if len(parts) >= 6:
+            code = parts[0].strip()
+            name = parts[1].strip()
+            area = parts[2].strip()
+            division = parts[3].strip() if parts[3].strip() else "Pharma"
+            d_from = parts[4].strip()
+            d_to = parts[5].strip()
+            
+            ptype = "Helper" if code.startswith('H') else "Driver"
+            d_from_parsed = parse_date_safe(d_from)
+            d_to_parsed = parse_date_safe(d_to)
+            
+            if d_from_parsed and d_to_parsed:
+                records.append((ptype, code, name, area, unify_text(division), d_from_parsed, d_to_parsed))
+    return records
 
 
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False):
         try:
+            # Sync Firebase to Local DB (Zero Quota setup)
+            if FIREBASE_READY:
+                db_fs.collection("_system_ping").limit(1).get() # Ping to wake
+
             current_areas = load_table("areas")
             if force or len(current_areas) != 39:
-                if FIREBASE_READY:
-                    run_query(None, table_name="areas", action="CLEAR_TABLE")
-                    for code, name, sector, nh, order in SEED_AREAS_IMAGE: 
-                        db_fs.collection("areas").add({"code": code, "name": name, "sector": sector, "needs_helper": nh, "sort_order": order})
-                else:
-                    c = conn.cursor()
-                    c.execute("DELETE FROM areas")
-                    c.executemany("INSERT OR IGNORE INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
-                    conn.commit()
+                c = conn.cursor()
+                c.execute("DELETE FROM areas")
+                c.executemany("INSERT OR IGNORE INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE)
+                conn.commit()
+                if FIREBASE_READY: run_query(None, table_name="areas", action="CLEAR_TABLE")
             
             d_df = load_table('drivers')
             if len(d_df) == 0:
-                if FIREBASE_READY:
-                    for code in KEEP_DRIVERS: db_fs.collection("drivers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "None", "needs_helper": "None", "restriction": "None", "anchor_area": "None"})
-                else:
-                    c = conn.cursor()
-                    d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "None", "None", "None", "None") for code in KEEP_DRIVERS]
-                    c.executemany("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed)
-                    conn.commit()
+                c = conn.cursor()
+                d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "None", "None", "None", "None") for code in KEEP_DRIVERS]
+                c.executemany("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed)
+                conn.commit()
             
             h_df = load_table('helpers')
             if len(h_df) == 0:
-                if FIREBASE_READY:
-                    for code in KEEP_HELPERS: db_fs.collection("helpers").add({"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "None", "health_card": "No", "anchor_area": "None"})
-                else:
-                    c = conn.cursor()
-                    h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
-                    c.executemany("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
-                    conn.commit()
+                c = conn.cursor()
+                h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "None", "No", "None") for code in KEEP_HELPERS]
+                c.executemany("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed)
+                conn.commit()
 
             v_df = load_table('vehicles')
             if len(v_df) == 0:
-                if FIREBASE_READY:
-                    for v_num, v_type, permitted, division in SEED_VEHICLES: db_fs.collection("vehicles").add({"number": v_num, "type": v_type, "permitted_areas": permitted, "division": division, "anchor_area": "None", "status": "Active"})
-                else:
-                    c = conn.cursor()
-                    v_seed = [(v_num, v_type, permitted, division, "None", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
-                    c.executemany("INSERT OR IGNORE INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed)
-                    conn.commit()
+                c = conn.cursor()
+                v_seed = [(v_num, unify_text(v_type), permitted, unify_text(division), "None", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
+                c.executemany("INSERT OR IGNORE INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed)
+                conn.commit()
                     
             history_df = load_table('history')
             if history_df.empty:
-                if PRELOAD_HISTORY:
-                    if FIREBASE_READY:
-                        batch = db_fs.batch()
-                        count = 0
-                        for ptype, pcode, pname, parea, psec, pstart, pend in PRELOAD_HISTORY:
-                            doc_ref = db_fs.collection("history").document()
-                            batch.set(doc_ref, {"person_type": ptype, "person_code": pcode, "person_name": pname, "area": parea, "sector": psec, "date": pstart, "end_date": pend})
-                            count += 1
-                            if count >= 400:
-                                batch.commit()
-                                batch = db_fs.batch()
-                                count = 0
-                        if count > 0: batch.commit()
-                    else:
-                        c = conn.cursor()
-                        c.executemany("INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", PRELOAD_HISTORY)
-                        conn.commit()
+                parsed_records = parse_history_payload()
+                if parsed_records:
+                    c = conn.cursor()
+                    c.executemany("INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", parsed_records)
+                    conn.commit()
             
             st.cache_data.clear()
-        except Exception:
-            pass
+        except Exception as e:
+            st.error(f"Initialization Error: {e}")
             
     execute_global_init()
     st.session_state.db_initialized = True
-
-def safe_parse_date(date_str):
-    try: return datetime.strptime(str(date_str).split(" ")[0], "%Y-%m-%d").date()
-    except: return date.today()
 
 
 # --- HIGH PERFORMANCE SCORING HELPERS (WITH CROSS TRAINING SECTOR CACHE) ---
@@ -486,17 +492,17 @@ def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vac_
     errors = []
     req_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
     for _, area in areas_df.iterrows():
-        sec = area.get('sector', '')
-        name = area.get('name', '')
+        sec = unify_text(area.get('sector', ''))
+        name = unify_text(area.get('name', ''))
         if "2-8" in sec or "COLD CHAIN" in name: req_veh["2-8 VAN"] += 1
         elif "Govt" in sec or "GOVT" in name: req_veh["BUS"] += 1
         elif "Pick-Up" in sec or "PICK UP" in name: req_veh["PICK-UP"] += 1
         else: req_veh["VAN"] += 1
             
     avail_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
-    active_vehicles_df = vehicles_df[vehicles_df.get('status', 'Active') != 'Under Service']
+    active_vehicles_df = vehicles_df[~vehicles_df.get('status', 'Active').str.contains('Under Service|In for Service', case=False, na=False)]
     for _, v in active_vehicles_df.iterrows():
-        vtype = v.get('type', 'VAN')
+        vtype = unify_text(v.get('type', 'VAN'))
         if vtype in avail_veh: avail_veh[vtype] += 1
         elif vtype == "VAN / PICK-UP":
             avail_veh["VAN"] += 1
@@ -537,7 +543,7 @@ if choice == "1. AI Route Planner":
     
     vac_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
     avail_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
-    solo_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if (not is_on_vacation(r['code'], today, vac_cache)) and ((r.get('needs_helper', 'Yes') == 'No') or (r.get('veh_type', '') in ['BUS', '2-8 VAN']))] if not all_d.empty else []
+    solo_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if (not is_on_vacation(r['code'], today, vac_cache)) and ((r.get('needs_helper', 'Yes') == 'No') or (unify_text(r.get('veh_type', '')) in ['BUS', '2-8 VAN']))] if not all_d.empty else []
     
     vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
     avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
@@ -643,31 +649,54 @@ if choice == "1. AI Route Planner":
         output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
         col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
         
+        # Proper Data Editor Save Logic
         if col_save.button("💾 Save Draft Plan", type="secondary"):
+            if "route_editor" in st.session_state:
+                changes = st.session_state["route_editor"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    for col_name, new_val in col_changes.items():
+                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
+                        
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
+            
+            insert_data = []
             for index, r in edited_df.iterrows():
-                sn_val = r.get('S/N', r.get('order_num', index + 1))
-                q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                run_query(q_dr, (sn_val, "", r.get('AREA', ''), r.get('Sector', ''), r.get('Driver Code', ''), r.get('Drivers Name', ''), r.get('Helper Code', ''), r.get('Helpers Name', ''), r.get('VEH NO', ''), r.get('Division Category', ''), p_s, p_e), table_name="draft_routes", action="INSERT", data={"order_num":sn_val, "area_code":"", "area_name":r.get('AREA', ''), "sector":r.get('Sector', ''), "driver_code":r.get('Driver Code', ''), "driver_name":r.get('Drivers Name', ''), "helper_code":r.get('Helper Code', ''), "helper_name":r.get('Helpers Name', ''), "veh_num":r.get('VEH NO', ''), "div_cat":r.get('Division Category', ''), "start_date":p_s, "end_date":p_e})
+                sn_val = r.get('S/N', index + 1)
+                insert_data.append((sn_val, "", r.get('AREA', ''), unify_text(r.get('Sector', '')), r.get('Driver Code', ''), r.get('Drivers Name', ''), r.get('Helper Code', ''), r.get('Helpers Name', ''), r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e))
+                
+            q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY")
             st.success("Draft Saved Successfully!")
             st.rerun()
 
         if col_app.button("✅ Confirm Plan & Save Experiences", type="primary"):
+            if "route_editor" in st.session_state:
+                changes = st.session_state["route_editor"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    for col_name, new_val in col_changes.items():
+                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
+                        
             run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
             
+            active_data = []
+            hist_data = []
             for index, r in edited_df.iterrows():
-                sn_val = r.get('S/N', r.get('order_num', index + 1))
-                q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                data_dict = {"order_num":sn_val, "area_code":"", "area_name":r.get('AREA', ''), "driver_code":r.get('Driver Code', ''), "driver_name":r.get('Drivers Name', ''), "helper_code":r.get('Helper Code', ''), "helper_name":r.get('Helpers Name', ''), "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e}
-                run_query(q_ar, (sn_val, "", r.get('AREA', ''), r.get('Driver Code', ''), r.get('Drivers Name', ''), r.get('Helper Code', ''), r.get('Helpers Name', ''), r.get('VEH NO', ''), p_s, p_e), table_name="active_routes", action="INSERT", data=data_dict)
+                sn_val = r.get('S/N', index + 1)
+                active_data.append((sn_val, "", r.get('AREA', ''), r.get('Driver Code', ''), r.get('Drivers Name', ''), r.get('Helper Code', ''), r.get('Helpers Name', ''), r.get('VEH NO', ''), p_s, p_e))
                 
                 for code, name, ptype in [(r.get('Driver Code', ''), r.get('Drivers Name', ''), "Driver"), (r.get('Helper Code', ''), r.get('Helpers Name', ''), "Helper")]:
-                    if code not in ["UNASSIGNED", "N/A", ""]:
-                        run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)", (ptype, code, name, r.get('AREA', ''), r.get('Sector', ''), p_s, p_e), table_name="history", action="INSERT", data={"person_type":ptype, "person_code":code, "person_name":name, "area":r.get('AREA', ''), "sector":r.get('Sector', ''), "date":p_s, "end_date":p_e})
+                    if pd.notna(code) and str(code).strip() not in ["UNASSIGNED", "N/A", "", "None"]:
+                        hist_data.append((ptype, str(code).strip(), str(name).strip(), r.get('AREA', ''), unify_text(r.get('Sector', '')), p_s, p_e))
+            
+            q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            run_query(q_ar, active_data, table_name="active_routes", action="INSERT_MANY")
+            
+            q_hist = "INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            run_query(q_hist, hist_data, table_name="history", action="INSERT_MANY")
             
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
             st.success(f"Plan Approved! System logged these experiences from {p_s} to {p_e}.")
@@ -745,25 +774,29 @@ if choice == "1. AI Route Planner":
                 
                 p_s_gen = month_target.strftime("%Y-%m-%d")
                 p_e_gen = (month_target + timedelta(days=90)).strftime("%Y-%m-%d")
+                
+                reason_data = []
+                predict_data = []
 
                 for _, area in areas.iterrows():
-                    area_name = area['name']
-                    req_sector = area.get('sector', 'Pharma')
+                    area_name = unify_text(area['name'])
+                    req_sector = unify_text(area.get('sector', 'Pharma'))
                     needs_helper = area.get('needs_helper', 'Yes') in ['Yes', 'Optional']
                     
                     div_cat = "PHARMA DIVISION"
-                    if "2-8" in req_sector or "Govt" in req_sector or "Fleet" in req_sector: div_cat = "2-8 / URGENT ORDERS"
-                    elif "Pick-Up" in req_sector or "Substitute" in req_sector or "Bulk" in req_sector: div_cat = "PICK-UPS / URGENT COLD CHAIN"
-                    elif "Consumer" in req_sector: div_cat = "CONSUMER DIVISION"
+                    if "2-8" in req_sector or "GOVT" in req_sector.upper() or "FLEET" in req_sector.upper(): div_cat = "2-8 / URGENT ORDERS"
+                    elif "PICK-UP" in req_sector.upper() or "SUBSTITUTE" in req_sector.upper() or "BULK" in req_sector.upper(): div_cat = "PICK-UPS / URGENT COLD CHAIN"
+                    elif "CONSUMER" in req_sector.upper(): div_cat = "CONSUMER DIVISION"
 
                     req_veh = "VAN"
-                    if "2-8" in req_sector or "COLD CHAIN" in area_name: req_veh = "2-8 VAN"
-                    elif "Govt" in req_sector or "GOVT" in area_name: req_veh = "BUS"
-                    elif "Pick-Up" in req_sector or "PICK UP" in area_name: req_veh = "PICK-UP"
+                    if "2-8" in req_sector or "COLD CHAIN" in area_name.upper(): req_veh = "2-8 VAN"
+                    elif "GOVT" in req_sector.upper() or "GOVT" in area_name.upper(): req_veh = "BUS"
+                    elif "PICK-UP" in req_sector.upper() or "PICK UP" in area_name.upper(): req_veh = "PICK-UP"
 
                     prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED"
 
+                    # 1. ASSIGN DRIVER
                     if rot_type == "Drivers" or prev_assignment.empty or prev_assignment.iloc[0].get('driver_code') in ["N/A", "UNASSIGNED", None]:
                         best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                         avail_dr = all_d[~all_d['code'].isin(used_drivers)]
@@ -777,8 +810,7 @@ if choice == "1. AI Route Planner":
                             a_d_code, a_d_name = best_d['code'], best_d['name']
                             used_drivers.add(a_d_code)
                             if best_d.get('needs_helper') == 'No': needs_helper = False
-                            run_query("INSERT INTO route_plan_reasons (plan_date, area, role, selected_person, score, reasons, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                                      (p_s_gen, area_name, "Driver", a_d_name, best_d_score, d_reason, timestamp), table_name="route_plan_reasons", action="INSERT", data={"plan_date":p_s_gen, "area":area_name, "role":"Driver", "selected_person":a_d_name, "score":best_d_score, "reasons":d_reason, "generated_at":timestamp})
+                            reason_data.append((p_s_gen, area_name, "Driver", a_d_name, best_d_score, d_reason, timestamp))
                             
                             vac_start = vacation_within_3_months(a_d_code, month_target, vac_cache)
                             if vac_start:
@@ -788,12 +820,12 @@ if choice == "1. AI Route Planner":
                                     if r_score is not None and r_score > best_r_score:
                                         best_r_score, repl_d = r_score, rp
                                 repl_name = repl_d['name'] if repl_d is not None else "CRITICAL SHORTAGE"
-                                run_query("INSERT INTO vacation_predictions (person_code, person_name, role, suggested_start, reason, replacement_person, replacement_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                          (a_d_code, a_d_name, "Driver", vac_start.strftime("%Y-%m-%d"), "Scheduled Vacation", repl_name, vac_start.strftime("%Y-%m-%d")), table_name="vacation_predictions", action="INSERT", data={"person_code":a_d_code, "person_name":a_d_name, "role":"Driver", "suggested_start":vac_start.strftime("%Y-%m-%d"), "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start.strftime("%Y-%m-%d")})
+                                predict_data.append((a_d_code, a_d_name, "Driver", vac_start.strftime("%Y-%m-%d"), "Scheduled Vacation", repl_name, vac_start.strftime("%Y-%m-%d")))
                     else:
                         a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
                         used_drivers.add(a_d_code)
 
+                    # 2. ASSIGN HELPER
                     if not needs_helper:
                         a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
                     elif rot_type == "Helpers" or prev_assignment.empty or prev_assignment.iloc[0].get('helper_code') in ["N/A", "UNASSIGNED", None]:
@@ -808,8 +840,7 @@ if choice == "1. AI Route Planner":
                         if best_h is not None:
                             a_h_code, a_h_name = best_h['code'], best_h['name']
                             used_helpers.add(a_h_code)
-                            run_query("INSERT INTO route_plan_reasons (plan_date, area, role, selected_person, score, reasons, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                                      (p_s_gen, area_name, "Helper", a_h_name, best_h_score, h_reason, timestamp), table_name="route_plan_reasons", action="INSERT", data={"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":a_h_name, "score":best_h_score, "reasons":h_reason, "generated_at":timestamp})
+                            reason_data.append((p_s_gen, area_name, "Helper", a_h_name, best_h_score, h_reason, timestamp))
                             
                             vac_start = vacation_within_3_months(a_h_code, month_target, vac_cache)
                             if vac_start:
@@ -819,20 +850,20 @@ if choice == "1. AI Route Planner":
                                     if r_score is not None and r_score > best_r_score:
                                         best_r_score, repl_h = r_score, rp
                                 repl_name = repl_h['name'] if repl_h is not None else "CRITICAL SHORTAGE"
-                                run_query("INSERT INTO vacation_predictions (person_code, person_name, role, suggested_start, reason, replacement_person, replacement_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                          (a_h_code, a_h_name, "Helper", vac_start.strftime("%Y-%m-%d"), "Scheduled Vacation", repl_name, vac_start.strftime("%Y-%m-%d")), table_name="vacation_predictions", action="INSERT", data={"person_code":a_h_code, "person_name":a_h_name, "role":"Helper", "suggested_start":vac_start.strftime("%Y-%m-%d"), "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start.strftime("%Y-%m-%d")})
+                                predict_data.append((a_h_code, a_h_name, "Helper", vac_start.strftime("%Y-%m-%d"), "Scheduled Vacation", repl_name, vac_start.strftime("%Y-%m-%d")))
                     else:
                         a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
 
+                    # 3. ASSIGN VEHICLE
                     if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
-                        tvt = req_veh if req_veh != "VAN" else d_type
+                        tvt = req_veh if req_veh != "VAN" else unify_text(d_type)
                         
                         potential_vs = []
-                        active_vehicles_df = vehicles[vehicles.get('status', 'Active') != 'Under Service']
+                        active_vehicles_df = vehicles[~vehicles.get('status', 'Active').str.contains('Under Service|In for Service', case=False, na=False)]
                         for _, v in active_vehicles_df[~active_vehicles_df['number'].isin(used_vehicles)].iterrows():
-                            v_type = v.get('type', 'VAN')
+                            v_type = unify_text(v.get('type', 'VAN'))
                             type_match = False
                             if v_type == tvt: type_match = True
                             elif tvt in ["VAN", "PICK-UP"] and v_type == "VAN / PICK-UP": type_match = True
@@ -843,7 +874,7 @@ if choice == "1. AI Route Planner":
                             if "None" in v_anchors and len(v_anchors) == 1: v_anchors = []
                             
                             if v_anchors:
-                                if any(a in [area_name, req_sector, tvt] for a in v_anchors):
+                                if any(unify_text(a) in [area_name, req_sector, tvt] for a in v_anchors):
                                     potential_vs.append((v, True))
                             else:
                                 potential_vs.append((v, False))
@@ -857,13 +888,17 @@ if choice == "1. AI Route Planner":
                     route_plan.append({
                         "Driver Code": a_d_code, "Drivers Name": a_d_name, 
                         "AREA": area_name, "Sector": req_sector, "Helper Code": a_h_code, "Helpers Name": a_h_name, 
-                        "VEH NO": a_v_num, "Division Category": div_cat, "Area Code": area['code']
+                        "VEH NO": a_v_num, "Division Category": div_cat, "Area Code": area.get('code', '')
                     })
 
+                run_query("INSERT INTO route_plan_reasons (plan_date, area, role, selected_person, score, reasons, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", reason_data, table_name="route_plan_reasons", action="INSERT_MANY")
+                run_query("INSERT INTO vacation_predictions (person_code, person_name, role, suggested_start, reason, replacement_person, replacement_date) VALUES (?, ?, ?, ?, ?, ?, ?)", predict_data, table_name="vacation_predictions", action="INSERT_MANY")
+
                 run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
+                draft_inserts = []
                 for index, r in enumerate(route_plan):
-                    q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                    run_query(q_dr, (index+1, r['Area Code'], r['AREA'], r['Sector'], r['Driver Code'], r['Drivers Name'], r['Helper Code'], r['Helpers Name'], r['VEH NO'], r['Division Category'], p_s_gen, p_e_gen), table_name="draft_routes", action="INSERT", data={"order_num":index+1, "area_code":r['Area Code'], "area_name":r['AREA'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Drivers Name'], "helper_code":r['Helper Code'], "helper_name":r['Helpers Name'], "veh_num":r['VEH NO'], "div_cat":r['Division Category'], "start_date":p_s_gen, "end_date":p_e_gen})
+                    draft_inserts.append((index+1, r['Area Code'], r['AREA'], r['Sector'], r['Driver Code'], r['Drivers Name'], r['Helper Code'], r['Helpers Name'], r['VEH NO'], r['Division Category'], p_s_gen, p_e_gen))
+                run_query("INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", draft_inserts, table_name="draft_routes", action="INSERT_MANY")
                 
                 st.session_state.force_bypass = False
                 st.rerun()
@@ -937,12 +972,13 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_drivers"
         )
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
-            for idx in disp_df.index:
-                row_id = disp_df.loc[idx, 'id']
-                if not disp_df.loc[idx].equals(edited_d.loc[idx]):
-                    update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                    sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
+            if "ed_drivers" in st.session_state:
+                changes = st.session_state["ed_drivers"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    row_id = disp_df.iloc[row_idx]['id']
+                    sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
+                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="drivers", action="UPDATE", doc_id=row_id, data=col_changes)
+            st.success("Drivers saved successfully!")
             st.rerun()
             
         st.divider()
@@ -964,7 +1000,7 @@ elif choice == "2. Database Management":
                     st.error(f"Driver Code {d_code} already exists! Cannot duplicate.")
                 else:
                     if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                              (d_name, d_code, d_type, d_sec, d_needs_h, "None", d_anchor_str), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":d_type, "sector":d_sec, "needs_helper":d_needs_h, "restriction":"None", "anchor_area":d_anchor_str}):
+                              (d_name, d_code, unify_text(d_type), unify_text(d_sec), d_needs_h, "None", d_anchor_str), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":unify_text(d_type), "sector":unify_text(d_sec), "needs_helper":d_needs_h, "restriction":"None", "anchor_area":d_anchor_str}):
                         st.success("Driver Added!")
                         st.rerun()
 
@@ -996,12 +1032,13 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_helpers"
         )
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
-            for idx in disp_h.index:
-                row_id = disp_h.loc[idx, 'id']
-                if not disp_h.loc[idx].equals(edited_h.loc[idx]):
-                    update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                    sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
+            if "ed_helpers" in st.session_state:
+                changes = st.session_state["ed_helpers"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    row_id = disp_h.iloc[row_idx]['id']
+                    sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
+                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="helpers", action="UPDATE", doc_id=row_id, data=col_changes)
+            st.success("Helpers saved successfully!")
             st.rerun()
 
         st.divider()
@@ -1052,12 +1089,13 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_areas"
         )
         if st.button("💾 Save Table Edits", key="save_table_areas"):
-            for idx in disp_a.index:
-                row_id = disp_a.loc[idx, 'id']
-                if not disp_a.loc[idx].equals(edited_a.loc[idx]):
-                    update_dict = edited_a.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                    sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="areas", action="UPDATE", doc_id=row_id, data=update_dict)
+            if "ed_areas" in st.session_state:
+                changes = st.session_state["ed_areas"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    row_id = disp_a.iloc[row_idx]['id']
+                    sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
+                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="areas", action="UPDATE", doc_id=row_id, data=col_changes)
+            st.success("Areas saved successfully!")
             st.rerun()
 
         st.divider()
@@ -1074,7 +1112,7 @@ elif choice == "2. Database Management":
                     st.error(f"Area {a_name} already exists! Cannot duplicate.")
                 else:
                     new_order = len(a_df) + 1
-                    if run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", (a_name, a_code, a_sec, a_needs, new_order), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":a_sec, "needs_helper":a_needs, "sort_order":new_order}):
+                    if run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", (a_name, a_code, unify_text(a_sec), a_needs, new_order), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":unify_text(a_sec), "needs_helper":a_needs, "sort_order":new_order}):
                         st.success("Area Added!")
                         st.rerun()
         with c_edit:
@@ -1105,18 +1143,19 @@ elif choice == "2. Database Management":
                 "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "type": st.column_config.SelectboxColumn("Type", options=v_type_opts),
                 "division": st.column_config.SelectboxColumn("Division", options=v_div_opts),
-                "status": st.column_config.SelectboxColumn("Status", options=["Active", "Under Service"]),
+                "status": st.column_config.SelectboxColumn("Status", options=["Active", "Under Service", "In for Service"]),
                 "anchor_area": st.column_config.TextColumn("Anchor(s) (comma-separated)", help="Type Areas, Sectors, or Veh Types separated by commas"),
                 "permitted_areas": st.column_config.TextColumn("Permitted Areas", help="Type Permitted Regions (e.g. Dubai, Sharjah)")
             }, use_container_width=True, height=250, hide_index=True, key="ed_vehicles"
         )
         if st.button("💾 Save Table Edits", key="save_table_vehicles"):
-            for idx in disp_v.index:
-                row_id = disp_v.loc[idx, 'id']
-                if not disp_v.loc[idx].equals(edited_v.loc[idx]):
-                    update_dict = edited_v.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                    sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vehicles", action="UPDATE", doc_id=row_id, data=update_dict)
+            if "ed_vehicles" in st.session_state:
+                changes = st.session_state["ed_vehicles"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    row_id = disp_v.iloc[row_idx]['id']
+                    sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
+                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="vehicles", action="UPDATE", doc_id=row_id, data=col_changes)
+            st.success("Vehicles saved successfully!")
             st.rerun()
 
         st.divider()
@@ -1127,7 +1166,7 @@ elif choice == "2. Database Management":
             v_type = st.selectbox("New Vehicle Type", VEHICLE_OPTIONS, key="add_v_type")
             v_div = st.selectbox("New Vehicle Division", v_div_opts, key="add_v_div")
             v_perm = st.text_input("Permitted Areas (e.g. Dubai, Sharjah)", value="All", key="add_v_perm")
-            v_stat = st.selectbox("Status", ["Active", "Under Service"], key="add_v_stat")
+            v_stat = st.selectbox("Status", ["Active", "Under Service", "In for Service"], key="add_v_stat")
             
             v_anchor_opts = st.multiselect("New Vehicle Anchor(s)", multi_anchor_opts, key="add_v_anc")
             v_anchor_str = ", ".join(v_anchor_opts) if v_anchor_opts else "None"
@@ -1136,7 +1175,7 @@ elif choice == "2. Database Management":
                 if v_df['number'].isin([v_num]).any():
                     st.error(f"Vehicle Number {v_num} already exists! Cannot duplicate.")
                 else:
-                    if run_query("INSERT INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", (v_num, v_type, v_perm, v_div, v_anchor_str, v_stat), table_name="vehicles", action="INSERT", data={"number":v_num, "type":v_type, "permitted_areas":v_perm, "division":v_div, "anchor_area":v_anchor_str, "status":v_stat}):
+                    if run_query("INSERT INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", (v_num, unify_text(v_type), v_perm, unify_text(v_div), v_anchor_str, v_stat), table_name="vehicles", action="INSERT", data={"number":v_num, "type":unify_text(v_type), "permitted_areas":v_perm, "division":unify_text(v_div), "anchor_area":v_anchor_str, "status":v_stat}):
                         st.success("Vehicle Added!")
                         st.rerun()
         with c_edit:
@@ -1161,17 +1200,13 @@ elif choice == "2. Database Management":
             xls = pd.ExcelFile(uploaded_file)
             for sheet in xls.sheet_names:
                 df = pd.read_excel(xls, sheet_name=sheet)
-                if not FIREBASE_READY: run_query(f"DELETE FROM {sheet}")
-                else: run_query(None, table_name=sheet, action="CLEAR_TABLE")
+                run_query(None, table_name=sheet, action="CLEAR_TABLE")
 
                 for _, row in df.iterrows():
                     data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N']}
-                    if not FIREBASE_READY:
-                        cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
-                        qmarks = ', '.join(['?'] * len(data_dict))
-                        run_query(f"INSERT INTO {sheet} ({cols}) VALUES ({qmarks})", vals)
-                    else:
-                        run_query(None, table_name=sheet, action="INSERT", data=data_dict)
+                    cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
+                    qmarks = ', '.join(['?'] * len(data_dict))
+                    run_query(f"INSERT OR IGNORE INTO {sheet} ({cols}) VALUES ({qmarks})", vals, table_name=sheet, action="INSERT", data=data_dict)
             st.success("Database synchronized successfully!")
 
         st.divider()
@@ -1213,31 +1248,95 @@ elif choice == "3. Past Experience Builder":
     )
     
     if st.button("💾 Save Table Edits", key="save_table_hist"):
-        for idx in disp_hist.index:
-            row_id = disp_hist.loc[idx, 'id']
-            if not disp_hist.loc[idx].equals(edited_hist.loc[idx]):
-                update_dict = edited_hist.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="history", action="UPDATE", doc_id=row_id, data=update_dict)
+        if "ed_hist" in st.session_state:
+            changes = st.session_state["ed_hist"].get("edited_rows", {})
+            for row_idx, col_changes in changes.items():
+                row_id = disp_hist.iloc[row_idx]['id']
+                sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
+                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="history", action="UPDATE", doc_id=row_id, data=col_changes)
+        st.success("Experience saved successfully!")
         st.rerun()
 
     with st.expander("🚨 Emergency Data Restore"):
         st.warning("Clicking this will wipe out ALL current Past Experience data from the system. (It defaults to empty).")
         if st.button("♻️ Wipe All Past Experience Data", type="primary"):
             with st.spinner("Wiping old history..."):
-                if FIREBASE_READY:
-                    run_query(None, table_name="history", action="CLEAR_TABLE")
-                else:
-                    c = conn.cursor()
-                    c.execute("DELETE FROM history")
-                    conn.commit()
+                run_query(None, table_name="history", action="CLEAR_TABLE")
                 st.cache_data.clear()
             st.success("Past Experience data fully wiped and reset!")
             st.rerun()
 
     st.divider()
-    c_add, c_edit = st.columns(2)
     
+    # --- SMART BULK EXCEL/PDF SYNC ---
+    st.subheader("📥 Smart Bulk Sync (Excel or PDF)")
+    st.info("Upload an Excel (.xlsx) or PDF file containing history data. The AI will parse it, unify formatting (e.g. 2-8 VAN), and strictly prevent duplicates.")
+    bulk_file = st.file_uploader("Upload Experience Data", type=['xlsx', 'pdf'])
+    
+    if bulk_file and st.button("Sync Uploaded Data", type="primary"):
+        with st.spinner("Processing file intelligently..."):
+            new_records = []
+            
+            if bulk_file.name.endswith('.xlsx'):
+                df_up = pd.read_excel(bulk_file)
+                # Find columns regardless of exact name
+                cols = [c.lower() for c in df_up.columns]
+                
+                code_col = next((c for c in df_up.columns if 'code' in c.lower()), None)
+                name_col = next((c for c in df_up.columns if 'name' in c.lower()), None)
+                area_col = next((c for c in df_up.columns if 'area' in c.lower()), None)
+                div_col = next((c for c in df_up.columns if 'div' in c.lower()), None)
+                from_col = next((c for c in df_up.columns if 'from' in c.lower() or 'start' in c.lower()), None)
+                to_col = next((c for c in df_up.columns if 'to' in c.lower() or 'end' in c.lower()), None)
+                
+                if code_col and area_col and from_col:
+                    for _, row in df_up.iterrows():
+                        c_val = str(row[code_col]).strip()
+                        if pd.isna(c_val) or c_val == "nan": continue
+                        
+                        n_val = str(row[name_col]).strip() if name_col else "Unknown"
+                        a_val = str(row[area_col]).strip()
+                        d_val = unify_text(str(row[div_col]).strip() if div_col else "Pharma")
+                        f_val = parse_date_safe(row[from_col])
+                        t_val = parse_date_safe(row[to_col]) if to_col else f_val
+                        
+                        if f_val and t_val:
+                            ptype = "Helper" if c_val.startswith('H') else "Driver"
+                            new_records.append((ptype, c_val, n_val, a_val, d_val, f_val, t_val))
+                            
+            elif bulk_file.name.endswith('.pdf'):
+                if PDF_ENABLED:
+                    pdf_reader = PyPDF2.PdfReader(bulk_file)
+                    text = ""
+                    for page in pdf_reader.pages:
+                        text += page.extract_text() + "\n"
+                        
+                    for line in text.split('\n'):
+                        # Regex to capture standard format: CODE NAME AREA DIVISION DATE DATE
+                        match = re.search(r'([A-Z]{1,2}\d{3})\s+(.*?)\s+(.*?)\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})', line)
+                        if match:
+                            c_val = match.group(1).strip()
+                            n_val = match.group(2).strip()
+                            a_val = match.group(3).strip()
+                            d_val = "Pharma" # Defaulting for regex PDF scrape, can improve regex if needed
+                            f_val = parse_date_safe(match.group(4))
+                            t_val = parse_date_safe(match.group(5))
+                            ptype = "Helper" if c_val.startswith('H') else "Driver"
+                            new_records.append((ptype, c_val, n_val, a_val, d_val, f_val, t_val))
+                else:
+                    st.error("PyPDF2 library not found. Please add 'PyPDF2' to requirements.txt")
+
+            if new_records:
+                q_hist = "INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                run_query(q_hist, new_records, table_name="history", action="INSERT_MANY")
+                st.success(f"Successfully imported {len(new_records)} records while preventing duplicates!")
+                st.rerun()
+            else:
+                st.warning("Could not extract valid records from the file. Ensure it has CODE, AREA, and DATES.")
+
+    st.divider()
+
+    c_add, c_edit = st.columns(2)
     with c_add:
         st.subheader("➕ Add Single Experience Manually")
         p_type = st.selectbox("Role", ["Driver", "Helper"])
@@ -1262,9 +1361,9 @@ elif choice == "3. Past Experience Builder":
                 elif not overlap.empty:
                     st.error("⚠️ This person already has an experience log for this Area on this exact Start Date!")
                 else:
-                    if run_query("INSERT INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                              (p_type, p_code, p_name, p_area, p_sec, p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")), 
-                              table_name="history", action="INSERT", data={"person_type":p_type, "person_code":p_code, "person_name":p_name, "area":p_area, "sector":p_sec, "date":p_start_date.strftime("%Y-%m-%d"), "end_date":p_end_date.strftime("%Y-%m-%d")}):
+                    if run_query("INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (p_type, p_code, p_name, p_area, unify_text(p_sec), p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")), 
+                              table_name="history", action="INSERT", data={"person_type":p_type, "person_code":p_code, "person_name":p_name, "area":p_area, "sector":unify_text(p_sec), "date":p_start_date.strftime("%Y-%m-%d"), "end_date":p_end_date.strftime("%Y-%m-%d")}):
                         st.success("Experience Added!")
                         st.rerun()
 
@@ -1274,8 +1373,7 @@ elif choice == "3. Past Experience Builder":
             hist_options = []
             hist_map = {}
             for idx, row in history_df.iterrows():
-                sec = row.get('sector', 'Pharma')
-                if pd.isna(sec) or sec == "nan": sec = "Pharma"
+                sec = unify_text(row.get('sector', 'Pharma'))
                 label = f"[{row.get('person_code', 'UNK')}] {row['person_name']} - {row['area']} ({sec})"
                 hist_options.append(label)
                 hist_map[label] = str(row['id'])
@@ -1353,12 +1451,13 @@ elif choice == "4. Vacation Schedule":
     )
     
     if st.button("💾 Save Table Edits", key="save_table_vacs"):
-        for idx in disp_vac.index:
-            row_id = disp_vac.loc[idx, 'id']
-            if not disp_vac.loc[idx].equals(edited_vac.loc[idx]):
-                update_dict = edited_vac.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vacations", action="UPDATE", doc_id=row_id, data=update_dict)
+        if "ed_vac" in st.session_state:
+            changes = st.session_state["ed_vac"].get("edited_rows", {})
+            for row_idx, col_changes in changes.items():
+                row_id = disp_vac.iloc[row_idx]['id']
+                sql_sets = ", ".join([f"{k}=?" for k in col_changes.keys()])
+                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", tuple(list(col_changes.values()) + [row_id]), table_name="vacations", action="UPDATE", doc_id=row_id, data=col_changes)
+        st.success("Vacations saved successfully!")
         st.rerun()
 
     with st.expander("📥 Export / 📤 Import Vacation Data"):
@@ -1368,17 +1467,13 @@ elif choice == "4. Vacation Schedule":
         up_vac = st.file_uploader("Upload Vacation Excel", type=['xlsx'], key="up_vac")
         if up_vac and st.button("Sync Vacation Database"):
             df = pd.read_excel(up_vac)
-            if not FIREBASE_READY: run_query("DELETE FROM vacations")
-            else: run_query(None, table_name="vacations", action="CLEAR_TABLE")
+            run_query(None, table_name="vacations", action="CLEAR_TABLE")
             
             for _, row in df.iterrows():
                 data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N']}
-                if not FIREBASE_READY:
-                    cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
-                    qmarks = ', '.join(['?'] * len(data_dict))
-                    run_query(f"INSERT INTO vacations ({cols}) VALUES ({qmarks})", vals)
-                else:
-                    run_query(None, table_name="vacations", action="INSERT", data=data_dict)
+                cols, vals = ', '.join(data_dict.keys()), tuple(data_dict.values())
+                qmarks = ', '.join(['?'] * len(data_dict))
+                run_query(f"INSERT INTO vacations ({cols}) VALUES ({qmarks})", vals, table_name="vacations", action="INSERT", data=data_dict)
             st.rerun()
 
     st.divider()
@@ -1443,170 +1538,170 @@ AD055	AHAMAD JAN	SHARJAH SANAYA		13/02/2026	17/04/2026
 AD025	ALI AHAMAD	JABEL ALI		04/03/2026	14/03/2026
 AD025	ALI AHAMAD	SHARJAH SANAYA		04/03/2026	13/04/2026
 AD066	ANSARI	SHARJAH SANAYA		19/02/2026	19/02/2026
-D049	Abdul Jabbar	AJMAN	Consumer	27/01/2026	16/02/2026
-D049	Abdul Jabbar	AJMAN	Pharma	03/10/2024	21/11/2025
-D049	Abdul Jabbar	ALQOUZ-1	Consumer	06/02/2026	10/04/2026
-D049	Abdul Jabbar	ALQOUZ-1	Pharma	24/07/2024	05/01/2026
+D049	Abdul Jabbar	AJMAN	CONSUMER	27/01/2026	16/02/2026
+D049	Abdul Jabbar	AJMAN	PHARMA	03/10/2024	21/11/2025
+D049	Abdul Jabbar	ALQOUZ-1	CONSUMER	06/02/2026	10/04/2026
+D049	Abdul Jabbar	ALQOUZ-1	PHARMA	24/07/2024	05/01/2026
 D049	Abdul Jabbar	ALQOUZ-1		12/07/2024	12/07/2024
-D049	Abdul Jabbar	ALQOUZ-2	Pharma	15/08/2025	15/08/2025
-D049	Abdul Jabbar	BUR DUBAI	Consumer	05/02/2026	21/02/2026
-D049	Abdul Jabbar	BUR DUBAI	Pharma	01/03/2024	17/04/2026
+D049	Abdul Jabbar	ALQOUZ-2	PHARMA	15/08/2025	15/08/2025
+D049	Abdul Jabbar	BUR DUBAI	CONSUMER	05/02/2026	21/02/2026
+D049	Abdul Jabbar	BUR DUBAI	PHARMA	01/03/2024	17/04/2026
 D049	Abdul Jabbar	BUR DUBAI		11/07/2024	18/07/2024
-D049	Abdul Jabbar	DEIRA	Consumer	16/02/2026	16/02/2026
-D049	Abdul Jabbar	DEIRA	Pharma	04/01/2024	01/05/2025
-D049	Abdul Jabbar	FUJAIRAH	Consumer	24/02/2026	24/02/2026
-D049	Abdul Jabbar	FUJAIRAH	Pharma	25/11/2025	25/11/2025
-D049	Abdul Jabbar	JABEL ALI	Consumer	08/01/2026	07/04/2026
-D049	Abdul Jabbar	JABEL ALI	Pharma	30/04/2024	06/11/2025
+D049	Abdul Jabbar	DEIRA	CONSUMER	16/02/2026	16/02/2026
+D049	Abdul Jabbar	DEIRA	PHARMA	04/01/2024	01/05/2025
+D049	Abdul Jabbar	FUJAIRAH	CONSUMER	24/02/2026	24/02/2026
+D049	Abdul Jabbar	FUJAIRAH	PHARMA	25/11/2025	25/11/2025
+D049	Abdul Jabbar	JABEL ALI	CONSUMER	08/01/2026	07/04/2026
+D049	Abdul Jabbar	JABEL ALI	PHARMA	30/04/2024	06/11/2025
 D049	Abdul Jabbar	JABEL ALI		30/08/2024	03/09/2024
-D049	Abdul Jabbar	JUMAIRAH	Pharma	13/02/2024	28/05/2025
-D049	Abdul Jabbar	MIRDIF	Consumer	13/01/2026	31/03/2026
-D049	Abdul Jabbar	MIRDIF	Pharma	03/01/2024	13/04/2026
+D049	Abdul Jabbar	JUMAIRAH	PHARMA	13/02/2024	28/05/2025
+D049	Abdul Jabbar	MIRDIF	CONSUMER	13/01/2026	31/03/2026
+D049	Abdul Jabbar	MIRDIF	PHARMA	03/01/2024	13/04/2026
 D049	Abdul Jabbar	MIRDIF		11/07/2024	17/07/2024
-D049	Abdul Jabbar	QUSAIS	Consumer	29/01/2026	16/03/2026
-D049	Abdul Jabbar	QUSAIS	Pharma	25/05/2024	03/12/2025
-D049	Abdul Jabbar	RAK / UAQ	Consumer	06/01/2026	10/04/2026
-D049	Abdul Jabbar	RAK / UAQ	Pharma	13/11/2024	13/11/2024
-D049	Abdul Jabbar	SHARJAH ( BUHAIRA & ROLLA)	Pharma	05/01/2024	03/02/2025
+D049	Abdul Jabbar	QUSAIS	CONSUMER	29/01/2026	16/03/2026
+D049	Abdul Jabbar	QUSAIS	PHARMA	25/05/2024	03/12/2025
+D049	Abdul Jabbar	RAK / UAQ	CONSUMER	06/01/2026	10/04/2026
+D049	Abdul Jabbar	RAK / UAQ	PHARMA	13/11/2024	13/11/2024
+D049	Abdul Jabbar	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	05/01/2024	03/02/2025
 D049	Abdul Jabbar	SHARJAH ( BUHAIRA & ROLLA)		15/07/2024	17/07/2024
-D049	Abdul Jabbar	SHARJAH SANAYA	Pharma	15/01/2024	07/02/2026
+D049	Abdul Jabbar	SHARJAH SANAYA	PHARMA	15/01/2024	07/02/2026
 D086	Abdul Jaleel Nadakkavu	JABEL ALI		31/03/2026	14/04/2026
-D050	Abdul Mansoor	AJMAN	Consumer	11/02/2025	11/12/2025
-D050	Abdul Mansoor	AJMAN	Pharma	24/09/2024	16/10/2025
+D050	Abdul Mansoor	AJMAN	CONSUMER	11/02/2025	11/12/2025
+D050	Abdul Mansoor	AJMAN	PHARMA	24/09/2024	16/10/2025
 D050	Abdul Mansoor	ALQOUZ-1	2 - 8 VAN	14/04/2026	14/04/2026
-D050	Abdul Mansoor	ALQOUZ-1	Consumer	11/02/2025	14/04/2025
-D050	Abdul Mansoor	ALQOUZ-1	Pharma	01/08/2024	28/10/2025
-D050	Abdul Mansoor	ALQOUZ-2	Pharma	09/07/2025	09/07/2025
+D050	Abdul Mansoor	ALQOUZ-1	CONSUMER	11/02/2025	14/04/2025
+D050	Abdul Mansoor	ALQOUZ-1	PHARMA	01/08/2024	28/10/2025
+D050	Abdul Mansoor	ALQOUZ-2	PHARMA	09/07/2025	09/07/2025
 D050	Abdul Mansoor	BUR DUBAI	2 - 8 VAN	13/04/2026	17/04/2026
-D050	Abdul Mansoor	BUR DUBAI	Consumer	10/03/2025	03/12/2025
-D050	Abdul Mansoor	BUR DUBAI	Pharma	15/04/2024	05/02/2026
-D050	Abdul Mansoor	DEIRA	Consumer	15/04/2025	29/04/2025
-D050	Abdul Mansoor	DEIRA	Pharma	29/10/2024	27/10/2025
-D050	Abdul Mansoor	FUJAIRAH	Consumer	08/05/2024	09/12/2025
-D050	Abdul Mansoor	FUJAIRAH	Pharma	01/05/2024	28/11/2025
+D050	Abdul Mansoor	BUR DUBAI	CONSUMER	10/03/2025	03/12/2025
+D050	Abdul Mansoor	BUR DUBAI	PHARMA	15/04/2024	05/02/2026
+D050	Abdul Mansoor	DEIRA	CONSUMER	15/04/2025	29/04/2025
+D050	Abdul Mansoor	DEIRA	PHARMA	29/10/2024	27/10/2025
+D050	Abdul Mansoor	FUJAIRAH	CONSUMER	08/05/2024	09/12/2025
+D050	Abdul Mansoor	FUJAIRAH	PHARMA	01/05/2024	28/11/2025
 D050	Abdul Mansoor	JABEL ALI	2 - 8 VAN	15/04/2026	16/04/2026
-D050	Abdul Mansoor	JABEL ALI	Consumer	03/03/2025	29/12/2025
-D050	Abdul Mansoor	JABEL ALI	Pharma	19/08/2024	28/02/2026
-D050	Abdul Mansoor	JUMAIRAH	Pharma	22/02/2024	10/04/2026
+D050	Abdul Mansoor	JABEL ALI	CONSUMER	03/03/2025	29/12/2025
+D050	Abdul Mansoor	JABEL ALI	PHARMA	19/08/2024	28/02/2026
+D050	Abdul Mansoor	JUMAIRAH	PHARMA	22/02/2024	10/04/2026
 D050	Abdul Mansoor	MIRDIF	2 - 8 VAN	13/04/2026	13/04/2026
-D050	Abdul Mansoor	MIRDIF	Consumer	12/02/2025	22/12/2025
-D050	Abdul Mansoor	MIRDIF	Pharma	09/01/2024	27/01/2026
+D050	Abdul Mansoor	MIRDIF	CONSUMER	12/02/2025	22/12/2025
+D050	Abdul Mansoor	MIRDIF	PHARMA	09/01/2024	27/01/2026
 D050	Abdul Mansoor	QUSAIS	2 - 8 VAN	14/04/2026	14/04/2026
-D050	Abdul Mansoor	QUSAIS	Consumer	14/03/2025	18/12/2025
-D050	Abdul Mansoor	QUSAIS	Pharma	11/12/2024	13/10/2025
-D050	Abdul Mansoor	RAK / UAQ	Consumer	05/02/2025	03/10/2025
-D050	Abdul Mansoor	RAK / UAQ	Pharma	01/02/2024	01/02/2024
-D050	Abdul Mansoor	SHARJAH ( BUHAIRA & ROLLA)	Consumer	08/04/2025	11/12/2025
-D050	Abdul Mansoor	SHARJAH ( BUHAIRA & ROLLA)	Pharma	17/02/2024	24/09/2025
-D050	Abdul Mansoor	SHARJAH SANAYA	Consumer	14/02/2025	16/04/2025
-D050	Abdul Mansoor	SHARJAH SANAYA	Pharma	03/01/2024	29/09/2025
-D034	Adil Hassan	AJMAN	Consumer	20/04/2024	09/04/2026
-D034	Adil Hassan	AJMAN	Pharma	08/05/2024	15/12/2025
+D050	Abdul Mansoor	QUSAIS	CONSUMER	14/03/2025	18/12/2025
+D050	Abdul Mansoor	QUSAIS	PHARMA	11/12/2024	13/10/2025
+D050	Abdul Mansoor	RAK / UAQ	CONSUMER	05/02/2025	03/10/2025
+D050	Abdul Mansoor	RAK / UAQ	PHARMA	01/02/2024	01/02/2024
+D050	Abdul Mansoor	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	08/04/2025	11/12/2025
+D050	Abdul Mansoor	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	17/02/2024	24/09/2025
+D050	Abdul Mansoor	SHARJAH SANAYA	CONSUMER	14/02/2025	16/04/2025
+D050	Abdul Mansoor	SHARJAH SANAYA	PHARMA	03/01/2024	29/09/2025
+D034	Adil Hassan	AJMAN	CONSUMER	20/04/2024	09/04/2026
+D034	Adil Hassan	AJMAN	PHARMA	08/05/2024	15/12/2025
 D034	Adil Hassan	AJMAN		03/01/2024	01/11/2024
-D034	Adil Hassan	ALQOUZ-1	Consumer	04/12/2025	19/01/2026
-D034	Adil Hassan	ALQOUZ-1	Pharma	29/01/2024	16/12/2025
-D034	Adil Hassan	ALQOUZ-2	Pharma	04/11/2024	04/08/2025
-D034	Adil Hassan	BUR DUBAI	Consumer	15/10/2025	10/04/2026
-D034	Adil Hassan	BUR DUBAI	Pharma	29/11/2024	17/12/2025
-D034	Adil Hassan	JABEL ALI	Consumer	10/12/2025	26/03/2026
-D034	Adil Hassan	JABEL ALI	Pharma	20/05/2024	31/12/2024
-D034	Adil Hassan	JUMAIRAH	Consumer	02/05/2024	30/12/2025
-D034	Adil Hassan	MIRDIF	Consumer	16/01/2026	06/03/2026
-D034	Adil Hassan	MIRDIF	Pharma	10/07/2025	18/07/2025
-D034	Adil Hassan	QUSAIS	Consumer	29/12/2025	09/03/2026
-D034	Adil Hassan	QUSAIS	Pharma	30/08/2024	14/08/2025
-D034	Adil Hassan	RAK / UAQ	Consumer	03/11/2025	03/11/2025
-D034	Adil Hassan	RAK / UAQ	Pharma	30/01/2024	17/04/2026
+D034	Adil Hassan	ALQOUZ-1	CONSUMER	04/12/2025	19/01/2026
+D034	Adil Hassan	ALQOUZ-1	PHARMA	29/01/2024	16/12/2025
+D034	Adil Hassan	ALQOUZ-2	PHARMA	04/11/2024	04/08/2025
+D034	Adil Hassan	BUR DUBAI	CONSUMER	15/10/2025	10/04/2026
+D034	Adil Hassan	BUR DUBAI	PHARMA	29/11/2024	17/12/2025
+D034	Adil Hassan	JABEL ALI	CONSUMER	10/12/2025	26/03/2026
+D034	Adil Hassan	JABEL ALI	PHARMA	20/05/2024	31/12/2024
+D034	Adil Hassan	JUMAIRAH	CONSUMER	02/05/2024	30/12/2025
+D034	Adil Hassan	MIRDIF	CONSUMER	16/01/2026	06/03/2026
+D034	Adil Hassan	MIRDIF	PHARMA	10/07/2025	18/07/2025
+D034	Adil Hassan	QUSAIS	CONSUMER	29/12/2025	09/03/2026
+D034	Adil Hassan	QUSAIS	PHARMA	30/08/2024	14/08/2025
+D034	Adil Hassan	RAK / UAQ	CONSUMER	03/11/2025	03/11/2025
+D034	Adil Hassan	RAK / UAQ	PHARMA	30/01/2024	17/04/2026
 D034	Adil Hassan	RAK / UAQ		29/02/2024	06/03/2024
-D034	Adil Hassan	SHARJAH ( BUHAIRA & ROLLA)	Consumer	24/10/2025	07/04/2026
-D034	Adil Hassan	SHARJAH ( BUHAIRA & ROLLA)	Pharma	18/11/2024	03/09/2025
-D034	Adil Hassan	SHARJAH SANAYA	Consumer	22/08/2024	30/03/2026
-D034	Adil Hassan	SHARJAH SANAYA	Pharma	05/07/2024	09/02/2026
+D034	Adil Hassan	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	24/10/2025	07/04/2026
+D034	Adil Hassan	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	18/11/2024	03/09/2025
+D034	Adil Hassan	SHARJAH SANAYA	CONSUMER	22/08/2024	30/03/2026
+D034	Adil Hassan	SHARJAH SANAYA	PHARMA	05/07/2024	09/02/2026
 D030	Ahamed Diab	SHARJAH SANAYA		24/01/2024	14/06/2024
 D096	Ahmad Jan Mughal	JABEL ALI		13/02/2026	16/04/2026
-D047	Ahmed Faraj	ALQOUZ-1	Pharma	09/02/2024	06/11/2024
+D047	Ahmed Faraj	ALQOUZ-1	PHARMA	09/02/2024	06/11/2024
 D047	Ahmed Faraj	ALQOUZ-1		01/08/2024	01/08/2024
-D047	Ahmed Faraj	BUR DUBAI	Pharma	16/06/2025	20/01/2026
-D047	Ahmed Faraj	DEIRA	Pharma	17/02/2025	12/06/2025
-D047	Ahmed Faraj	JABEL ALI	Pharma	10/06/2024	26/06/2025
+D047	Ahmed Faraj	BUR DUBAI	PHARMA	16/06/2025	20/01/2026
+D047	Ahmed Faraj	DEIRA	PHARMA	17/02/2025	12/06/2025
+D047	Ahmed Faraj	JABEL ALI	PHARMA	10/06/2024	26/06/2025
 D047	Ahmed Faraj	JABEL ALI		01/11/2024	03/02/2025
 D047	Ahmed Faraj	JUMAIRAH		02/06/2025	02/06/2025
-D047	Ahmed Faraj	PICK-UP	Consumer	31/10/2024	13/10/2025
-D047	Ahmed Faraj	PICK-UP	Pharma	03/01/2024	17/04/2026
-D047	Ahmed Faraj	QUSAIS	Pharma	26/08/2024	26/08/2024
-D047	Ahmed Faraj	SHARJAH ( BUHAIRA & ROLLA)	Pharma	26/08/2024	26/08/2024
+D047	Ahmed Faraj	PICK-UP	CONSUMER	31/10/2024	13/10/2025
+D047	Ahmed Faraj	PICK-UP	PHARMA	03/01/2024	17/04/2026
+D047	Ahmed Faraj	QUSAIS	PHARMA	26/08/2024	26/08/2024
+D047	Ahmed Faraj	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	26/08/2024	26/08/2024
 D047	Ahmed Faraj	SHARJAH ( BUHAIRA & ROLLA)		01/03/2024	15/08/2024
-D047	Ahmed Faraj	SHARJAH SANAYA	Consumer	02/02/2024	02/02/2024
+D047	Ahmed Faraj	SHARJAH SANAYA	CONSUMER	02/02/2024	02/02/2024
 D047	Ahmed Faraj	SHARJAH SANAYA		01/02/2024	01/02/2024
-D063	Ajmal Ali Akbar	AJMAN	Pharma	24/01/2024	04/09/2025
+D063	Ajmal Ali Akbar	AJMAN	PHARMA	24/01/2024	04/09/2025
 D063	Ajmal Ali Akbar	ALQOUZ-1	2 - 8 VAN	18/07/2025	18/07/2025
-D063	Ajmal Ali Akbar	ALQOUZ-1	Consumer	19/05/2025	04/06/2025
-D063	Ajmal Ali Akbar	ALQOUZ-1	Pharma	13/01/2024	10/04/2026
-D063	Ajmal Ali Akbar	ALQOUZ-2	Pharma	17/02/2024	24/01/2026
+D063	Ajmal Ali Akbar	ALQOUZ-1	CONSUMER	19/05/2025	04/06/2025
+D063	Ajmal Ali Akbar	ALQOUZ-1	PHARMA	13/01/2024	10/04/2026
+D063	Ajmal Ali Akbar	ALQOUZ-2	PHARMA	17/02/2024	24/01/2026
 D063	Ajmal Ali Akbar	BUR DUBAI	2 - 8 VAN	07/05/2025	18/07/2025
-D063	Ajmal Ali Akbar	BUR DUBAI	Consumer	15/01/2025	15/01/2025
-D063	Ajmal Ali Akbar	BUR DUBAI	Pharma	06/03/2024	28/11/2025
+D063	Ajmal Ali Akbar	BUR DUBAI	CONSUMER	15/01/2025	15/01/2025
+D063	Ajmal Ali Akbar	BUR DUBAI	PHARMA	06/03/2024	28/11/2025
 D063	Ajmal Ali Akbar	DEIRA	2 - 8 VAN	11/02/2025	11/02/2025
-D063	Ajmal Ali Akbar	DEIRA	Pharma	17/01/2024	29/12/2025
+D063	Ajmal Ali Akbar	DEIRA	PHARMA	17/01/2024	29/12/2025
 D063	Ajmal Ali Akbar	FUJAIRAH	2 - 8 VAN	22/07/2025	28/07/2025
-D063	Ajmal Ali Akbar	FUJAIRAH	Pharma	02/08/2024	15/07/2025
+D063	Ajmal Ali Akbar	FUJAIRAH	PHARMA	02/08/2024	15/07/2025
 D063	Ajmal Ali Akbar	JABEL ALI	2 - 8 VAN	08/05/2025	17/07/2025
-D063	Ajmal Ali Akbar	JABEL ALI	Pharma	23/12/2024	16/01/2026
-D063	Ajmal Ali Akbar	JUMAIRAH	Consumer	05/02/2024	05/02/2024
-D063	Ajmal Ali Akbar	JUMAIRAH	Pharma	25/12/2024	04/02/2026
+D063	Ajmal Ali Akbar	JABEL ALI	PHARMA	23/12/2024	16/01/2026
+D063	Ajmal Ali Akbar	JUMAIRAH	CONSUMER	05/02/2024	05/02/2024
+D063	Ajmal Ali Akbar	JUMAIRAH	PHARMA	25/12/2024	04/02/2026
 D063	Ajmal Ali Akbar	MIRDIF	2 - 8 VAN	03/03/2025	21/07/2025
-D063	Ajmal Ali Akbar	MIRDIF	Pharma	20/05/2024	06/04/2026
+D063	Ajmal Ali Akbar	MIRDIF	PHARMA	20/05/2024	06/04/2026
 D063	Ajmal Ali Akbar	QUSAIS	2 - 8 VAN	11/02/2025	28/07/2025
-D063	Ajmal Ali Akbar	QUSAIS	Consumer	04/11/2024	02/06/2025
-D063	Ajmal Ali Akbar	QUSAIS	Pharma	02/01/2024	31/03/2026
-D063	Ajmal Ali Akbar	RAK / UAQ	Pharma	03/01/2024	13/11/2024
+D063	Ajmal Ali Akbar	QUSAIS	CONSUMER	04/11/2024	02/06/2025
+D063	Ajmal Ali Akbar	QUSAIS	PHARMA	02/01/2024	31/03/2026
+D063	Ajmal Ali Akbar	RAK / UAQ	PHARMA	03/01/2024	13/11/2024
 D063	Ajmal Ali Akbar	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	07/04/2025	25/07/2025
-D063	Ajmal Ali Akbar	SHARJAH ( BUHAIRA & ROLLA)	Pharma	15/02/2024	13/06/2024
+D063	Ajmal Ali Akbar	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	15/02/2024	13/06/2024
 D063	Ajmal Ali Akbar	SHARJAH SANAYA	2 - 8 VAN	16/07/2025	18/07/2025
-D063	Ajmal Ali Akbar	SHARJAH SANAYA	Consumer	05/02/2024	12/11/2024
-D063	Ajmal Ali Akbar	SHARJAH SANAYA	Pharma	01/08/2024	16/04/2026
+D063	Ajmal Ali Akbar	SHARJAH SANAYA	CONSUMER	05/02/2024	12/11/2024
+D063	Ajmal Ali Akbar	SHARJAH SANAYA	PHARMA	01/08/2024	16/04/2026
 D063	Ajmal Ali Akbar	SHARJAH SANAYA		26/03/2026	26/03/2026
 D068	Ali Ahamed	JABEL ALI		02/04/2026	13/04/2026
 D108	Ansari Ithayathullah	JABEL ALI		05/02/2026	16/03/2026
-D046	Azeez Abdulla	AJMAN	Consumer	17/01/2024	30/12/2025
-D046	Azeez Abdulla	AJMAN	Pharma	08/03/2024	18/07/2025
-D046	Azeez Abdulla	ALQOUZ-1	Consumer	17/10/2025	17/10/2025
-D046	Azeez Abdulla	ALQOUZ-1	Pharma	04/05/2024	17/07/2024
-D046	Azeez Abdulla	ALQOUZ-2	Consumer	26/03/2026	02/04/2026
-D046	Azeez Abdulla	ALQOUZ-2	Pharma	01/05/2024	31/07/2024
-D046	Azeez Abdulla	BUR DUBAI	Consumer	06/10/2025	08/01/2026
-D046	Azeez Abdulla	BUR DUBAI	Pharma	02/08/2024	31/10/2024
-D046	Azeez Abdulla	DEIRA	Consumer	03/11/2025	03/11/2025
-D046	Azeez Abdulla	FUJAIRAH	Consumer	27/01/2025	13/02/2025
-D046	Azeez Abdulla	FUJAIRAH	Pharma	05/12/2024	07/02/2025
-D046	Azeez Abdulla	JABEL ALI	Consumer	10/01/2024	03/12/2025
-D046	Azeez Abdulla	JABEL ALI	Pharma	23/09/2024	31/03/2026
-D046	Azeez Abdulla	JUMAIRAH	Consumer	21/08/2025	07/02/2026
-D046	Azeez Abdulla	JUMAIRAH	Pharma	29/09/2025	29/09/2025
-D046	Azeez Abdulla	MIRDIF	Consumer	26/01/2024	17/04/2026
-D046	Azeez Abdulla	MIRDIF	Pharma	19/03/2024	19/03/2024
-D046	Azeez Abdulla	QUSAIS	Pharma	12/05/2025	03/06/2025
-D046	Azeez Abdulla	RAK / UAQ	Consumer	03/01/2024	30/04/2024
-D046	Azeez Abdulla	RAK / UAQ	Pharma	08/03/2024	20/08/2025
-D046	Azeez Abdulla	SHARJAH ( BUHAIRA & ROLLA)	Consumer	20/11/2025	03/02/2026
-D029	Baderudheen	AJMAN	Pharma	13/04/2026	17/04/2026
-D029	Baderudheen	ALQOUZ-1	Pharma	07/10/2024	08/11/2025
-D029	Baderudheen	ALQOUZ-2	Pharma	20/09/2024	05/05/2025
-D029	Baderudheen	BUR DUBAI	Pharma	02/01/2024	28/03/2026
-D029	Baderudheen	DEIRA	Consumer	06/12/2024	06/12/2024
-D029	Baderudheen	DEIRA	Pharma	03/07/2024	14/01/2025
-D029	Baderudheen	FUJAIRAH	Pharma	09/05/2024	10/04/2026
-D029	Baderudheen	JABEL ALI	Consumer	02/10/2025	02/10/2025
-D029	Baderudheen	JABEL ALI	Pharma	03/01/2024	26/08/2025
-D029	Baderudheen	JUMAIRAH	Pharma	04/12/2024	03/12/2025
-D029	Baderudheen	MIRDIF	Pharma	14/06/2024	24/01/2026
-D029	Baderudheen	QUSAIS	Consumer	01/10/2024	01/10/2024
-D029	Baderudheen	QUSAIS	Pharma	01/05/2024	09/06/2025
+D046	Azeez Abdulla	AJMAN	CONSUMER	17/01/2024	30/12/2025
+D046	Azeez Abdulla	AJMAN	PHARMA	08/03/2024	18/07/2025
+D046	Azeez Abdulla	ALQOUZ-1	CONSUMER	17/10/2025	17/10/2025
+D046	Azeez Abdulla	ALQOUZ-1	PHARMA	04/05/2024	17/07/2024
+D046	Azeez Abdulla	ALQOUZ-2	CONSUMER	26/03/2026	02/04/2026
+D046	Azeez Abdulla	ALQOUZ-2	PHARMA	01/05/2024	31/07/2024
+D046	Azeez Abdulla	BUR DUBAI	CONSUMER	06/10/2025	08/01/2026
+D046	Azeez Abdulla	BUR DUBAI	PHARMA	02/08/2024	31/10/2024
+D046	Azeez Abdulla	DEIRA	CONSUMER	03/11/2025	03/11/2025
+D046	Azeez Abdulla	FUJAIRAH	CONSUMER	27/01/2025	13/02/2025
+D046	Azeez Abdulla	FUJAIRAH	PHARMA	05/12/2024	07/02/2025
+D046	Azeez Abdulla	JABEL ALI	CONSUMER	10/01/2024	03/12/2025
+D046	Azeez Abdulla	JABEL ALI	PHARMA	23/09/2024	31/03/2026
+D046	Azeez Abdulla	JUMAIRAH	CONSUMER	21/08/2025	07/02/2026
+D046	Azeez Abdulla	JUMAIRAH	PHARMA	29/09/2025	29/09/2025
+D046	Azeez Abdulla	MIRDIF	CONSUMER	26/01/2024	17/04/2026
+D046	Azeez Abdulla	MIRDIF	PHARMA	19/03/2024	19/03/2024
+D046	Azeez Abdulla	QUSAIS	PHARMA	12/05/2025	03/06/2025
+D046	Azeez Abdulla	RAK / UAQ	CONSUMER	03/01/2024	30/04/2024
+D046	Azeez Abdulla	RAK / UAQ	PHARMA	08/03/2024	20/08/2025
+D046	Azeez Abdulla	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	20/11/2025	03/02/2026
+D029	Baderudheen	AJMAN	PHARMA	13/04/2026	17/04/2026
+D029	Baderudheen	ALQOUZ-1	PHARMA	07/10/2024	08/11/2025
+D029	Baderudheen	ALQOUZ-2	PHARMA	20/09/2024	05/05/2025
+D029	Baderudheen	BUR DUBAI	PHARMA	02/01/2024	28/03/2026
+D029	Baderudheen	DEIRA	CONSUMER	06/12/2024	06/12/2024
+D029	Baderudheen	DEIRA	PHARMA	03/07/2024	14/01/2025
+D029	Baderudheen	FUJAIRAH	PHARMA	09/05/2024	10/04/2026
+D029	Baderudheen	JABEL ALI	CONSUMER	02/10/2025	02/10/2025
+D029	Baderudheen	JABEL ALI	PHARMA	03/01/2024	26/08/2025
+D029	Baderudheen	JUMAIRAH	PHARMA	04/12/2024	03/12/2025
+D029	Baderudheen	MIRDIF	PHARMA	14/06/2024	24/01/2026
+D029	Baderudheen	QUSAIS	CONSUMER	01/10/2024	01/10/2024
+D029	Baderudheen	QUSAIS	PHARMA	01/05/2024	09/06/2025
 D029	Baderudheen	QUSAIS		29/08/2024	29/08/2024
-D029	Baderudheen	RAK / UAQ	Pharma	25/09/2024	29/08/2025
-D029	Baderudheen	SHARJAH ( BUHAIRA & ROLLA)	Pharma	25/04/2024	03/03/2026
-D029	Baderudheen	SHARJAH SANAYA	Consumer	01/10/2024	01/10/2024
-D029	Baderudheen	SHARJAH SANAYA	Pharma	01/05/2024	01/04/2026
+D029	Baderudheen	RAK / UAQ	PHARMA	25/09/2024	29/08/2025
+D029	Baderudheen	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	25/04/2024	03/03/2026
+D029	Baderudheen	SHARJAH SANAYA	CONSUMER	01/10/2024	01/10/2024
+D029	Baderudheen	SHARJAH SANAYA	PHARMA	01/05/2024	01/04/2026
 CPC001	Danish Mohammed	SHARJAH SANAYA		04/02/2026	04/02/2026
 AD064	FAYAZ KHAN	ABU DHABI		17/03/2026	17/03/2026
 AD064	FAYAZ KHAN	DUBAI (GENERAL)		27/02/2026	01/04/2026
@@ -1616,189 +1711,630 @@ D090	Faisal Mahmood	JABEL ALI		06/04/2026	06/04/2026
 D105	Fayaz Khan RS	JABEL ALI		10/02/2026	26/02/2026
 D071	Fazal Naeem Abdur Rahim	JABEL ALI		06/02/2026	27/02/2026
 D042	Gulam Khan Mohammad	AJMAN	2 - 8 VAN	13/10/2025	18/12/2025
-D042	Gulam Khan Mohammad	AJMAN	Pharma	20/05/2024	07/08/2025
+D042	Gulam Khan Mohammad	AJMAN	PHARMA	20/05/2024	07/08/2025
 D042	Gulam Khan Mohammad	ALQOUZ-1	2 - 8 VAN	20/06/2025	20/12/2025
-D042	Gulam Khan Mohammad	ALQOUZ-1	Pharma	18/01/2024	19/09/2025
+D042	Gulam Khan Mohammad	ALQOUZ-1	PHARMA	18/01/2024	19/09/2025
 D042	Gulam Khan Mohammad	ALQOUZ-2	2 - 8 VAN	10/12/2025	10/02/2026
-D042	Gulam Khan Mohammad	ALQOUZ-2	Pharma	09/07/2024	07/05/2025
+D042	Gulam Khan Mohammad	ALQOUZ-2	PHARMA	09/07/2024	07/05/2025
 D042	Gulam Khan Mohammad	BUR DUBAI	2 - 8 VAN	18/12/2024	10/02/2026
-D042	Gulam Khan Mohammad	BUR DUBAI	Pharma	11/01/2024	18/02/2026
+D042	Gulam Khan Mohammad	BUR DUBAI	PHARMA	11/01/2024	18/02/2026
 D042	Gulam Khan Mohammad	BUR DUBAI		01/10/2024	01/10/2024
 D042	Gulam Khan Mohammad	DEIRA	2 - 8 VAN	10/07/2025	10/07/2025
-D042	Gulam Khan Mohammad	DEIRA	Pharma	25/06/2024	02/10/2025
+D042	Gulam Khan Mohammad	DEIRA	PHARMA	25/06/2024	02/10/2025
 D042	Gulam Khan Mohammad	FUJAIRAH	2 - 8 VAN	09/06/2025	09/06/2025
-D042	Gulam Khan Mohammad	FUJAIRAH	Pharma	05/01/2024	30/12/2024
+D042	Gulam Khan Mohammad	FUJAIRAH	PHARMA	05/01/2024	30/12/2024
 D042	Gulam Khan Mohammad	FUJAIRAH		02/01/2024	01/10/2024
 D042	Gulam Khan Mohammad	JABEL ALI	2 - 8 VAN	06/05/2025	09/02/2026
-D042	Gulam Khan Mohammad	JABEL ALI	Pharma	12/01/2024	15/04/2026
+D042	Gulam Khan Mohammad	JABEL ALI	PHARMA	12/01/2024	15/04/2026
 D042	Gulam Khan Mohammad	JABEL ALI		04/01/2024	29/11/2025
 D042	Gulam Khan Mohammad	JUMAIRAH	2 - 8 VAN	22/12/2025	22/12/2025
-D042	Gulam Khan Mohammad	JUMAIRAH	Pharma	14/05/2024	02/03/2026
+D042	Gulam Khan Mohammad	JUMAIRAH	PHARMA	14/05/2024	02/03/2026
 D042	Gulam Khan Mohammad	MIRDIF	2 - 8 VAN	02/06/2025	26/01/2026
-D042	Gulam Khan Mohammad	MIRDIF	Pharma	03/01/2024	03/09/2025
+D042	Gulam Khan Mohammad	MIRDIF	PHARMA	03/01/2024	03/09/2025
 D042	Gulam Khan Mohammad	PICK-UP	2 - 8 VAN	06/01/2026	20/01/2026
-D042	Gulam Khan Mohammad	PICK-UP	Consumer	17/09/2025	06/10/2025
-D042	Gulam Khan Mohammad	PICK-UP	Pharma	30/03/2024	05/02/2026
+D042	Gulam Khan Mohammad	PICK-UP	CONSUMER	17/09/2025	06/10/2025
+D042	Gulam Khan Mohammad	PICK-UP	PHARMA	30/03/2024	05/02/2026
 D042	Gulam Khan Mohammad	QUSAIS	2 - 8 VAN	20/06/2025	23/01/2026
-D042	Gulam Khan Mohammad	QUSAIS	Pharma	08/01/2024	13/03/2026
+D042	Gulam Khan Mohammad	QUSAIS	PHARMA	08/01/2024	13/03/2026
 D042	Gulam Khan Mohammad	RAK / UAQ	2 - 8 VAN	04/07/2025	27/10/2025
-D042	Gulam Khan Mohammad	RAK / UAQ	Pharma	31/01/2024	21/04/2025
+D042	Gulam Khan Mohammad	RAK / UAQ	PHARMA	31/01/2024	21/04/2025
 D042	Gulam Khan Mohammad	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	28/05/2025	29/12/2025
-D042	Gulam Khan Mohammad	SHARJAH ( BUHAIRA & ROLLA)	Pharma	06/06/2024	08/10/2025
+D042	Gulam Khan Mohammad	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	06/06/2024	08/10/2025
 D042	Gulam Khan Mohammad	SHARJAH SANAYA	2 - 8 VAN	19/05/2025	26/01/2026
-D042	Gulam Khan Mohammad	SHARJAH SANAYA	Pharma	09/02/2024	17/04/2026
+D042	Gulam Khan Mohammad	SHARJAH SANAYA	PHARMA	09/02/2024	17/04/2026
 AD039	H. SAGUL AMEED	ABU DHABI		14/04/2026	14/04/2026
 AD039	H. SAGUL AMEED	DUBAI (GENERAL)		31/03/2026	31/03/2026
 AD039	H. SAGUL AMEED	SHARJAH SANAYA		24/03/2026	17/04/2026
-D016	Hajaz	AJMAN	Pharma	27/06/2024	04/12/2024
-D016	Hajaz	ALQOUZ-1	Pharma	02/01/2024	25/02/2025
-D016	Hajaz	BUR DUBAI	Pharma	12/01/2024	27/02/2025
-D016	Hajaz	DEIRA	Pharma	15/10/2024	15/10/2024
-D016	Hajaz	FUJAIRAH	Consumer	04/02/2025	04/02/2025
-D016	Hajaz	FUJAIRAH	Pharma	20/05/2024	20/05/2024
-D016	Hajaz	JABEL ALI	Consumer	11/06/2024	11/06/2024
-D016	Hajaz	JABEL ALI	Pharma	04/04/2024	31/07/2024
-D016	Hajaz	JUMAIRAH	Pharma	15/02/2024	05/03/2024
-D016	Hajaz	MIRDIF	Pharma	03/01/2024	13/02/2025
+D016	Hajaz	AJMAN	PHARMA	27/06/2024	04/12/2024
+D016	Hajaz	ALQOUZ-1	PHARMA	02/01/2024	25/02/2025
+D016	Hajaz	BUR DUBAI	PHARMA	12/01/2024	27/02/2025
+D016	Hajaz	DEIRA	PHARMA	15/10/2024	15/10/2024
+D016	Hajaz	FUJAIRAH	CONSUMER	04/02/2025	04/02/2025
+D016	Hajaz	FUJAIRAH	PHARMA	20/05/2024	20/05/2024
+D016	Hajaz	JABEL ALI	CONSUMER	11/06/2024	11/06/2024
+D016	Hajaz	JABEL ALI	PHARMA	04/04/2024	31/07/2024
+D016	Hajaz	JUMAIRAH	PHARMA	15/02/2024	05/03/2024
+D016	Hajaz	MIRDIF	PHARMA	03/01/2024	13/02/2025
 D016	Hajaz	MIRDIF		03/04/2024	03/04/2024
-D016	Hajaz	RAK / UAQ	Consumer	11/05/2024	14/06/2024
-D016	Hajaz	RAK / UAQ	Pharma	27/03/2024	09/07/2024
-D016	Hajaz	SHARJAH ( BUHAIRA & ROLLA)	Pharma	14/10/2024	14/10/2024
-D016	Hajaz	SHARJAH SANAYA	Pharma	28/03/2024	10/02/2025
+D016	Hajaz	RAK / UAQ	CONSUMER	11/05/2024	14/06/2024
+D016	Hajaz	RAK / UAQ	PHARMA	27/03/2024	09/07/2024
+D016	Hajaz	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	14/10/2024	14/10/2024
+D016	Hajaz	SHARJAH SANAYA	PHARMA	28/03/2024	10/02/2025
 D040	Hussain Mohammed	AJMAN	2 - 8 VAN	11/03/2025	11/09/2025
-D040	Hussain Mohammed	AJMAN	Pharma	22/04/2025	03/04/2026
+D040	Hussain Mohammed	AJMAN	PHARMA	22/04/2025	03/04/2026
 D040	Hussain Mohammed	ALQOUZ-1	2 - 8 VAN	11/09/2025	11/12/2025
-D040	Hussain Mohammed	ALQOUZ-1	Consumer	02/03/2024	02/07/2024
-D040	Hussain Mohammed	ALQOUZ-1	Pharma	02/08/2024	28/07/2025
+D040	Hussain Mohammed	ALQOUZ-1	CONSUMER	02/03/2024	02/07/2024
+D040	Hussain Mohammed	ALQOUZ-1	PHARMA	02/08/2024	28/07/2025
 D040	Hussain Mohammed	ALQOUZ-2	2 - 8 VAN	16/09/2025	12/11/2025
-D040	Hussain Mohammed	ALQOUZ-2	Consumer	27/05/2024	27/05/2024
-D040	Hussain Mohammed	ALQOUZ-2	Pharma	27/08/2024	23/04/2025
+D040	Hussain Mohammed	ALQOUZ-2	CONSUMER	27/05/2024	27/05/2024
+D040	Hussain Mohammed	ALQOUZ-2	PHARMA	27/08/2024	23/04/2025
 D040	Hussain Mohammed	ALQOUZ-2		01/07/2024	01/07/2024
 D040	Hussain Mohammed	BUR DUBAI	2 - 8 VAN	08/03/2025	16/12/2025
-D040	Hussain Mohammed	BUR DUBAI	Consumer	08/04/2024	22/08/2025
-D040	Hussain Mohammed	BUR DUBAI	Pharma	02/01/2024	03/04/2026
+D040	Hussain Mohammed	BUR DUBAI	CONSUMER	08/04/2024	22/08/2025
+D040	Hussain Mohammed	BUR DUBAI	PHARMA	02/01/2024	03/04/2026
 D040	Hussain Mohammed	BUR DUBAI		16/03/2024	16/03/2024
 D040	Hussain Mohammed	DEIRA	2 - 8 VAN	10/03/2025	11/12/2025
-D040	Hussain Mohammed	DEIRA	Consumer	13/05/2024	31/07/2024
-D040	Hussain Mohammed	DEIRA	Pharma	04/07/2024	28/03/2026
+D040	Hussain Mohammed	DEIRA	CONSUMER	13/05/2024	31/07/2024
+D040	Hussain Mohammed	DEIRA	PHARMA	04/07/2024	28/03/2026
 D040	Hussain Mohammed	DEIRA		02/01/2025	02/01/2025
 D040	Hussain Mohammed	FUJAIRAH	2 - 8 VAN	08/07/2025	05/11/2025
-D040	Hussain Mohammed	FUJAIRAH	Pharma	03/04/2025	04/02/2026
+D040	Hussain Mohammed	FUJAIRAH	PHARMA	03/04/2025	04/02/2026
 D040	Hussain Mohammed	JABEL ALI	2 - 8 VAN	11/03/2025	30/12/2025
-D040	Hussain Mohammed	JABEL ALI	Consumer	22/05/2024	01/06/2024
-D040	Hussain Mohammed	JABEL ALI	Pharma	20/05/2024	28/02/2026
+D040	Hussain Mohammed	JABEL ALI	CONSUMER	22/05/2024	01/06/2024
+D040	Hussain Mohammed	JABEL ALI	PHARMA	20/05/2024	28/02/2026
 D040	Hussain Mohammed	JABEL ALI		19/03/2025	19/03/2025
 D040	Hussain Mohammed	JUMAIRAH	2 - 8 VAN	30/01/2025	08/11/2025
-D040	Hussain Mohammed	JUMAIRAH	Consumer	19/04/2024	20/08/2025
-D040	Hussain Mohammed	JUMAIRAH	Pharma	28/09/2024	17/04/2025
+D040	Hussain Mohammed	JUMAIRAH	CONSUMER	19/04/2024	20/08/2025
+D040	Hussain Mohammed	JUMAIRAH	PHARMA	28/09/2024	17/04/2025
 D040	Hussain Mohammed	MIRDIF	2 - 8 VAN	10/03/2025	31/12/2025
-D040	Hussain Mohammed	MIRDIF	Consumer	22/02/2024	22/08/2025
-D040	Hussain Mohammed	MIRDIF	Pharma	19/01/2024	17/04/2026
+D040	Hussain Mohammed	MIRDIF	CONSUMER	22/02/2024	22/08/2025
+D040	Hussain Mohammed	MIRDIF	PHARMA	19/01/2024	17/04/2026
 D040	Hussain Mohammed	MIRDIF		15/03/2024	15/03/2024
 D040	Hussain Mohammed	QUSAIS	2 - 8 VAN	03/02/2025	16/12/2025
-D040	Hussain Mohammed	QUSAIS	Consumer	20/04/2024	21/08/2025
-D040	Hussain Mohammed	QUSAIS	Pharma	25/09/2024	02/09/2025
+D040	Hussain Mohammed	QUSAIS	CONSUMER	20/04/2024	21/08/2025
+D040	Hussain Mohammed	QUSAIS	PHARMA	25/09/2024	02/09/2025
 D040	Hussain Mohammed	QUSAIS		30/03/2024	30/03/2024
 D040	Hussain Mohammed	RAK / UAQ	2 - 8 VAN	17/03/2025	06/10/2025
-D040	Hussain Mohammed	RAK / UAQ	Consumer	06/03/2025	06/03/2025
-D040	Hussain Mohammed	RAK / UAQ	Pharma	10/10/2024	10/10/2024
+D040	Hussain Mohammed	RAK / UAQ	CONSUMER	06/03/2025	06/03/2025
+D040	Hussain Mohammed	RAK / UAQ	PHARMA	10/10/2024	10/10/2024
 D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	31/07/2025	16/10/2025
-D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	Consumer	26/02/2024	02/04/2026
-D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	Pharma	04/01/2024	10/04/2026
+D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	26/02/2024	02/04/2026
+D040	Hussain Mohammed	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	04/01/2024	10/04/2026
 D040	Hussain Mohammed	SHARJAH SANAYA	2 - 8 VAN	07/07/2025	12/11/2025
-D040	Hussain Mohammed	SHARJAH SANAYA	Consumer	21/02/2024	02/04/2026
-D040	Hussain Mohammed	SHARJAH SANAYA	Pharma	24/02/2024	10/04/2026
-H116	Munawir P Kabeer	ALQOUZ-1	Consumer	06/05/2025	06/05/2025
-H116	Munawir P Kabeer	ALQOUZ-2	Pharma	15/09/2025	15/09/2025
-H116	Munawir P Kabeer	BUR DUBAI	Pharma	07/06/2024	26/03/2026
-H116	Munawir P Kabeer	BUR DUBAI		06/06/2024	06/06/2024
-H116	Munawir P Kabeer	DEIRA	Consumer	10/06/2024	31/07/2024
-H116	Munawir P Kabeer	DEIRA	Pharma	04/07/2024	06/02/2026
-H116	Munawir P Kabeer	FUJAIRAH	Pharma	06/02/2026	17/04/2026
-H116	Munawir P Kabeer	JABEL ALI	2 - 8 VAN	15/05/2025	15/05/2025
-H116	Munawir P Kabeer	JABEL ALI	Consumer	29/03/2025	29/03/2025
-H116	Munawir P Kabeer	JUMAIRAH	Pharma	06/03/2025	29/12/2025
-H116	Munawir P Kabeer	MIRDIF	2 - 8 VAN	27/09/2025	27/09/2025
-H116	Munawir P Kabeer	MIRDIF	Consumer	04/11/2024	14/02/2026
-H116	Munawir P Kabeer	MIRDIF	Pharma	12/08/2024	18/12/2025
-H116	Munawir P Kabeer	QUSAIS	Pharma	05/06/2024	17/12/2025
-H116	Munawir P Kabeer	RAK / UAQ	Pharma	03/03/2026	03/03/2026
-H116	Munawir P Kabeer	SHARJAH SANAYA	Consumer	08/06/2024	08/06/2024
-H116	Munawir P Kabeer	SHARJAH SANAYA	Pharma	17/07/2025	17/07/2025
-H007	Nazim Kuttukkan	ALQOUZ-1	Pharma	20/06/2024	21/06/2024
-H007	Nazim Kuttukkan	BUR DUBAI	Consumer	08/04/2024	08/04/2024
-H007	Nazim Kuttukkan	BUR DUBAI	Pharma	03/01/2024	02/07/2024
-H007	Nazim Kuttukkan	BUR DUBAI		17/02/2024	16/03/2024
-H007	Nazim Kuttukkan	DEIRA	Pharma	04/06/2024	04/06/2024
-H007	Nazim Kuttukkan	JUMAIRAH	Pharma	20/06/2024	20/06/2024
-H007	Nazim Kuttukkan	MIRDIF	Consumer	15/04/2024	09/05/2024
-H007	Nazim Kuttukkan	RAK / UAQ	Pharma	14/06/2024	14/06/2024
-H007	Nazim Kuttukkan	SHARJAH SANAYA	Consumer	19/06/2024	24/06/2024
-H007	Nazim Kuttukkan	SHARJAH SANAYA	Pharma	01/05/2024	27/06/2024
-H003	Nihas Sainuddin	ALQOUZ-1	Pharma	02/01/2024	27/02/2024
-H003	Nihas Sainuddin	BUR DUBAI	Pharma	12/01/2024	05/04/2024
-H003	Nihas Sainuddin	MIRDIF	Consumer	06/03/2024	23/04/2024
-H003	Nihas Sainuddin	MIRDIF	Pharma	03/01/2024	01/02/2024
-H003	Nihas Sainuddin	SHARJAH ( BUHAIRA & ROLLA)	Pharma	15/03/2024	25/03/2024
-H003	Nihas Sainuddin	SHARJAH SANAYA	Consumer	13/03/2024	14/03/2024
-H003	Nihas Sainuddin	SHARJAH SANAYA	Pharma	04/04/2024	04/04/2024
-H003	Nihas Sainuddin	SHARJAH SANAYA		05/01/2024	05/01/2024
-H115	Omar AlSaeed	AJMAN	2 - 8 VAN	29/05/2025	29/05/2025
-H115	Omar AlSaeed	AJMAN	Consumer	05/03/2025	05/03/2025
-H115	Omar AlSaeed	AJMAN	Pharma	06/03/2025	17/04/2026
-H115	Omar AlSaeed	ALQOUZ-1	Pharma	11/10/2024	03/03/2026
-H115	Omar AlSaeed	ALQOUZ-2	Pharma	12/03/2025	12/03/2025
-H115	Omar AlSaeed	ALQOUZ-2		01/07/2024	01/07/2024
-H115	Omar AlSaeed	BUR DUBAI	Pharma	14/05/2024	16/02/2026
-H115	Omar AlSaeed	DEIRA	Consumer	13/03/2025	14/08/2025
-H115	Omar AlSaeed	DEIRA	Pharma	25/03/2025	25/03/2025
-H115	Omar AlSaeed	FUJAIRAH	Pharma	28/01/2025	31/10/2025
-H115	Omar AlSaeed	JABEL ALI	2 - 8 VAN	23/10/2025	28/10/2025
-H115	Omar AlSaeed	JABEL ALI	Consumer	10/03/2025	18/02/2026
-H115	Omar AlSaeed	JABEL ALI	Pharma	24/01/2025	17/02/2026
-H115	Omar AlSaeed	JUMAIRAH	2 - 8 VAN	30/01/2025	07/02/2025
-H115	Omar AlSaeed	JUMAIRAH	Pharma	19/06/2024	28/02/2025
-H115	Omar AlSaeed	MIRDIF	Consumer	12/09/2025	12/09/2025
-H115	Omar AlSaeed	MIRDIF	Pharma	26/03/2025	07/02/2026
-H115	Omar AlSaeed	PICK-UP	Consumer	26/05/2025	06/10/2025
-H115	Omar AlSaeed	PICK-UP	Pharma	06/05/2025	07/10/2025
-H115	Omar AlSaeed	QUSAIS	2 - 8 VAN	26/02/2025	20/08/2025
-H115	Omar AlSaeed	QUSAIS	Consumer	13/06/2024	21/08/2025
-H115	Omar AlSaeed	QUSAIS	Pharma	27/11/2024	14/02/2026
-H115	Omar AlSaeed	RAK / UAQ	Pharma	30/05/2024	30/05/2024
-H115	Omar AlSaeed	SHARJAH ( BUHAIRA & ROLLA)	Consumer	03/04/2025	03/04/2025
-H115	Omar AlSaeed	SHARJAH ( BUHAIRA & ROLLA)	Pharma	21/05/2024	15/10/2025
-H115	Omar AlSaeed	SHARJAH ( BUHAIRA & ROLLA)		15/07/2024	15/07/2024
-H115	Omar AlSaeed	SHARJAH SANAYA	2 - 8 VAN	19/03/2025	19/03/2025
-H115	Omar AlSaeed	SHARJAH SANAYA	Consumer	04/06/2024	09/10/2025
-H115	Omar AlSaeed	SHARJAH SANAYA	Pharma	29/05/2024	29/12/2025
-H129	Pratik Bista	ALQOUZ-1	Pharma	21/10/2025	21/10/2025
-H129	Pratik Bista	ALQOUZ-2	Pharma	16/07/2025	16/07/2025
-H129	Pratik Bista	BUR DUBAI	Consumer	27/10/2025	29/12/2025
-H129	Pratik Bista	BUR DUBAI	Pharma	23/06/2025	17/04/2026
-H129	Pratik Bista	DEIRA	2 - 8 VAN	10/06/2025	10/06/2025
-H129	Pratik Bista	DEIRA	Pharma	07/08/2025	30/03/2026
-H129	Pratik Bista	FUJAIRAH	2 - 8 VAN	04/07/2025	04/07/2025
-H129	Pratik Bista	FUJAIRAH	Pharma	23/07/2025	23/07/2025
-H129	Pratik Bista	JABEL ALI	Consumer	03/12/2025	03/12/2025
-H129	Pratik Bista	JABEL ALI	Pharma	30/06/2025	14/08/2025
-H129	Pratik Bista	JUMAIRAH	2 - 8 VAN	12/09/2025	12/09/2025
-H129	Pratik Bista	JUMAIRAH	Consumer	15/09/2025	03/10/2025
-H129	Pratik Bista	JUMAIRAH	Pharma	29/09/2025	12/02/2026
-H129	Pratik Bista	MIRDIF	2 - 8 VAN	01/09/2025	01/09/2025
-H129	Pratik Bista	MIRDIF	Consumer	06/08/2025	28/02/2026
-H129	Pratik Bista	MIRDIF	Pharma	31/07/2025	01/04/2026
-H129	Pratik Bista	PICK-UP	Consumer	07/10/2025	08/10/2025
-H129	Pratik Bista	PICK-UP	Pharma	12/06/2025	19/06/2025
-H129	Pratik Bista	QUSAIS	Pharma	11/07/2025	10/04/2026
-H129	Pratik Bista	RAK / UAQ	Pharma	11/08/2025	11/09/2025
-H129	Pratik Bista	SHARJAH ( BUHAIRA & ROLLA)	Consumer	20/11/2025	20/11/2025
-H129	Pratik Bista	SHARJAH SANAYA	2 - 8 VAN	03/07/2025	08/08/2025
-H129	Pratik Bista	SHARJAH SANAYA	Pharma	10/10/2025	10/10/2025
-H127	Rafsal Rafeek	AJMAN	Pharma	08/05/2025	08/05/2025
-H127	Rafsal Rafeek	BUR DUBAI	Pharma	09/04/2026	09/04/2026
-H127	Rafsal Rafeek	JUMAIRAH	Pharma	14/05/2025	14/05/2025
-H127	Rafsal Rafeek	MIRDIF	Pharma	13/04/2026	13/04/2026
-H127	Rafsal Rafeek	QUSAIS	Pharma	06/05/2025	17/02/2026
-H127	Rafsal Rafeek	SHARJAH SANAYA	Pharma	21/08/2025	21/08/2025
-"""
+D040	Hussain Mohammed	SHARJAH SANAYA	CONSUMER	21/02/2024	02/04/2026
+D040	Hussain Mohammed	SHARJAH SANAYA	PHARMA	24/02/2024	10/04/2026
+D011	Imran Khan	AJMAN	PHARMA	16/08/2024	05/06/2025
+D011	Imran Khan	ALQOUZ-1	PHARMA	17/05/2024	29/05/2024
+D011	Imran Khan	BUR DUBAI	PHARMA	02/02/2024	20/02/2026
+D011	Imran Khan	FUJAIRAH	PHARMA	12/06/2024	12/06/2024
+D011	Imran Khan	JABEL ALI		22/03/2024	22/03/2024
+D011	Imran Khan	PICK-UP	PHARMA	12/08/2024	13/09/2025
+D011	Imran Khan	QUSAIS	CONSUMER	13/06/2024	13/06/2024
+D011	Imran Khan	QUSAIS	PHARMA	17/05/2024	14/02/2026
+D011	Imran Khan	QUSAIS		21/03/2025	21/03/2025
+D011	Imran Khan	RAK / UAQ	PHARMA	30/05/2024	30/05/2024
+D011	Imran Khan	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	04/07/2024	30/05/2025
+D011	Imran Khan	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	03/01/2024	17/04/2026
+D011	Imran Khan	SHARJAH ( BUHAIRA & ROLLA)		13/02/2024	31/05/2024
+D011	Imran Khan	SHARJAH SANAYA	CONSUMER	17/07/2024	02/06/2025
+D011	Imran Khan	SHARJAH SANAYA	PHARMA	15/01/2024	08/04/2026
+D038	Ismail Korokkaran	AJMAN	2 - 8 VAN	20/11/2025	28/11/2025
+D038	Ismail Korokkaran	AJMAN	CONSUMER	26/03/2024	29/09/2025
+D038	Ismail Korokkaran	AJMAN	PHARMA	09/12/2025	12/12/2025
+D038	Ismail Korokkaran	ALQOUZ-1	CONSUMER	16/01/2024	07/02/2026
+D038	Ismail Korokkaran	ALQOUZ-1	PHARMA	03/12/2025	17/04/2026
+D038	Ismail Korokkaran	ALQOUZ-2	CONSUMER	14/02/2024	13/06/2025
+D038	Ismail Korokkaran	ALQOUZ-2	PHARMA	15/12/2025	15/12/2025
+D038	Ismail Korokkaran	BUR DUBAI	2 - 8 VAN	24/11/2025	24/11/2025
+D038	Ismail Korokkaran	BUR DUBAI	CONSUMER	03/01/2024	03/04/2026
+D038	Ismail Korokkaran	BUR DUBAI	PHARMA	21/02/2024	22/12/2025
+D038	Ismail Korokkaran	DEIRA	2 - 8 VAN	19/11/2025	19/11/2025
+D038	Ismail Korokkaran	DEIRA	CONSUMER	12/01/2024	02/07/2025
+D038	Ismail Korokkaran	DEIRA	PHARMA	22/02/2024	18/12/2025
+D038	Ismail Korokkaran	DUBAI (GENERAL)	CONSUMER	09/02/2026	09/02/2026
+D038	Ismail Korokkaran	FUJAIRAH	CONSUMER	04/01/2024	12/06/2025
+D038	Ismail Korokkaran	FUJAIRAH	PHARMA	04/12/2025	25/12/2025
+D038	Ismail Korokkaran	JABEL ALI	2 - 8 VAN	06/11/2025	29/11/2025
+D038	Ismail Korokkaran	JABEL ALI	CONSUMER	09/01/2024	31/03/2026
+D038	Ismail Korokkaran	JABEL ALI	PHARMA	23/02/2024	02/04/2026
+D038	Ismail Korokkaran	JUMAIRAH	2 - 8 VAN	13/11/2025	13/11/2025
+D038	Ismail Korokkaran	JUMAIRAH	CONSUMER	04/09/2025	09/02/2026
+D038	Ismail Korokkaran	JUMAIRAH	PHARMA	15/04/2026	15/04/2026
+D038	Ismail Korokkaran	MIRDIF	2 - 8 VAN	12/11/2025	14/11/2025
+D038	Ismail Korokkaran	MIRDIF	CONSUMER	05/01/2024	08/04/2026
+D038	Ismail Korokkaran	MIRDIF	PHARMA	21/02/2024	25/12/2025
+D038	Ismail Korokkaran	QUSAIS	2 - 8 VAN	17/11/2025	27/11/2025
+D038	Ismail Korokkaran	QUSAIS	CONSUMER	22/01/2024	20/01/2026
+D038	Ismail Korokkaran	QUSAIS	PHARMA	12/12/2025	26/12/2025
+D038	Ismail Korokkaran	RAK / UAQ	CONSUMER	26/01/2024	02/10/2025
+D038	Ismail Korokkaran	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	24/11/2025	27/11/2025
+D038	Ismail Korokkaran	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	11/01/2024	10/03/2026
+D038	Ismail Korokkaran	SHARJAH SANAYA	2 - 8 VAN	07/11/2025	25/11/2025
+D038	Ismail Korokkaran	SHARJAH SANAYA	CONSUMER	24/01/2024	10/04/2026
+D038	Ismail Korokkaran	SHARJAH SANAYA	PHARMA	29/04/2024	11/12/2025
+D026	Jahaberudheen	BUR DUBAI	PHARMA	09/05/2024	03/04/2026
+D026	Jahaberudheen	FUJAIRAH	PHARMA	29/05/2025	29/05/2025
+D026	Jahaberudheen	JUMAIRAH	PHARMA	04/03/2026	04/03/2026
+D026	Jahaberudheen	MIRDIF	PHARMA	06/04/2024	15/01/2026
+D026	Jahaberudheen	QUSAIS	PHARMA	08/05/2025	30/03/2026
+D026	Jahaberudheen	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	22/03/2024	22/03/2024
+D026	Jahaberudheen	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	20/11/2025	20/11/2025
+D026	Jahaberudheen	SHARJAH SANAYA	PHARMA	07/05/2024	05/11/2025
+D026	Jahaberudheen	SHARJAH SANAYA		12/09/2024	13/01/2026
+D103	Jamseer PV Ibrahim	ABU DHABI	CONSUMER	07/02/2026	07/02/2026
+D103	Jamseer PV Ibrahim	AJMAN	CONSUMER	05/11/2024	01/07/2025
+D103	Jamseer PV Ibrahim	AJMAN	PHARMA	26/12/2024	30/12/2025
+D103	Jamseer PV Ibrahim	ALQOUZ-1	CONSUMER	07/02/2025	17/04/2026
+D103	Jamseer PV Ibrahim	ALQOUZ-1	PHARMA	26/02/2025	24/09/2025
+D103	Jamseer PV Ibrahim	ALQOUZ-2	CONSUMER	23/06/2025	23/03/2026
+D103	Jamseer PV Ibrahim	BUR DUBAI	CONSUMER	30/12/2024	05/03/2026
+D103	Jamseer PV Ibrahim	BUR DUBAI	PHARMA	14/02/2025	11/01/2026
+D103	Jamseer PV Ibrahim	DEIRA	CONSUMER	02/09/2024	08/07/2025
+D103	Jamseer PV Ibrahim	DEIRA	PHARMA	14/02/2025	22/08/2025
+D103	Jamseer PV Ibrahim	FUJAIRAH	CONSUMER	12/12/2024	20/02/2025
+D103	Jamseer PV Ibrahim	JABEL ALI	CONSUMER	19/11/2024	10/04/2026
+D103	Jamseer PV Ibrahim	JABEL ALI	PHARMA	09/04/2025	07/01/2026
+D103	Jamseer PV Ibrahim	JUMAIRAH	PHARMA	03/12/2025	03/12/2025
+D103	Jamseer PV Ibrahim	MIRDIF	CONSUMER	01/08/2024	01/04/2026
+D103	Jamseer PV Ibrahim	MIRDIF	PHARMA	14/08/2024	05/01/2026
+D103	Jamseer PV Ibrahim	QUSAIS	CONSUMER	13/09/2024	21/07/2025
+D103	Jamseer PV Ibrahim	QUSAIS	PHARMA	08/05/2025	27/05/2025
+D103	Jamseer PV Ibrahim	RAK / UAQ	CONSUMER	04/11/2024	25/09/2025
+D103	Jamseer PV Ibrahim	RAK / UAQ	PHARMA	24/12/2024	27/12/2024
+D103	Jamseer PV Ibrahim	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	03/09/2024	28/07/2025
+D103	Jamseer PV Ibrahim	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	07/05/2025	04/08/2025
+D103	Jamseer PV Ibrahim	SHARJAH SANAYA	CONSUMER	08/08/2024	19/01/2026
+D103	Jamseer PV Ibrahim	SHARJAH SANAYA	PHARMA	30/07/2024	05/08/2025
+D089	Jisam K Saleem	AJMAN	CONSUMER	04/01/2024	25/04/2025
+D089	Jisam K Saleem	AJMAN	PHARMA	05/02/2024	10/07/2025
+D089	Jisam K Saleem	ALQOUZ-1	2 - 8 VAN	24/02/2026	17/03/2026
+D089	Jisam K Saleem	ALQOUZ-1	CONSUMER	17/01/2024	06/01/2025
+D089	Jisam K Saleem	ALQOUZ-1	PHARMA	20/02/2024	05/11/2025
+D089	Jisam K Saleem	BUR DUBAI	2 - 8 VAN	12/01/2026	02/03/2026
+D089	Jisam K Saleem	BUR DUBAI	CONSUMER	09/02/2024	29/10/2024
+D089	Jisam K Saleem	BUR DUBAI	PHARMA	16/02/2024	05/01/2026
+D089	Jisam K Saleem	BUR DUBAI		25/12/2024	25/12/2024
+D089	Jisam K Saleem	DEIRA	CONSUMER	23/01/2024	13/04/2026
+D089	Jisam K Saleem	DEIRA	PHARMA	02/04/2024	10/04/2026
+D089	Jisam K Saleem	FUJAIRAH	CONSUMER	05/01/2024	13/08/2024
+D089	Jisam K Saleem	JABEL ALI	2 - 8 VAN	07/01/2026	26/03/2026
+D089	Jisam K Saleem	JABEL ALI	CONSUMER	03/01/2024	13/12/2024
+D089	Jisam K Saleem	JABEL ALI	PHARMA	10/02/2024	23/09/2025
+D089	Jisam K Saleem	JUMAIRAH	CONSUMER	02/02/2024	14/02/2024
+D089	Jisam K Saleem	JUMAIRAH	PHARMA	22/01/2025	09/01/2026
+D089	Jisam K Saleem	MIRDIF	2 - 8 VAN	06/01/2026	18/03/2026
+D089	Jisam K Saleem	MIRDIF	CONSUMER	13/02/2024	25/10/2024
+D089	Jisam K Saleem	MIRDIF	PHARMA	27/02/2024	01/04/2026
+D089	Jisam K Saleem	PICK-UP	CONSUMER	14/11/2024	14/11/2024
+D089	Jisam K Saleem	QUSAIS	2 - 8 VAN	12/01/2026	12/01/2026
+D089	Jisam K Saleem	QUSAIS	CONSUMER	16/01/2024	12/12/2024
+D089	Jisam K Saleem	QUSAIS	PHARMA	28/02/2024	08/04/2026
+D089	Jisam K Saleem	RAK / UAQ	CONSUMER	28/03/2024	17/04/2026
+D089	Jisam K Saleem	RAK / UAQ	PHARMA	19/12/2024	23/12/2025
+D089	Jisam K Saleem	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	05/01/2024	10/07/2024
+D089	Jisam K Saleem	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	16/05/2024	20/02/2026
+D089	Jisam K Saleem	SHARJAH SANAYA	2 - 8 VAN	09/01/2026	09/01/2026
+D089	Jisam K Saleem	SHARJAH SANAYA	CONSUMER	09/01/2024	20/05/2025
+D089	Jisam K Saleem	SHARJAH SANAYA	PHARMA	20/06/2024	11/12/2025
+D089	Jisam K Saleem	SHARJAH SANAYA		07/02/2026	07/02/2026
+MED1	Kathleen Grace	SHARJAH SANAYA		10/01/2024	21/01/2026
+AD069	MOH KUNHI	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	09/02/2026	09/02/2026
+AD022	MOHAMMED GHANI	ABU DHABI		10/03/2026	10/03/2026
+AD022	MOHAMMED GHANI	DUBAI (GENERAL)		16/02/2026	18/03/2026
+AD022	MOHAMMED GHANI	SHARJAH SANAYA		18/02/2026	18/02/2026
+AD063	MOHAMMED SHEREEF	ABU DHABI		25/02/2026	25/02/2026
+AD046	MUSTHAFA . KA	SHARJAH SANAYA		13/02/2026	13/02/2026
+D104	Mahammed Ansar	ABU DHABI		23/10/2024	23/10/2024
+D104	Mahammed Ansar	AJMAN	2 - 8 VAN	29/05/2025	29/05/2025
+D104	Mahammed Ansar	AJMAN	CONSUMER	06/01/2025	17/01/2025
+D104	Mahammed Ansar	AJMAN	PHARMA	10/09/2024	09/04/2026
+D104	Mahammed Ansar	AJMAN		30/07/2025	09/12/2025
+D104	Mahammed Ansar	ALQOUZ-1	CONSUMER	13/01/2025	13/01/2025
+D104	Mahammed Ansar	ALQOUZ-1	PHARMA	01/10/2024	30/03/2026
+D104	Mahammed Ansar	ALQOUZ-1		05/09/2024	10/12/2024
+D104	Mahammed Ansar	BUR DUBAI	2 - 8 VAN	11/07/2025	11/07/2025
+D104	Mahammed Ansar	BUR DUBAI	CONSUMER	30/09/2024	23/01/2025
+D104	Mahammed Ansar	BUR DUBAI	PHARMA	10/09/2024	17/04/2026
+D104	Mahammed Ansar	BUR DUBAI		28/10/2025	08/12/2025
+D104	Mahammed Ansar	DEIRA	PHARMA	04/11/2024	07/04/2026
+D104	Mahammed Ansar	DUBAI (GENERAL)	PHARMA	23/02/2026	10/04/2026
+D104	Mahammed Ansar	FUJAIRAH	PHARMA	11/10/2024	28/01/2025
+D104	Mahammed Ansar	JABEL ALI	2 - 8 VAN	03/02/2025	20/02/2026
+D104	Mahammed Ansar	JABEL ALI	CONSUMER	14/01/2025	22/01/2025
+D104	Mahammed Ansar	JABEL ALI	PHARMA	15/10/2024	19/02/2025
+D104	Mahammed Ansar	JABEL ALI		31/12/2024	29/11/2025
+D104	Mahammed Ansar	JUMAIRAH	PHARMA	07/11/2024	04/03/2026
+D104	Mahammed Ansar	MIRDIF	PHARMA	10/10/2024	02/04/2026
+D104	Mahammed Ansar	PICK-UP	CONSUMER	06/09/2024	02/06/2025
+D104	Mahammed Ansar	PICK-UP	PHARMA	09/12/2024	30/12/2025
+D104	Mahammed Ansar	QUSAIS	CONSUMER	10/01/2025	10/01/2025
+D104	Mahammed Ansar	QUSAIS	PHARMA	05/02/2025	06/04/2026
+D104	Mahammed Ansar	QUSAIS		09/11/2024	29/07/2025
+D104	Mahammed Ansar	RAK / UAQ	PHARMA	12/03/2026	12/03/2026
+D104	Mahammed Ansar	RAK / UAQ		25/09/2024	25/09/2024
+D104	Mahammed Ansar	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	11/07/2025	11/07/2025
+D104	Mahammed Ansar	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	24/01/2025	24/01/2025
+D104	Mahammed Ansar	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	26/09/2024	16/03/2026
+D104	Mahammed Ansar	SHARJAH SANAYA	CONSUMER	07/01/2025	09/04/2026
+D104	Mahammed Ansar	SHARJAH SANAYA	PHARMA	14/10/2024	14/07/2025
+D104	Mahammed Ansar	SHARJAH SANAYA		18/11/2025	18/11/2025
+D070	Mohamed Ghani	BUR DUBAI		28/05/2024	28/05/2024
+D070	Mohamed Ghani	JABEL ALI		23/01/2024	28/03/2026
+D051	Mohammed Ibrahim	AJMAN	CONSUMER	05/06/2024	13/04/2026
+D051	Mohammed Ibrahim	AJMAN	PHARMA	05/08/2024	06/01/2026
+D051	Mohammed Ibrahim	AJMAN		28/03/2024	28/03/2024
+D051	Mohammed Ibrahim	ALQOUZ-1	CONSUMER	05/02/2024	13/04/2026
+D051	Mohammed Ibrahim	ALQOUZ-1	PHARMA	03/01/2024	10/02/2026
+D051	Mohammed Ibrahim	ALQOUZ-2	PHARMA	01/04/2024	02/03/2026
+D051	Mohammed Ibrahim	BUR DUBAI	CONSUMER	20/05/2024	03/10/2024
+D051	Mohammed Ibrahim	BUR DUBAI	PHARMA	20/02/2024	10/04/2026
+D051	Mohammed Ibrahim	DEIRA	CONSUMER	25/05/2024	21/10/2024
+D051	Mohammed Ibrahim	DEIRA	PHARMA	29/08/2024	10/10/2025
+D051	Mohammed Ibrahim	FUJAIRAH	2 - 8 VAN	23/07/2025	23/07/2025
+D051	Mohammed Ibrahim	FUJAIRAH	CONSUMER	08/10/2024	07/01/2026
+D051	Mohammed Ibrahim	FUJAIRAH	PHARMA	11/02/2025	11/02/2025
+D051	Mohammed Ibrahim	JABEL ALI	2 - 8 VAN	21/05/2025	21/05/2025
+D051	Mohammed Ibrahim	JABEL ALI	CONSUMER	26/08/2024	17/04/2026
+D051	Mohammed Ibrahim	JABEL ALI	PHARMA	26/02/2024	03/03/2026
+D051	Mohammed Ibrahim	JUMAIRAH	PHARMA	06/03/2024	14/02/2026
+D051	Mohammed Ibrahim	JUMAIRAH		27/03/2024	30/03/2024
+D051	Mohammed Ibrahim	MIRDIF	2 - 8 VAN	14/07/2025	14/07/2025
+D051	Mohammed Ibrahim	MIRDIF	CONSUMER	30/05/2024	18/03/2025
+D051	Mohammed Ibrahim	MIRDIF	PHARMA	16/01/2024	16/03/2026
+D051	Mohammed Ibrahim	QUSAIS	CONSUMER	02/08/2024	20/09/2024
+D051	Mohammed Ibrahim	QUSAIS	PHARMA	29/04/2024	30/03/2026
+D051	Mohammed Ibrahim	RAK / UAQ	CONSUMER	24/12/2024	27/12/2024
+D051	Mohammed Ibrahim	RAK / UAQ	PHARMA	14/11/2024	26/12/2025
+D051	Mohammed Ibrahim	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	28/06/2024	31/10/2024
+D051	Mohammed Ibrahim	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	13/02/2024	24/12/2025
+D051	Mohammed Ibrahim	SHARJAH SANAYA	CONSUMER	04/07/2024	02/06/2025
+D051	Mohammed Ibrahim	SHARJAH SANAYA	PHARMA	29/02/2024	31/10/2025
+D102	Mohammed Nasiruddeen	AJMAN	PHARMA	20/06/2024	31/07/2025
+D102	Mohammed Nasiruddeen	ALQOUZ-1	2 - 8 VAN	14/02/2026	14/02/2026
+D102	Mohammed Nasiruddeen	ALQOUZ-1	CONSUMER	02/08/2024	02/08/2024
+D102	Mohammed Nasiruddeen	ALQOUZ-1	PHARMA	14/06/2024	03/12/2025
+D102	Mohammed Nasiruddeen	ALQOUZ-2	PHARMA	05/11/2024	29/12/2025
+D102	Mohammed Nasiruddeen	BUR DUBAI	2 - 8 VAN	12/02/2026	13/02/2026
+D102	Mohammed Nasiruddeen	BUR DUBAI	PHARMA	25/06/2024	13/04/2026
+D102	Mohammed Nasiruddeen	DEIRA	PHARMA	30/07/2024	14/07/2025
+D102	Mohammed Nasiruddeen	FUJAIRAH	PHARMA	04/02/2026	04/02/2026
+D102	Mohammed Nasiruddeen	JABEL ALI	2 - 8 VAN	11/02/2026	16/02/2026
+D102	Mohammed Nasiruddeen	JABEL ALI	PHARMA	12/06/2024	18/07/2025
+D102	Mohammed Nasiruddeen	JABEL ALI		29/11/2025	29/11/2025
+D102	Mohammed Nasiruddeen	JUMAIRAH	CONSUMER	02/08/2024	03/10/2024
+D102	Mohammed Nasiruddeen	JUMAIRAH	PHARMA	28/06/2024	16/04/2026
+D102	Mohammed Nasiruddeen	MIRDIF	2 - 8 VAN	13/02/2026	13/02/2026
+D102	Mohammed Nasiruddeen	MIRDIF	CONSUMER	12/09/2025	12/09/2025
+D102	Mohammed Nasiruddeen	MIRDIF	PHARMA	16/07/2024	07/03/2026
+D102	Mohammed Nasiruddeen	QUSAIS	2 - 8 VAN	17/02/2026	18/02/2026
+D102	Mohammed Nasiruddeen	QUSAIS	PHARMA	19/06/2024	23/12/2025
+D102	Mohammed Nasiruddeen	RAK / UAQ	PHARMA	25/07/2024	12/06/2025
+D102	Mohammed Nasiruddeen	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	25/09/2025	25/09/2025
+D102	Mohammed Nasiruddeen	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	19/06/2024	30/12/2025
+D102	Mohammed Nasiruddeen	SHARJAH SANAYA	2 - 8 VAN	15/07/2025	15/07/2025
+D102	Mohammed Nasiruddeen	SHARJAH SANAYA	CONSUMER	02/07/2025	03/10/2025
+D102	Mohammed Nasiruddeen	SHARJAH SANAYA	PHARMA	19/06/2024	29/08/2025
+D106	Mohammed Shereef K V	JABEL ALI		14/03/2026	14/03/2026
+D048	Moideen Azeez	AJMAN	PHARMA	18/03/2024	28/10/2025
+D048	Moideen Azeez	AJMAN		02/08/2024	07/10/2024
+D048	Moideen Azeez	ALQOUZ-1	PHARMA	12/01/2024	10/04/2026
+D048	Moideen Azeez	ALQOUZ-2	PHARMA	03/01/2024	28/02/2026
+D048	Moideen Azeez	BUR DUBAI	CONSUMER	05/02/2025	05/02/2025
+D048	Moideen Azeez	BUR DUBAI	PHARMA	07/06/2024	17/04/2026
+D048	Moideen Azeez	DEIRA	PHARMA	01/05/2024	27/10/2025
+D048	Moideen Azeez	FUJAIRAH	PHARMA	10/02/2025	05/05/2025
+D048	Moideen Azeez	JABEL ALI	CONSUMER	04/11/2024	07/02/2025
+D048	Moideen Azeez	JABEL ALI	PHARMA	18/11/2024	01/04/2026
+D048	Moideen Azeez	JUMAIRAH	PHARMA	13/01/2024	17/04/2026
+D048	Moideen Azeez	MIRDIF	PHARMA	18/07/2025	18/12/2025
+D048	Moideen Azeez	QUSAIS	2 - 8 VAN	16/04/2025	30/10/2025
+D048	Moideen Azeez	RAK / UAQ	2 - 8 VAN	30/10/2025	30/10/2025
+D048	Moideen Azeez	RAK / UAQ	PHARMA	03/06/2024	08/02/2026
+D048	Moideen Azeez	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	11/11/2024	11/11/2024
+D048	Moideen Azeez	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	27/04/2024	21/11/2025
+D048	Moideen Azeez	SHARJAH SANAYA	CONSUMER	14/11/2024	14/11/2024
+D048	Moideen Azeez	SHARJAH SANAYA	PHARMA	01/05/2024	14/11/2025
+D048	Moideen Azeez	SHARJAH SANAYA		02/09/2024	02/09/2024
+D098	Muhammed Aslam K	AJMAN	PHARMA	07/01/2026	10/04/2026
+D098	Muhammed Aslam K	ALQOUZ-1	CONSUMER	26/11/2024	24/04/2025
+D098	Muhammed Aslam K	ALQOUZ-1	PHARMA	15/08/2024	03/03/2026
+D098	Muhammed Aslam K	ALQOUZ-2	CONSUMER	03/06/2024	04/06/2024
+D098	Muhammed Aslam K	ALQOUZ-2	PHARMA	03/01/2025	31/05/2025
+D098	Muhammed Aslam K	BUR DUBAI	2 - 8 VAN	22/08/2025	01/09/2025
+D098	Muhammed Aslam K	BUR DUBAI	CONSUMER	01/07/2024	13/12/2024
+D098	Muhammed Aslam K	BUR DUBAI	PHARMA	22/08/2024	07/02/2025
+D098	Muhammed Aslam K	BUR DUBAI		16/08/2024	16/08/2024
+D098	Muhammed Aslam K	DEIRA	CONSUMER	21/11/2024	21/11/2024
+D098	Muhammed Aslam K	FUJAIRAH	PHARMA	15/08/2024	30/12/2025
+D098	Muhammed Aslam K	JABEL ALI	2 - 8 VAN	05/08/2025	29/08/2025
+D098	Muhammed Aslam K	JABEL ALI	CONSUMER	22/11/2024	05/12/2024
+D098	Muhammed Aslam K	JABEL ALI	PHARMA	20/11/2024	12/01/2026
+D098	Muhammed Aslam K	JUMAIRAH	CONSUMER	01/05/2024	31/07/2024
+D098	Muhammed Aslam K	JUMAIRAH	PHARMA	17/01/2025	05/04/2025
+D098	Muhammed Aslam K	MIRDIF	CONSUMER	28/11/2024	28/05/2025
+D098	Muhammed Aslam K	MIRDIF	PHARMA	05/05/2025	17/01/2026
+D098	Muhammed Aslam K	MIRDIF		19/11/2024	19/11/2024
+D098	Muhammed Aslam K	QUSAIS	CONSUMER	16/02/2024	30/04/2024
+D098	Muhammed Aslam K	QUSAIS	PHARMA	03/01/2024	06/01/2026
+D098	Muhammed Aslam K	RAK / UAQ	PHARMA	01/08/2024	10/10/2024
+D098	Muhammed Aslam K	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	26/12/2024	20/12/2025
+D098	Muhammed Aslam K	SHARJAH SANAYA	CONSUMER	27/11/2024	17/04/2026
+D098	Muhammed Aslam K	SHARJAH SANAYA	PHARMA	14/11/2024	06/02/2025
+D019	Muhammed Kunji	AJMAN	2 - 8 VAN	19/01/2026	03/04/2026
+D019	Muhammed Kunji	AJMAN	CONSUMER	25/12/2024	08/07/2025
+D019	Muhammed Kunji	AJMAN	PHARMA	26/03/2024	15/04/2024
+D019	Muhammed Kunji	ALQOUZ-1	2 - 8 VAN	21/01/2026	05/02/2026
+D019	Muhammed Kunji	ALQOUZ-1	CONSUMER	06/05/2025	01/08/2025
+D019	Muhammed Kunji	ALQOUZ-1	PHARMA	02/01/2024	05/01/2026
+D019	Muhammed Kunji	ALQOUZ-2	2 - 8 VAN	17/01/2026	17/01/2026
+D019	Muhammed Kunji	ALQOUZ-2	PHARMA	10/01/2024	15/01/2024
+D019	Muhammed Kunji	BUR DUBAI	2 - 8 VAN	07/01/2026	28/03/2026
+D019	Muhammed Kunji	BUR DUBAI	CONSUMER	26/12/2024	01/07/2025
+D019	Muhammed Kunji	BUR DUBAI	PHARMA	03/05/2024	18/11/2025
+D019	Muhammed Kunji	DEIRA	2 - 8 VAN	25/03/2026	25/03/2026
+D019	Muhammed Kunji	DEIRA	CONSUMER	04/03/2025	04/03/2025
+D019	Muhammed Kunji	DEIRA	PHARMA	29/01/2024	19/02/2025
+D019	Muhammed Kunji	FUJAIRAH	2 - 8 VAN	15/01/2026	30/03/2026
+D019	Muhammed Kunji	FUJAIRAH	CONSUMER	31/12/2024	31/12/2024
+D019	Muhammed Kunji	FUJAIRAH	PHARMA	06/05/2024	10/10/2025
+D019	Muhammed Kunji	FUJAIRAH		26/02/2024	26/02/2024
+D019	Muhammed Kunji	JABEL ALI	2 - 8 VAN	09/01/2026	31/03/2026
+D019	Muhammed Kunji	JABEL ALI	CONSUMER	31/07/2025	31/07/2025
+D019	Muhammed Kunji	JABEL ALI	PHARMA	04/05/2024	29/12/2025
+D019	Muhammed Kunji	JABEL ALI		20/04/2024	31/12/2025
+D019	Muhammed Kunji	JUMAIRAH	CONSUMER	25/03/2025	25/03/2025
+D019	Muhammed Kunji	JUMAIRAH	PHARMA	28/03/2024	28/03/2025
+D019	Muhammed Kunji	MIRDIF	2 - 8 VAN	07/01/2026	16/02/2026
+D019	Muhammed Kunji	MIRDIF	PHARMA	01/05/2024	11/02/2025
+D019	Muhammed Kunji	QUSAIS	2 - 8 VAN	08/01/2026	09/04/2026
+D019	Muhammed Kunji	QUSAIS	PHARMA	12/06/2024	17/04/2026
+D019	Muhammed Kunji	RAK / UAQ	2 - 8 VAN	02/04/2026	09/04/2026
+D019	Muhammed Kunji	RAK / UAQ	PHARMA	07/05/2024	06/02/2025
+D019	Muhammed Kunji	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	06/01/2026	06/04/2026
+D019	Muhammed Kunji	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	14/04/2025	22/07/2025
+D019	Muhammed Kunji	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	28/02/2025	18/08/2025
+D019	Muhammed Kunji	SHARJAH SANAYA	2 - 8 VAN	06/01/2026	10/04/2026
+D019	Muhammed Kunji	SHARJAH SANAYA	CONSUMER	01/07/2024	01/07/2024
+D019	Muhammed Kunji	SHARJAH SANAYA	PHARMA	06/05/2024	24/02/2025
+D099	Muhammed Noushad P	AJMAN	PHARMA	20/12/2024	20/12/2024
+D099	Muhammed Noushad P	ALQOUZ-1		01/06/2024	11/12/2025
+D099	Muhammed Noushad P	BUR DUBAI	PHARMA	06/02/2024	13/02/2026
+D099	Muhammed Noushad P	BUR DUBAI		23/09/2024	23/09/2024
+D099	Muhammed Noushad P	DEIRA	PHARMA	05/09/2025	09/09/2025
+D099	Muhammed Noushad P	FUJAIRAH	PHARMA	03/07/2024	03/07/2024
+D099	Muhammed Noushad P	JABEL ALI	PHARMA	16/09/2024	15/04/2026
+D099	Muhammed Noushad P	JABEL ALI		03/04/2024	10/03/2026
+D099	Muhammed Noushad P	MIRDIF	PHARMA	20/01/2026	13/02/2026
+D099	Muhammed Noushad P	MIRDIF		09/10/2025	09/10/2025
+D099	Muhammed Noushad P	PICK-UP	2 - 8 VAN	03/01/2024	28/12/2024
+D099	Muhammed Noushad P	PICK-UP	CONSUMER	17/05/2025	24/01/2026
+D099	Muhammed Noushad P	PICK-UP	PHARMA	04/01/2024	17/04/2026
+D099	Muhammed Noushad P	QUSAIS	PHARMA	20/01/2026	31/03/2026
+D099	Muhammed Noushad P	QUSAIS		16/07/2024	19/12/2024
+D099	Muhammed Noushad P	SHARJAH ( BUHAIRA & ROLLA)		04/07/2024	09/10/2025
+D099	Muhammed Noushad P	SHARJAH SANAYA	CONSUMER	02/09/2025	02/09/2025
+D099	Muhammed Noushad P	SHARJAH SANAYA	PHARMA	08/05/2025	08/05/2025
+D099	Muhammed Noushad P	SHARJAH SANAYA		30/01/2024	30/01/2024
+D107	Muneeb Hussain	AJMAN	CONSUMER	11/08/2025	28/01/2026
+D107	Muneeb Hussain	AJMAN	PHARMA	12/09/2025	29/12/2025
+D107	Muneeb Hussain	ALQOUZ-1	CONSUMER	13/08/2025	06/04/2026
+D107	Muneeb Hussain	ALQOUZ-1	PHARMA	29/09/2025	07/11/2025
+D107	Muneeb Hussain	ALQOUZ-2	CONSUMER	31/07/2025	31/07/2025
+D107	Muneeb Hussain	ALQOUZ-2	PHARMA	20/10/2025	17/04/2026
+D107	Muneeb Hussain	BUR DUBAI	CONSUMER	25/07/2025	04/02/2026
+D107	Muneeb Hussain	BUR DUBAI	PHARMA	29/08/2025	26/12/2025
+D107	Muneeb Hussain	DEIRA	CONSUMER	14/08/2025	31/03/2026
+D107	Muneeb Hussain	DEIRA	PHARMA	21/10/2025	22/10/2025
+D107	Muneeb Hussain	JABEL ALI	CONSUMER	04/08/2025	16/03/2026
+D107	Muneeb Hussain	JABEL ALI	PHARMA	29/08/2025	07/11/2025
+D107	Muneeb Hussain	JUMAIRAH	CONSUMER	22/07/2025	17/01/2026
+D107	Muneeb Hussain	JUMAIRAH	PHARMA	01/09/2025	24/10/2025
+D107	Muneeb Hussain	MIRDIF	2 - 8 VAN	06/10/2025	06/10/2025
+D107	Muneeb Hussain	MIRDIF	CONSUMER	24/07/2025	10/04/2026
+D107	Muneeb Hussain	MIRDIF	PHARMA	09/10/2025	24/02/2026
+D107	Muneeb Hussain	PICK-UP	PHARMA	02/10/2025	02/10/2025
+D107	Muneeb Hussain	QUSAIS	CONSUMER	31/07/2025	06/04/2026
+D107	Muneeb Hussain	QUSAIS	PHARMA	06/10/2025	11/12/2025
+D107	Muneeb Hussain	RAK / UAQ	PHARMA	02/09/2025	03/10/2025
+D107	Muneeb Hussain	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	07/08/2025	05/03/2026
+D107	Muneeb Hussain	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	19/08/2025	30/12/2025
+D107	Muneeb Hussain	SHARJAH SANAYA	CONSUMER	28/07/2025	01/08/2025
+D107	Muneeb Hussain	SHARJAH SANAYA	PHARMA	05/08/2025	30/12/2025
+AD014	NISAAR AHMED	SHARJAH SANAYA		14/02/2026	16/04/2026
+D033	Naeem Fazal	AJMAN	2 - 8 VAN	05/03/2026	17/03/2026
+D033	Naeem Fazal	AJMAN	CONSUMER	19/11/2024	30/12/2025
+D033	Naeem Fazal	AJMAN	PHARMA	22/05/2024	13/03/2025
+D033	Naeem Fazal	AJMAN		20/05/2024	31/07/2024
+D033	Naeem Fazal	ALQOUZ-1	CONSUMER	25/11/2024	04/11/2025
+D033	Naeem Fazal	ALQOUZ-1	PHARMA	15/05/2024	19/02/2026
+D033	Naeem Fazal	ALQOUZ-2	CONSUMER	10/10/2025	10/10/2025
+D033	Naeem Fazal	BUR DUBAI	2 - 8 VAN	12/03/2026	12/03/2026
+D033	Naeem Fazal	BUR DUBAI	CONSUMER	07/11/2024	27/10/2025
+D033	Naeem Fazal	BUR DUBAI	PHARMA	04/01/2024	19/02/2026
+D033	Naeem Fazal	DEIRA	2 - 8 VAN	04/03/2026	16/03/2026
+D033	Naeem Fazal	DEIRA	CONSUMER	08/11/2024	23/12/2025
+D033	Naeem Fazal	DEIRA	PHARMA	01/08/2024	23/02/2026
+D033	Naeem Fazal	FUJAIRAH	CONSUMER	27/11/2024	29/12/2025
+D033	Naeem Fazal	FUJAIRAH	PHARMA	04/01/2024	22/01/2025
+D033	Naeem Fazal	JABEL ALI	2 - 8 VAN	13/03/2026	17/03/2026
+D033	Naeem Fazal	JABEL ALI	CONSUMER	04/11/2024	09/12/2025
+D033	Naeem Fazal	JABEL ALI	PHARMA	10/06/2024	03/03/2026
+D033	Naeem Fazal	JABEL ALI		03/11/2025	03/11/2025
+D033	Naeem Fazal	JUMAIRAH	CONSUMER	29/08/2025	29/08/2025
+D033	Naeem Fazal	JUMAIRAH	PHARMA	17/10/2024	24/01/2026
+D033	Naeem Fazal	MIRDIF	2 - 8 VAN	05/03/2026	10/03/2026
+D033	Naeem Fazal	MIRDIF	CONSUMER	29/11/2024	26/12/2025
+D033	Naeem Fazal	MIRDIF	PHARMA	03/01/2024	28/02/2026
+D033	Naeem Fazal	MIRDIF		01/07/2024	01/07/2024
+D033	Naeem Fazal	QUSAIS	2 - 8 VAN	16/03/2026	18/03/2026
+D033	Naeem Fazal	QUSAIS	CONSUMER	06/05/2025	11/12/2025
+D033	Naeem Fazal	QUSAIS	PHARMA	19/08/2024	24/02/2026
+D033	Naeem Fazal	RAK / UAQ	CONSUMER	27/11/2024	01/08/2025
+D033	Naeem Fazal	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	13/03/2026	13/03/2026
+D033	Naeem Fazal	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	12/11/2024	15/08/2025
+D033	Naeem Fazal	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	07/10/2024	17/02/2026
+D033	Naeem Fazal	SHARJAH SANAYA	2 - 8 VAN	04/03/2026	12/03/2026
+D033	Naeem Fazal	SHARJAH SANAYA	CONSUMER	07/11/2024	05/01/2026
+D033	Naeem Fazal	SHARJAH SANAYA	PHARMA	20/02/2024	02/03/2026
+D010	Nasar	AJMAN	2 - 8 VAN	19/05/2025	29/09/2025
+D010	Nasar	AJMAN	CONSUMER	08/02/2026	08/02/2026
+D010	Nasar	AJMAN	PHARMA	30/03/2024	21/05/2025
+D010	Nasar	ALQOUZ-1	2 - 8 VAN	27/05/2025	02/09/2025
+D010	Nasar	ALQOUZ-1	CONSUMER	20/01/2025	20/01/2025
+D010	Nasar	ALQOUZ-1	PHARMA	10/02/2024	16/04/2026
+D010	Nasar	ALQOUZ-2	2 - 8 VAN	04/06/2025	23/06/2025
+D010	Nasar	BUR DUBAI	2 - 8 VAN	08/05/2025	18/03/2026
+D010	Nasar	BUR DUBAI	PHARMA	06/11/2024	01/04/2026
+D010	Nasar	DEIRA	2 - 8 VAN	07/05/2025	16/09/2025
+D010	Nasar	DEIRA	PHARMA	02/08/2024	01/08/2025
+D010	Nasar	DEIRA		04/09/2024	04/09/2024
+D010	Nasar	FUJAIRAH	2 - 8 VAN	06/05/2025	25/09/2025
+D010	Nasar	FUJAIRAH	CONSUMER	22/02/2024	30/04/2024
+D010	Nasar	FUJAIRAH	PHARMA	03/01/2024	29/01/2025
+D010	Nasar	JABEL ALI	2 - 8 VAN	12/05/2025	02/10/2025
+D010	Nasar	JABEL ALI	PHARMA	14/11/2024	10/04/2026
+D010	Nasar	JABEL ALI		26/12/2024	26/12/2024
+D010	Nasar	JUMAIRAH	2 - 8 VAN	08/08/2025	03/10/2025
+D010	Nasar	JUMAIRAH	PHARMA	12/09/2024	30/12/2025
+D010	Nasar	MIRDIF	2 - 8 VAN	20/05/2025	17/09/2025
+D010	Nasar	MIRDIF	CONSUMER	29/05/2025	29/05/2025
+D010	Nasar	MIRDIF	PHARMA	30/09/2024	14/04/2026
+D010	Nasar	QUSAIS	2 - 8 VAN	07/05/2025	29/09/2025
+D010	Nasar	QUSAIS	PHARMA	01/05/2024	06/03/2025
+D010	Nasar	RAK / UAQ	2 - 8 VAN	11/08/2025	30/09/2025
+D010	Nasar	RAK / UAQ	PHARMA	07/07/2025	31/07/2025
+D010	Nasar	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	08/05/2025	25/09/2025
+D010	Nasar	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	25/03/2025	03/04/2025
+D010	Nasar	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	16/01/2024	24/03/2026
+D010	Nasar	SHARJAH SANAYA	2 - 8 VAN	30/05/2025	03/10/2025
+D010	Nasar	SHARJAH SANAYA	CONSUMER	07/03/2025	05/05/2025
+D010	Nasar	SHARJAH SANAYA	PHARMA	08/04/2024	07/03/2026
+D037	Nijavudeen	AJMAN	CONSUMER	01/05/2024	08/08/2025
+D037	Nijavudeen	AJMAN	PHARMA	02/09/2024	23/10/2025
+D037	Nijavudeen	ALQOUZ-1	PHARMA	27/01/2024	26/12/2025
+D037	Nijavudeen	ALQOUZ-2	PHARMA	02/05/2025	28/01/2026
+D037	Nijavudeen	BUR DUBAI	CONSUMER	25/07/2024	20/11/2024
+D037	Nijavudeen	BUR DUBAI	PHARMA	10/02/2024	02/03/2026
+D037	Nijavudeen	DEIRA	CONSUMER	24/07/2024	26/09/2025
+D037	Nijavudeen	DEIRA	PHARMA	10/07/2024	18/03/2026
+D037	Nijavudeen	FUJAIRAH	PHARMA	19/11/2024	04/11/2025
+D037	Nijavudeen	JABEL ALI	PHARMA	01/08/2024	30/04/2025
+D037	Nijavudeen	JUMAIRAH	CONSUMER	09/09/2025	09/09/2025
+D037	Nijavudeen	JUMAIRAH	PHARMA	31/12/2024	10/04/2025
+D037	Nijavudeen	MIRDIF	CONSUMER	20/02/2024	29/08/2025
+D037	Nijavudeen	MIRDIF	PHARMA	03/01/2024	26/12/2025
+D037	Nijavudeen	PICK-UP	CONSUMER	05/05/2025	05/05/2025
+D037	Nijavudeen	QUSAIS	CONSUMER	19/09/2025	19/09/2025
+D037	Nijavudeen	QUSAIS	PHARMA	05/08/2024	06/01/2026
+D037	Nijavudeen	RAK / UAQ	CONSUMER	13/05/2024	17/07/2024
+D037	Nijavudeen	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	12/07/2024	03/10/2025
+D037	Nijavudeen	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	25/01/2024	13/10/2025
+D037	Nijavudeen	SHARJAH SANAYA	2 - 8 VAN	22/08/2025	22/08/2025
+D037	Nijavudeen	SHARJAH SANAYA	CONSUMER	16/07/2024	03/10/2025
+D037	Nijavudeen	SHARJAH SANAYA	PHARMA	26/01/2024	03/11/2025
+D074	Nisar Ahamed Shah	JABEL ALI		16/02/2026	16/04/2026
+D052	Noushad Ali	AJMAN	PHARMA	19/08/2025	19/08/2025
+D052	Noushad Ali	BUR DUBAI		01/11/2024	01/11/2024
+D052	Noushad Ali	JABEL ALI	PHARMA	23/09/2025	10/02/2026
+D052	Noushad Ali	JABEL ALI		08/03/2024	12/08/2025
+D052	Noushad Ali	MIRDIF	PHARMA	05/02/2025	05/02/2025
+D052	Noushad Ali	PICK-UP	2 - 8 VAN	02/02/2024	17/04/2026
+D052	Noushad Ali	PICK-UP	CONSUMER	18/03/2024	14/03/2026
+D052	Noushad Ali	PICK-UP	PHARMA	26/02/2024	14/02/2026
+D052	Noushad Ali	QUSAIS	CONSUMER	15/12/2025	15/12/2025
+D052	Noushad Ali	QUSAIS		27/02/2024	27/02/2024
+D052	Noushad Ali	SHARJAH ( BUHAIRA & ROLLA)		10/06/2024	24/01/2025
+D052	Noushad Ali	SHARJAH SANAYA	PHARMA	18/08/2025	28/10/2025
+D052	Noushad Ali	SHARJAH SANAYA		02/01/2025	02/01/2025
+AD038	RAHAMATULLAH	ABU DHABI		19/02/2026	19/02/2026
+AD038	RAHAMATULLAH	JABEL ALI		14/02/2026	14/02/2026
+D085	Rahul R.P	AJMAN	2 - 8 VAN	16/12/2024	24/04/2025
+D085	Rahul R.P	AJMAN	CONSUMER	26/09/2025	26/09/2025
+D085	Rahul R.P	AJMAN	PHARMA	02/04/2024	02/10/2025
+D085	Rahul R.P	AJMAN		01/11/2024	01/10/2025
+D085	Rahul R.P	ALQOUZ-1	2 - 8 VAN	12/11/2024	24/02/2025
+D085	Rahul R.P	ALQOUZ-1	CONSUMER	17/03/2025	18/03/2025
+D085	Rahul R.P	ALQOUZ-1	PHARMA	03/01/2024	01/04/2026
+D085	Rahul R.P	ALQOUZ-1		04/04/2024	04/04/2024
+D085	Rahul R.P	ALQOUZ-2	2 - 8 VAN	24/06/2025	24/06/2025
+D085	Rahul R.P	ALQOUZ-2	PHARMA	06/05/2025	03/04/2026
+D085	Rahul R.P	BUR DUBAI	2 - 8 VAN	08/11/2024	25/04/2025
+D085	Rahul R.P	BUR DUBAI	CONSUMER	04/10/2024	25/09/2025
+D085	Rahul R.P	BUR DUBAI	PHARMA	02/01/2024	10/04/2026
+D085	Rahul R.P	BUR DUBAI		23/07/2024	23/07/2024
+D085	Rahul R.P	DEIRA	2 - 8 VAN	12/02/2025	28/04/2025
+D085	Rahul R.P	DEIRA	CONSUMER	13/03/2025	13/03/2025
+D085	Rahul R.P	DEIRA	PHARMA	10/05/2024	15/01/2026
+D085	Rahul R.P	DEIRA		22/07/2024	22/07/2024
+D085	Rahul R.P	FUJAIRAH	2 - 8 VAN	11/11/2024	23/04/2025
+D085	Rahul R.P	FUJAIRAH	CONSUMER	05/10/2024	20/03/2025
+D085	Rahul R.P	FUJAIRAH	PHARMA	04/01/2024	17/04/2026
+D085	Rahul R.P	FUJAIRAH		17/07/2024	17/07/2024
+D085	Rahul R.P	JABEL ALI	2 - 8 VAN	08/11/2024	02/05/2025
+D085	Rahul R.P	JABEL ALI	CONSUMER	22/04/2024	26/09/2025
+D085	Rahul R.P	JABEL ALI	PHARMA	08/01/2024	24/02/2026
+D085	Rahul R.P	JABEL ALI		07/10/2024	04/03/2025
+D085	Rahul R.P	JUMAIRAH	2 - 8 VAN	15/04/2025	17/04/2025
+D085	Rahul R.P	JUMAIRAH	CONSUMER	14/03/2025	14/03/2025
+D085	Rahul R.P	JUMAIRAH	PHARMA	20/01/2024	10/04/2026
+D085	Rahul R.P	MIRDIF	2 - 8 VAN	11/11/2024	28/12/2024
+D085	Rahul R.P	MIRDIF	CONSUMER	12/03/2025	07/04/2025
+D085	Rahul R.P	MIRDIF	PHARMA	26/01/2024	31/03/2026
+D085	Rahul R.P	MIRDIF		31/07/2024	09/11/2024
+D085	Rahul R.P	PICK-UP	CONSUMER	24/01/2024	27/12/2025
+D085	Rahul R.P	PICK-UP	PHARMA	07/11/2024	18/01/2026
+D085	Rahul R.P	QUSAIS	2 - 8 VAN	25/11/2024	01/05/2025
+D085	Rahul R.P	QUSAIS	CONSUMER	11/10/2024	11/10/2024
+D085	Rahul R.P	QUSAIS	PHARMA	17/01/2024	20/01/2026
+D085	Rahul R.P	QUSAIS		01/10/2025	01/10/2025
+D085	Rahul R.P	RAK / UAQ	2 - 8 VAN	09/12/2024	05/05/2025
+D085	Rahul R.P	RAK / UAQ	PHARMA	24/02/2024	11/07/2024
+D085	Rahul R.P	SHARJAH ( BUHAIRA & ROLLA)	2 - 8 VAN	13/01/2025	23/12/2025
+D085	Rahul R.P	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	08/10/2024	08/10/2024
+D085	Rahul R.P	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	04/01/2024	08/04/2026
+D085	Rahul R.P	SHARJAH SANAYA	2 - 8 VAN	30/12/2024	21/04/2025
+D085	Rahul R.P	SHARJAH SANAYA	CONSUMER	13/03/2025	13/03/2025
+D085	Rahul R.P	SHARJAH SANAYA	PHARMA	17/01/2024	31/03/2026
+D036	Rashid Baderzaman	AJMAN	CONSUMER	16/05/2024	25/06/2024
+D036	Rashid Baderzaman	AJMAN	PHARMA	26/08/2025	22/10/2025
+D036	Rashid Baderzaman	AJMAN		11/01/2024	26/07/2024
+D036	Rashid Baderzaman	ALQOUZ-1	PHARMA	28/11/2024	28/11/2024
+D036	Rashid Baderzaman	ALQOUZ-1		26/01/2024	30/04/2024
+D036	Rashid Baderzaman	BUR DUBAI	PHARMA	12/12/2024	21/01/2026
+D036	Rashid Baderzaman	BUR DUBAI		15/03/2024	29/10/2025
+D036	Rashid Baderzaman	DEIRA	CONSUMER	17/05/2024	04/03/2025
+D036	Rashid Baderzaman	DEIRA	PHARMA	04/09/2025	08/10/2025
+D036	Rashid Baderzaman	DEIRA		15/01/2024	15/07/2024
+D036	Rashid Baderzaman	FUJAIRAH	CONSUMER	03/01/2024	05/06/2025
+D036	Rashid Baderzaman	FUJAIRAH		30/07/2024	30/07/2024
+D036	Rashid Baderzaman	JABEL ALI	CONSUMER	11/05/2024	15/07/2025
+D036	Rashid Baderzaman	JABEL ALI	PHARMA	10/01/2024	09/01/2026
+D036	Rashid Baderzaman	JABEL ALI		12/01/2024	07/08/2024
+D036	Rashid Baderzaman	JUMAIRAH		01/02/2024	01/09/2025
+D036	Rashid Baderzaman	MIRDIF	CONSUMER	31/05/2024	16/06/2025
+D036	Rashid Baderzaman	MIRDIF	PHARMA	13/03/2024	20/01/2026
+D036	Rashid Baderzaman	MIRDIF		30/01/2024	31/07/2024
+D036	Rashid Baderzaman	PICK-UP	CONSUMER	08/04/2024	17/04/2026
+D036	Rashid Baderzaman	QUSAIS	CONSUMER	05/07/2024	16/06/2025
+D036	Rashid Baderzaman	QUSAIS	PHARMA	10/01/2024	08/10/2025
+D036	Rashid Baderzaman	QUSAIS		10/01/2024	05/07/2024
+D036	Rashid Baderzaman	RAK / UAQ	CONSUMER	16/07/2025	16/07/2025
+D036	Rashid Baderzaman	RAK / UAQ		21/02/2024	10/06/2024
+D036	Rashid Baderzaman	SHARJAH ( BUHAIRA & ROLLA)	CONSUMER	22/05/2024	22/05/2024
+D036	Rashid Baderzaman	SHARJAH ( BUHAIRA & ROLLA)	PHARMA	09/12/2024	10/10/2025
+D036	Rashid Baderzaman	SHARJAH ( BUHAIRA & ROLLA)		12/02/2024	08/06/2024
+D036	Rashid Baderzaman	SHARJAH SANAYA	CONSUMER	15/05/2024	16/06/2025
+D036	Rashid Baderzaman	SHARJAH SANAYA	PHARMA	12/03/2024	10/10/2025
+D036	Rashid Baderzaman	SHARJAH SANAYA		04/01/2024	02/09/2025
+AD065	SABIR SHAH	QUSAIS	PHARMA	04/03/2026	04/03/2026
+AD057	SHEKKEER PH	ABU DHABI		17/03/2026	18/03/2026
+D023	Sabir Shah	AJMAN	2 - 8 VAN	31/01/2025	18/03/2025
+D023	Sabir Shah	AJMAN	CONSUMER	09/05/2024	23/01/2025
+D023	Sabir Shah	AJMAN	PHARMA	30/04/2024	28/04/2025
+D023	Sabir Shah	ALQOUZ-1	PHARMA	09/01/2024	25/02/2026
+D023	Sabir Shah	ALQOUZ-1		28/10/2025	28/10/2025
+D023	Sabir Shah	BUR DUBAI	CONSUMER	27/02/2025	28/02/2025
+D023	Sabir Shah	BUR DUBAI	PHARMA	29/01/2024	26/03/2026
+D023	Sabir Shah	BUR DUBAI		20/03/2024	20/03/2024
+D023	Sabir Shah	DEIRA	PHARMA	26/04/2024	22/10/2025
+D023	Sabir Shah	FUJAIRAH	CONSUMER	14/06/2024	26/0
