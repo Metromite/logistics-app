@@ -104,13 +104,11 @@ def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
     
-    # Core Tables
     c.execute('''CREATE TABLE IF NOT EXISTS drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY, name TEXT UNIQUE, code TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY, number TEXT UNIQUE, type TEXT)''')
     
-    # Default Template Tables (For custom backups)
     c.execute('''CREATE TABLE IF NOT EXISTS default_drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, needs_helper TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS default_helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, restriction TEXT, anchor_area TEXT, health_card TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS default_areas (id INTEGER PRIMARY KEY, name TEXT UNIQUE, code TEXT, sector TEXT, needs_helper TEXT, sort_order INTEGER)''')
@@ -148,7 +146,6 @@ def clear_cache():
 
 @st.cache_data(show_spinner=False, ttl=3600) 
 def load_table(table_name):
-    # To fix the 404 error, we MUST read from Firebase to get the true Document IDs.
     if FIREBASE_READY:
         try:
             docs = db_fs.collection(table_name).stream()
@@ -540,6 +537,17 @@ area_list_global = [""] + (areas_df_global['name'].tolist() if not areas_df_glob
 multi_anchor_opts = list(set([a for a in area_list_global + SECTOR_OPTIONS + VEHICLE_OPTIONS if a != ""]))
 multi_anchor_opts.sort()
 
+all_d = load_table('drivers')
+all_h = load_table('helpers')
+vehicles_global = load_table('vehicles')
+
+drv_codes_opts = ["UNASSIGNED", ""] + all_d['code'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
+drv_names_opts = ["UNASSIGNED", ""] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
+hlp_codes_opts = ["UNASSIGNED", "N/A", ""] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", ""]
+hlp_names_opts = ["UNASSIGNED", "NO HELPER REQUIRED", ""] + all_h['name'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "NO HELPER REQUIRED", ""]
+veh_num_opts = ["UNASSIGNED", ""] + vehicles_global['number'].dropna().unique().tolist() if not vehicles_global.empty else ["UNASSIGNED", ""]
+
+
 # --- APP ROUTING ---
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
 choice = st.sidebar.radio("Navigate", menu)
@@ -551,8 +559,6 @@ if choice == "1. AI Route Planner":
     
     st.subheader("📊 Today's Availability Dashboard")
     today = date.today()
-    all_d = load_table('drivers')
-    all_h = load_table('helpers')
     vac_cache = build_vacation_cache()
     
     vac_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
@@ -626,8 +632,8 @@ if choice == "1. AI Route Planner":
     if not draft_routes.empty:
         st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then save the draft or Confirm to log experiences.")
         
-        d_start_str = draft_routes.iloc[0].get('start_date') if 'start_date' in draft_routes.columns and str(draft_routes.iloc[0].get('start_date')) else None
-        d_end_str = draft_routes.iloc[0].get('end_date') if 'end_date' in draft_routes.columns and str(draft_routes.iloc[0].get('end_date')) else None
+        d_start_str = draft_routes.iloc[0].get('start_date') if 'start_date' in draft_routes.columns and pd.notna(draft_routes.iloc[0].get('start_date')) else None
+        d_end_str = draft_routes.iloc[0].get('end_date') if 'end_date' in draft_routes.columns and pd.notna(draft_routes.iloc[0].get('end_date')) else None
         
         plan_start_val = datetime.strptime(d_start_str, "%Y-%m-%d").date() if d_start_str and d_start_str != "None" else today
         plan_end_val = datetime.strptime(d_end_str, "%Y-%m-%d").date() if d_end_str and d_end_str != "None" else today + timedelta(days=90)
@@ -654,8 +660,12 @@ if choice == "1. AI Route Planner":
             use_container_width=True, hide_index=True, key="route_editor", 
             column_order=ROUTE_COLUMN_ORDER,
             column_config={
-                "Driver Code": st.column_config.TextColumn("CODE"),
-                "Helper Code": st.column_config.TextColumn("CODE")
+                "Driver Code": st.column_config.SelectboxColumn("CODE", options=drv_codes_opts),
+                "Drivers Name": st.column_config.SelectboxColumn("Drivers Name", options=drv_names_opts),
+                "Helper Code": st.column_config.SelectboxColumn("CODE", options=hlp_codes_opts),
+                "Helpers Name": st.column_config.SelectboxColumn("Helpers Name", options=hlp_names_opts),
+                "VEH NO": st.column_config.SelectboxColumn("VEH NO", options=veh_num_opts),
+                "AREA": st.column_config.SelectboxColumn("AREA", options=area_list_global)
             }
         )
         
@@ -672,8 +682,29 @@ if choice == "1. AI Route Planner":
             new_dicts = []
             for index, r in edited_df.iterrows():
                 sn_val = r.get('S/N', index + 1)
-                insert_data.append((sn_val, "", r.get('AREA', ''), unify_text(r.get('Sector', '')), r.get('Driver Code', ''), r.get('Drivers Name', ''), r.get('Helper Code', ''), r.get('Helpers Name', ''), r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e))
-                new_dicts.append({"order_num":sn_val, "area_code":"", "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":r.get('Driver Code', ''), "driver_name":r.get('Drivers Name', ''), "helper_code":r.get('Helper Code', ''), "helper_name":r.get('Helpers Name', ''), "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e})
+                orig_row = disp_draft.iloc[index]
+                
+                # RECONCILIATION: Auto-Sync Code & Name if one changes
+                d_code = r.get('Driver Code', '')
+                d_name = r.get('Drivers Name', '')
+                if d_name != orig_row.get('Drivers Name'):
+                    match = all_d[all_d['name'] == d_name]
+                    if not match.empty: d_code = match.iloc[0]['code']
+                elif d_code != orig_row.get('Driver Code'):
+                    match = all_d[all_d['code'] == d_code]
+                    if not match.empty: d_name = match.iloc[0]['name']
+                    
+                h_code = r.get('Helper Code', '')
+                h_name = r.get('Helpers Name', '')
+                if h_name != orig_row.get('Helpers Name'):
+                    match = all_h[all_h['name'] == h_name]
+                    if not match.empty: h_code = match.iloc[0]['code']
+                elif h_code != orig_row.get('Helper Code'):
+                    match = all_h[all_h['code'] == h_code]
+                    if not match.empty: h_name = match.iloc[0]['name']
+
+                insert_data.append((sn_val, "", r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e))
+                new_dicts.append({"order_num":sn_val, "area_code":"", "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e})
                 
             q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY", data=new_dicts)
@@ -691,10 +722,30 @@ if choice == "1. AI Route Planner":
             hist_dicts = []
             for index, r in edited_df.iterrows():
                 sn_val = r.get('S/N', index + 1)
-                active_data.append((sn_val, "", r.get('AREA', ''), r.get('Driver Code', ''), r.get('Drivers Name', ''), r.get('Helper Code', ''), r.get('Helpers Name', ''), r.get('VEH NO', ''), p_s, p_e))
-                active_dicts.append({"order_num":sn_val, "area_code":"", "area_name":r.get('AREA', ''), "driver_code":r.get('Driver Code', ''), "driver_name":r.get('Drivers Name', ''), "helper_code":r.get('Helper Code', ''), "helper_name":r.get('Helpers Name', ''), "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e})
+                orig_row = disp_draft.iloc[index]
                 
-                for code, name, ptype in [(r.get('Driver Code', ''), r.get('Drivers Name', ''), "Driver"), (r.get('Helper Code', ''), r.get('Helpers Name', ''), "Helper")]:
+                d_code = r.get('Driver Code', '')
+                d_name = r.get('Drivers Name', '')
+                if d_name != orig_row.get('Drivers Name'):
+                    match = all_d[all_d['name'] == d_name]
+                    if not match.empty: d_code = match.iloc[0]['code']
+                elif d_code != orig_row.get('Driver Code'):
+                    match = all_d[all_d['code'] == d_code]
+                    if not match.empty: d_name = match.iloc[0]['name']
+                    
+                h_code = r.get('Helper Code', '')
+                h_name = r.get('Helpers Name', '')
+                if h_name != orig_row.get('Helpers Name'):
+                    match = all_h[all_h['name'] == h_name]
+                    if not match.empty: h_code = match.iloc[0]['code']
+                elif h_code != orig_row.get('Helper Code'):
+                    match = all_h[all_h['code'] == h_code]
+                    if not match.empty: h_name = match.iloc[0]['name']
+
+                active_data.append((sn_val, "", r.get('AREA', ''), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), p_s, p_e))
+                active_dicts.append({"order_num":sn_val, "area_code":"", "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e})
+                
+                for code, name, ptype in [(d_code, d_name, "Driver"), (h_code, h_name, "Helper")]:
                     if pd.notna(code) and str(code).strip() not in ["UNASSIGNED", "N/A", "", "None"]:
                         hist_data.append((ptype, str(code).strip(), str(name).strip(), r.get('AREA', ''), unify_text(r.get('Sector', '')), p_s, p_e))
                         hist_dicts.append({"person_type":ptype, "person_code":str(code).strip(), "person_name":str(name).strip(), "area":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "date":p_s, "end_date":p_e})
@@ -805,7 +856,6 @@ if choice == "1. AI Route Planner":
                     prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED"
 
-                    # 1. ASSIGN DRIVER
                     if rot_type == "Drivers" or prev_assignment.empty or prev_assignment.iloc[0].get('driver_code') in ["N/A", "UNASSIGNED", None, ""]:
                         best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                         avail_dr = all_d[~all_d['code'].isin(used_drivers)]
@@ -836,7 +886,6 @@ if choice == "1. AI Route Planner":
                         a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
                         used_drivers.add(a_d_code)
 
-                    # 2. ASSIGN HELPER
                     if not needs_helper:
                         a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
                     elif rot_type == "Helpers" or prev_assignment.empty or prev_assignment.iloc[0].get('helper_code') in ["N/A", "UNASSIGNED", None, ""]:
@@ -868,7 +917,6 @@ if choice == "1. AI Route Planner":
                         a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
 
-                    # 3. ASSIGN VEHICLE
                     if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else unify_text(d_type)
@@ -962,6 +1010,11 @@ elif choice == "2. Database Management":
     st.header("🗄️ Manage Database")
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Bulk Excel Sync"])
 
+    d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "restriction"]
+    h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "restriction"]
+    a_col_order = ["S/N", "code", "name", "sector", "needs_helper", "sort_order"]
+    v_col_order = ["S/N", "number", "type", "division", "status", "anchor_area", "permitted_areas"]
+
     # DRIVERS TAB
     with tab1:
         st.subheader("📋 Full Drivers List")
@@ -978,6 +1031,7 @@ elif choice == "2. Database Management":
         
         edited_d = st.data_editor(
             disp_df, 
+            column_order=[c for c in d_col_order if c in disp_df.columns],
             column_config={
                 "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "veh_type": st.column_config.SelectboxColumn("Vehicle Type", options=veh_opts),
@@ -987,19 +1041,23 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_drivers"
         )
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
+            changes_saved = 0
             for idx in disp_df.index:
                 row_id = disp_df.loc[idx, 'id']
                 if not disp_df.loc[idx].equals(edited_d.loc[idx]):
                     update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
-            st.rerun()
+                    changes_saved += 1
+            if changes_saved > 0:
+                st.success(f"Saved {changes_saved} updates!")
+                st.rerun()
             
         st.divider()
         c_add, c_edit = st.columns(2)
         with c_add:
             st.subheader("➕ Add Driver")
-            st.caption("Don't see your custom Sector or Vehicle Type in the dropdown? Add a new driver here and the dropdown will automatically learn it.")
             d_name = st.text_input("New Driver Name", key="add_d_name")
             d_code = st.text_input("New Driver Code", key="add_d_code").strip()
             col_t, col_s, col_h = st.columns(3)
@@ -1021,7 +1079,6 @@ elif choice == "2. Database Management":
 
         with c_edit:
             st.subheader("🗑️ Delete Driver")
-            st.caption("Manually Remove a Driver from the Database")
             sel_d_code = st.selectbox("Select Driver to Delete", drivers_df['code'].tolist() if not drivers_df.empty else [])
             if sel_d_code:
                 d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
@@ -1041,20 +1098,27 @@ elif choice == "2. Database Management":
         if not disp_h.empty: disp_h.insert(0, 'S/N', range(1, 1 + len(disp_h)))
         
         edited_h = st.data_editor(
-            disp_h, column_config={
+            disp_h, 
+            column_order=[c for c in h_col_order if c in disp_h.columns],
+            column_config={
                 "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "health_card": st.column_config.SelectboxColumn("Health Card", options=["Yes", "No"]),
                 "anchor_area": st.column_config.TextColumn("Anchor(s) (comma-separated)", help="Type Areas, Sectors, or Veh Types separated by commas")
             }, use_container_width=True, height=250, hide_index=True, key="ed_helpers"
         )
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
+            changes_saved = 0
             for idx in disp_h.index:
                 row_id = disp_h.loc[idx, 'id']
                 if not disp_h.loc[idx].equals(edited_h.loc[idx]):
                     update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
-            st.rerun()
+                    changes_saved += 1
+            if changes_saved > 0:
+                st.success(f"Saved {changes_saved} updates!")
+                st.rerun()
 
         st.divider()
         c_add, c_edit = st.columns(2)
@@ -1097,20 +1161,27 @@ elif choice == "2. Database Management":
         a_sec_opts = list(set(SECTOR_OPTIONS + disp_a.get('sector', pd.Series()).dropna().unique().tolist()))
         
         edited_a = st.data_editor(
-            disp_a, column_config={
+            disp_a, 
+            column_order=[c for c in a_col_order if c in disp_a.columns],
+            column_config={
                 "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "sector": st.column_config.SelectboxColumn("Sector", options=a_sec_opts),
                 "needs_helper": st.column_config.SelectboxColumn("Needs Helper", options=NEEDS_HELPER_OPTIONS)
             }, use_container_width=True, height=250, hide_index=True, key="ed_areas"
         )
         if st.button("💾 Save Table Edits", key="save_table_areas"):
+            changes_saved = 0
             for idx in disp_a.index:
                 row_id = disp_a.loc[idx, 'id']
                 if not disp_a.loc[idx].equals(edited_a.loc[idx]):
                     update_dict = edited_a.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="areas", action="UPDATE", doc_id=row_id, data=update_dict)
-            st.rerun()
+                    changes_saved += 1
+            if changes_saved > 0:
+                st.success(f"Saved {changes_saved} updates!")
+                st.rerun()
 
         st.divider()
         c_add, c_edit = st.columns(2)
@@ -1153,7 +1224,9 @@ elif choice == "2. Database Management":
         v_div_opts = list(set(["Pharma", "Consumer", "2-8 VAN"] + disp_v.get('division', pd.Series()).dropna().unique().tolist()))
         
         edited_v = st.data_editor(
-            disp_v, column_config={
+            disp_v, 
+            column_order=[c for c in v_col_order if c in disp_v.columns],
+            column_config={
                 "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "type": st.column_config.SelectboxColumn("Type", options=v_type_opts),
                 "division": st.column_config.SelectboxColumn("Division", options=v_div_opts),
@@ -1163,13 +1236,18 @@ elif choice == "2. Database Management":
             }, use_container_width=True, height=250, hide_index=True, key="ed_vehicles"
         )
         if st.button("💾 Save Table Edits", key="save_table_vehicles"):
+            changes_saved = 0
             for idx in disp_v.index:
                 row_id = disp_v.loc[idx, 'id']
                 if not disp_v.loc[idx].equals(edited_v.loc[idx]):
                     update_dict = edited_v.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vehicles", action="UPDATE", doc_id=row_id, data=update_dict)
-            st.rerun()
+                    changes_saved += 1
+            if changes_saved > 0:
+                st.success(f"Saved {changes_saved} updates!")
+                st.rerun()
 
         st.divider()
         c_add, c_edit = st.columns(2)
@@ -1231,8 +1309,8 @@ elif choice == "2. Database Management":
             st.success("Database synchronized successfully!")
 
         st.divider()
-        st.subheader("🚨 Emergency Database Restore")
-        st.warning("If your Areas or Vehicles got messed up, you can Restore them back to either the system Default, or your own saved Custom Default.")
+        st.subheader("🚨 System & Database Master Controls")
+        st.caption("Use these buttons to backup your current custom layout, restore an old one, or wipe everything.")
         
         c_r1, c_r2, c_r3 = st.columns(3)
         if c_r1.button("♻️ Restore Default Template", type="secondary"):
@@ -1273,7 +1351,11 @@ elif choice == "3. Past Experience Builder":
     area_list = areas_df['name'].tolist() if not areas_df.empty else []
     
     search_hist = st.text_input("🔍 Search History by Exact Date, Month, Year, Code, Name, or Area", "")
-    disp_hist = history_df.sort_values(by="date", ascending=False).copy()
+    
+    if not history_df.empty and 'date' in history_df.columns:
+        disp_hist = history_df.sort_values(by="date", ascending=False).copy()
+    else:
+        disp_hist = history_df.copy()
     
     if search_hist and not disp_hist.empty:
         disp_hist = disp_hist[disp_hist.astype(str).apply(lambda x: x.str.contains(search_hist, case=False, na=False)).any(axis=1)]
@@ -1292,21 +1374,17 @@ elif choice == "3. Past Experience Builder":
     )
     
     if st.button("💾 Save Table Edits", key="save_table_hist"):
+        changes_saved = 0
         for idx in disp_hist.index:
             row_id = disp_hist.loc[idx, 'id']
             if not disp_hist.loc[idx].equals(edited_hist.loc[idx]):
                 update_dict = edited_hist.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                 run_query(f"UPDATE history SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="history", action="UPDATE", doc_id=row_id, data=update_dict)
-        st.rerun()
-
-    with st.expander("🚨 Emergency Data Restore"):
-        st.warning("Clicking this will wipe out ALL current Past Experience data from the system. (It defaults to empty).")
-        if st.button("♻️ Wipe All Past Experience Data", type="primary"):
-            with st.spinner("Wiping old history..."):
-                run_query(None, table_name="history", action="CLEAR_TABLE")
-                st.cache_data.clear()
-            st.success("Past Experience data fully wiped and reset!")
+                changes_saved += 1
+        if changes_saved > 0:
+            st.success(f"Saved {changes_saved} updates!")
             st.rerun()
 
     st.divider()
@@ -1512,6 +1590,7 @@ elif choice == "4. Vacation Schedule":
     )
     
     if st.button("💾 Save Table Edits", key="save_table_vacs"):
+        changes_saved = 0
         for idx in disp_vac.index:
             row_id = disp_vac.loc[idx, 'id']
             if not disp_vac.loc[idx].equals(edited_vac.loc[idx]):
@@ -1519,7 +1598,10 @@ elif choice == "4. Vacation Schedule":
                 update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                 run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vacations", action="UPDATE", doc_id=row_id, data=update_dict)
-        st.rerun()
+                changes_saved += 1
+        if changes_saved > 0:
+            st.success(f"Saved {changes_saved} updates!")
+            st.rerun()
 
     with st.expander("📥 Export / 📤 Import Vacation Data"):
         output = generate_excel_with_sn([vacs_df], ['vacations'])
