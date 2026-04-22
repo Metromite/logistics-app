@@ -1,5 +1,3 @@
---- START OF FILE ai_studio_code - Copy.py ---
-
 import streamlit as st
 
 # --- ANTI-SLEEP PING HANDLER ---
