@@ -1,12 +1,9 @@
 import streamlit as st
 
 # --- ANTI-SLEEP PING HANDLER ---
-try:
-    if "ping" in st.query_params:
-        st.write("🟢 App is awake and Firebase quota is protected!")
-        st.stop()
-except:
-    pass
+if "ping" in st.query_params:
+    st.write("🟢 App is awake and Firebase quota is protected!")
+    st.stop()
 
 import sqlite3
 import pandas as pd
@@ -138,7 +135,7 @@ conn = init_sqlite_db()
 def clear_cache():
     st.cache_data.clear()
 
-@st.cache_data(show_spinner=False, ttl=86400) 
+@st.cache_data(show_spinner=False, ttl=3600) 
 def load_table(table_name):
     if FIREBASE_READY:
         try:
@@ -329,14 +326,14 @@ if "db_initialized" not in st.session_state:
                         cols = ', '.join(dicts[0].keys())
                         qmarks = ', '.join(['?'] * len(dicts[0]))
                         vals = [tuple(d.values()) for d in dicts]
-                        run_query(f"INSERT INTO {t} ({cols}) VALUES ({qmarks})", vals, table_name=t, action="INSERT_MANY", data=dicts)
+                        run_query(f"INSERT OR REPLACE INTO {t} ({cols}) VALUES ({qmarks})", vals, table_name=t, action="INSERT_MANY", data=dicts)
                         continue
             
             current_areas = load_table("areas")
             if force or len(current_areas) != 39:
                 run_query("DELETE FROM areas", table_name="areas", action="CLEAR_TABLE")
                 areas_data = [{"code": c, "name": n, "sector": unify_text(s), "needs_helper": nh, "sort_order": o} for c, n, s, nh, o in SEED_AREAS_IMAGE]
-                run_query("INSERT OR IGNORE INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE, table_name="areas", action="INSERT_MANY", data=areas_data)
+                run_query("INSERT OR REPLACE INTO areas (code, name, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", SEED_AREAS_IMAGE, table_name="areas", action="INSERT_MANY", data=areas_data)
             
             d_df = load_table('drivers')
             if len(d_df) == 0:
@@ -363,7 +360,7 @@ if "db_initialized" not in st.session_state:
     execute_global_init()
     st.session_state.db_initialized = True
 
-# --- HIGH PERFORMANCE SCORING HELPERS (WITH SUBSTRING ANCHOR CACHE) ---
+# --- HIGH PERFORMANCE SCORING HELPERS ---
 def build_experience_cache():
     history_df = load_table('history')
     exp_cache = {}
@@ -408,6 +405,15 @@ def vacation_within_3_months(person_code, target_date, vac_cache):
     for start, end in vac_cache.get(person_code, []):
         if target_str < start <= limit_date: return parse_date_safe(start)
     return None
+
+def months_until_next_vacation(person_code, vac_cache, target_date):
+    target_str = target_date.strftime("%Y-%m-%d")
+    past_vacs = [end for start, end in vac_cache.get(person_code, []) if end < target_str]
+    if not past_vacs: return 0 
+    last_vac = max(past_vacs)
+    days_since = (target_date - datetime.strptime(last_vac, "%Y-%m-%d").date()).days
+    return max(0, 365 - days_since) / 30.0
+
 
 # --- WEIGHTED AI SCORING ALGORITHM (WITH MULTI-ANCHOR SUBSTRING SEARCH) ---
 NEVER_WORKED_BONUS = 10000
@@ -532,14 +538,12 @@ multi_anchor_opts.sort()
 
 all_d = load_table('drivers')
 all_h = load_table('helpers')
-vehicles_global = load_table('vehicles')
 
 drv_codes_opts = ["UNASSIGNED", ""] + all_d['code'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
 drv_names_opts = ["UNASSIGNED", ""] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
 hlp_codes_opts = ["UNASSIGNED", "N/A", ""] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", ""]
 hlp_names_opts = ["UNASSIGNED", "NO HELPER REQUIRED", ""] + all_h['name'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "NO HELPER REQUIRED", ""]
-veh_num_opts = ["UNASSIGNED", ""] + vehicles_global['number'].dropna().unique().tolist() if not vehicles_global.empty else ["UNASSIGNED", ""]
-
+sec_opts_list = [""] + SECTOR_OPTIONS
 
 # --- APP ROUTING ---
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
@@ -625,8 +629,8 @@ if choice == "1. AI Route Planner":
     if not draft_routes.empty:
         st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, then save the draft or Confirm to log experiences.")
         
-        d_start_str = draft_routes.iloc[0].get('start_date') if 'start_date' in draft_routes.columns and pd.notna(draft_routes.iloc[0].get('start_date')) else None
-        d_end_str = draft_routes.iloc[0].get('end_date') if 'end_date' in draft_routes.columns and pd.notna(draft_routes.iloc[0].get('end_date')) else None
+        d_start_str = draft_routes.iloc[0].get('start_date') if 'start_date' in draft_routes.columns and str(draft_routes.iloc[0].get('start_date')) else None
+        d_end_str = draft_routes.iloc[0].get('end_date') if 'end_date' in draft_routes.columns and str(draft_routes.iloc[0].get('end_date')) else None
         
         plan_start_val = datetime.strptime(d_start_str, "%Y-%m-%d").date() if d_start_str and d_start_str != "None" and d_start_str != "" else today
         plan_end_val = datetime.strptime(d_end_str, "%Y-%m-%d").date() if d_end_str and d_end_str != "None" and d_end_str != "" else today + timedelta(days=90)
@@ -657,8 +661,10 @@ if choice == "1. AI Route Planner":
                 "Drivers Name": st.column_config.SelectboxColumn("Drivers Name", options=drv_names_opts),
                 "Helper Code": st.column_config.SelectboxColumn("CODE", options=hlp_codes_opts),
                 "Helpers Name": st.column_config.SelectboxColumn("Helpers Name", options=hlp_names_opts),
-                "VEH NO": st.column_config.SelectboxColumn("VEH NO", options=veh_num_opts),
-                "AREA": st.column_config.SelectboxColumn("AREA", options=area_list_global)
+                "VEH NO": st.column_config.TextColumn("VEH NO", help="Type manually or combine vehicle numbers"),
+                "AREA": st.column_config.TextColumn("AREA", help="Type manually or combine multiple areas"),
+                "Sector": st.column_config.SelectboxColumn("Sector", options=sec_opts_list),
+                "Division Category": st.column_config.TextColumn("Division Category")
             }
         )
         
@@ -681,7 +687,7 @@ if choice == "1. AI Route Planner":
             new_dicts = []
             for index, r in edited_df.iterrows():
                 sn_val = r.get('S/N', index + 1)
-                orig_row = disp_draft.iloc[index]
+                orig_row = disp_draft.iloc[index] if index < len(disp_draft) else {}
                 
                 d_code = r.get('Driver Code', '')
                 d_name = r.get('Drivers Name', '')
@@ -726,7 +732,7 @@ if choice == "1. AI Route Planner":
                 new_areas_tuples.append((a_name, a_name, a_sec, n_h, idx+1))
                 new_areas_dicts.append({"code": a_name, "name": a_name, "sector": a_sec, "needs_helper": n_h, "sort_order": idx+1})
             
-            run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", new_areas_tuples, table_name="areas", action="INSERT_MANY", data=new_areas_dicts)
+            run_query("INSERT OR REPLACE INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", new_areas_tuples, table_name="areas", action="INSERT_MANY", data=new_areas_dicts)
             st.success("New Route Template Saved! Future plans will use this layout.")
             st.rerun()
 
@@ -747,7 +753,7 @@ if choice == "1. AI Route Planner":
             hist_dicts = []
             for index, r in edited_df.iterrows():
                 sn_val = r.get('S/N', index + 1)
-                orig_row = disp_draft.iloc[index]
+                orig_row = disp_draft.iloc[index] if index < len(disp_draft) else {}
                 
                 d_code = r.get('Driver Code', '')
                 d_name = r.get('Drivers Name', '')
@@ -811,8 +817,10 @@ if choice == "1. AI Route Planner":
                 "Drivers Name": st.column_config.SelectboxColumn("Drivers Name", options=drv_names_opts),
                 "Helper Code": st.column_config.SelectboxColumn("CODE", options=hlp_codes_opts),
                 "Helpers Name": st.column_config.SelectboxColumn("Helpers Name", options=hlp_names_opts),
-                "VEH NO": st.column_config.SelectboxColumn("VEH NO", options=veh_num_opts),
-                "AREA": st.column_config.SelectboxColumn("AREA", options=area_list_global)
+                "VEH NO": st.column_config.TextColumn("VEH NO", help="Type manually or combine vehicle numbers"),
+                "AREA": st.column_config.TextColumn("AREA", help="Type manually or combine multiple areas"),
+                "Sector": st.column_config.SelectboxColumn("Sector", options=sec_opts_list),
+                "Division Category": st.column_config.TextColumn("Division Category")
             }
         )
         col_dl, col_tpl_act, col_rm = st.columns([1, 1.5, 1])
@@ -836,7 +844,7 @@ if choice == "1. AI Route Planner":
                 new_areas_tuples.append((a_name, a_name, a_sec, n_h, idx+1))
                 new_areas_dicts.append({"code": a_name, "name": a_name, "sector": a_sec, "needs_helper": n_h, "sort_order": idx+1})
             
-            run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", new_areas_tuples, table_name="areas", action="INSERT_MANY", data=new_areas_dicts)
+            run_query("INSERT OR REPLACE INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", new_areas_tuples, table_name="areas", action="INSERT_MANY", data=new_areas_dicts)
             st.success("New Route Template Saved! Future plans will use this layout.")
             st.rerun()
 
@@ -1035,12 +1043,13 @@ if choice == "1. AI Route Planner":
     # --- AI REASONING EXPLANATION TABLE ---
     reasons_df = load_table('route_plan_reasons')
     predict_df = load_table('vacation_predictions')
-    if not reasons_df.empty:
+    areas_exp_df = load_table('areas')
+    if not reasons_df.empty and not areas_exp_df.empty and 'name' in areas_exp_df.columns:
         with st.expander("🤖 View AI Reasoning & Future Replacement Logs", expanded=False):
             st.caption("Detailed breakdown of why the AI selected each candidate based on the weighted scoring logic.")
             
             explain_list = []
-            for area in load_table('areas')['name'].unique():
+            for area in areas_exp_df['name'].unique():
                 d_rsn = reasons_df[(reasons_df['area'] == area) & (reasons_df['role'] == 'Driver')]
                 h_rsn = reasons_df[(reasons_df['area'] == area) & (reasons_df['role'] == 'Helper')]
                 
@@ -1501,7 +1510,6 @@ elif choice == "3. Past Experience Builder":
                 for page in pdf_reader.pages:
                     text += page.extract_text() + "\n"
                     
-                # SMART OCR SCANNER for "Dispatch Summary" Format
                 date_match = re.search(r"Date\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
                 global_date = parse_date_safe(date_match.group(1)) if date_match else None
                 
@@ -1510,7 +1518,6 @@ elif choice == "3. Past Experience Builder":
                 a_list = load_table('areas').to_dict('records')
                 
                 for line in text.split('\n'):
-                    # Skip empty lines
                     if not line.strip(): continue
                     
                     line_dates = re.findall(r'\d{2}/\d{2}/\d{4}', line)
