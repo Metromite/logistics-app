@@ -1,9 +1,12 @@
 import streamlit as st
 
 # --- ANTI-SLEEP PING HANDLER ---
-if "ping" in st.query_params:
-    st.write("🟢 App is awake and Firebase quota is protected!")
-    st.stop()
+try:
+    if "ping" in st.query_params:
+        st.write("🟢 App is awake and Firebase quota is protected!")
+        st.stop()
+except:
+    pass
 
 import sqlite3
 import pandas as pd
@@ -28,7 +31,7 @@ st.set_page_config(page_title="Logistics AI Planner", layout="wide")
 def unify_text(val):
     if pd.isna(val) or val is None: return ""
     val = str(val).strip()
-    if val.lower() in ["nan", "none", "nat", "null"]: return ""
+    if val.lower() in ["nan", "none", "nat", "null", ""]: return ""
     
     if re.search(r'2\s*-\s*8', val, flags=re.IGNORECASE): return '2-8 VAN'
     if val.upper() == 'PHARMA': return 'Pharma'
@@ -48,7 +51,7 @@ def unify_dataframe(df):
     return df
 
 def parse_date_safe(d_str):
-    if pd.isna(d_str) or not str(d_str).strip() or str(d_str).lower() in ["none", "nan", "nat"]: return ""
+    if pd.isna(d_str) or not str(d_str).strip() or str(d_str).lower() in ["none", "nan", "nat", ""]: return ""
     d_str = str(d_str).strip().split(" ")[0]
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
         try: return datetime.strptime(d_str, fmt).strftime("%Y-%m-%d")
@@ -81,15 +84,6 @@ try:
     else:
         FIREBASE_READY = False
 
-    if FIREBASE_READY:
-        try:
-            list(db_fs.collection("_system_ping").limit(1).stream())
-        except Exception as ping_error:
-            if "429" in str(ping_error) or "Quota" in str(ping_error) or "ResourceExhausted" in str(ping_error):
-                st.sidebar.error("🚨 Firebase Quota Exceeded! Using lightning-fast local cache.")
-            else:
-                st.sidebar.error(f"⚠️ Firebase Error: {ping_error}")
-            FIREBASE_READY = False
 except Exception as e:
     st.sidebar.error(f"Firebase Config Error: {str(e)}")
     FIREBASE_READY = False
@@ -144,7 +138,7 @@ conn = init_sqlite_db()
 def clear_cache():
     st.cache_data.clear()
 
-@st.cache_data(show_spinner=False, ttl=3600) 
+@st.cache_data(show_spinner=False, ttl=86400) 
 def load_table(table_name):
     if FIREBASE_READY:
         try:
@@ -167,14 +161,14 @@ def load_table(table_name):
     if table_name == 'areas' and 'sort_order' not in df.columns: df['sort_order'] = 99
     if table_name == 'history' and 'sector' not in df.columns: df['sector'] = 'Pharma'
     if table_name == 'vehicles':
-        if 'anchor_area' not in df.columns: df['anchor_area'] = 'None'
+        if 'anchor_area' not in df.columns: df['anchor_area'] = ''
         if 'status' not in df.columns: df['status'] = 'Active'
         if 'permitted_areas' not in df.columns: df['permitted_areas'] = 'All'
         if 'division' not in df.columns: df['division'] = 'Pharma'
-    if table_name == 'active_routes' and 'start_date' not in df.columns: df['start_date'] = 'None'
+    if table_name == 'active_routes' and 'start_date' not in df.columns: df['start_date'] = ''
     if table_name == 'draft_routes':
-        if 'start_date' not in df.columns: df['start_date'] = 'None'
-        if 'end_date' not in df.columns: df['end_date'] = 'None'
+        if 'start_date' not in df.columns: df['start_date'] = ''
+        if 'end_date' not in df.columns: df['end_date'] = ''
     if table_name == 'vacations' and 'person_code' not in df.columns: df['person_code'] = 'UNKNOWN'
     
     if table_name == 'areas': df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99); df = df.sort_values(by='sort_order')
@@ -326,8 +320,6 @@ RAW_NAME_MAP = {
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False, load_default=False):
         try:
-            if FIREBASE_READY: db_fs.collection("_system_ping").limit(1).get() 
-
             if load_default:
                 for t in ['areas', 'drivers', 'helpers', 'vehicles']:
                     def_df = load_table(f"default_{t}")
@@ -371,7 +363,7 @@ if "db_initialized" not in st.session_state:
     execute_global_init()
     st.session_state.db_initialized = True
 
-# --- HIGH PERFORMANCE SCORING HELPERS (WITH CROSS TRAINING SECTOR CACHE) ---
+# --- HIGH PERFORMANCE SCORING HELPERS (WITH SUBSTRING ANCHOR CACHE) ---
 def build_experience_cache():
     history_df = load_table('history')
     exp_cache = {}
@@ -417,16 +409,7 @@ def vacation_within_3_months(person_code, target_date, vac_cache):
         if target_str < start <= limit_date: return parse_date_safe(start)
     return None
 
-def months_until_next_vacation(person_code, vac_cache, target_date):
-    target_str = target_date.strftime("%Y-%m-%d")
-    past_vacs = [end for start, end in vac_cache.get(person_code, []) if end < target_str]
-    if not past_vacs: return 0 
-    last_vac = max(past_vacs)
-    days_since = (target_date - datetime.strptime(last_vac, "%Y-%m-%d").date()).days
-    return max(0, 365 - days_since) / 30.0
-
-
-# --- WEIGHTED AI SCORING ALGORITHM (WITH MULTI-ANCHOR) ---
+# --- WEIGHTED AI SCORING ALGORITHM (WITH MULTI-ANCHOR SUBSTRING SEARCH) ---
 NEVER_WORKED_BONUS = 10000
 NEVER_WORKED_SECTOR_BONUS = 8000
 ANCHOR_MATCH_BONUS = 5000
@@ -449,11 +432,21 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
         if p_veh and p_veh not in [req_veh, ""] and not (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
             return None, f"Excluded: Vehicle Mismatch ({p_veh} != {req_veh})"
 
-    anchors = [unify_text(a) for a in str(candidate.get('anchor_area', '')).split(',') if a.strip()]
+    anchors = [unify_text(a).upper() for a in str(candidate.get('anchor_area', '')).split(',') if a.strip()]
+    if "NONE" in anchors: anchors.remove("NONE")
     if "" in anchors: anchors.remove("")
 
     if anchors:
-        if any(a in [unify_text(area['name']), req_sector, req_veh] for a in anchors):
+        check_list = [unify_text(area['name']).upper(), unify_text(req_sector).upper(), unify_text(req_veh).upper()]
+        matched = False
+        for anc in anchors:
+            for chk in check_list:
+                if anc in chk or chk in anc:
+                    matched = True
+                    break
+            if matched: break
+            
+        if matched:
             score += ANCHOR_MATCH_BONUS
             reasons.append(f"Anchor Match (+{ANCHOR_MATCH_BONUS})")
         else:
@@ -635,8 +628,8 @@ if choice == "1. AI Route Planner":
         d_start_str = draft_routes.iloc[0].get('start_date') if 'start_date' in draft_routes.columns and pd.notna(draft_routes.iloc[0].get('start_date')) else None
         d_end_str = draft_routes.iloc[0].get('end_date') if 'end_date' in draft_routes.columns and pd.notna(draft_routes.iloc[0].get('end_date')) else None
         
-        plan_start_val = datetime.strptime(d_start_str, "%Y-%m-%d").date() if d_start_str and d_start_str != "None" else today
-        plan_end_val = datetime.strptime(d_end_str, "%Y-%m-%d").date() if d_end_str and d_end_str != "None" else today + timedelta(days=90)
+        plan_start_val = datetime.strptime(d_start_str, "%Y-%m-%d").date() if d_start_str and d_start_str != "None" and d_start_str != "" else today
+        plan_end_val = datetime.strptime(d_end_str, "%Y-%m-%d").date() if d_end_str and d_end_str != "None" and d_end_str != "" else today + timedelta(days=90)
         
         c_d1, c_d2 = st.columns(2)
         plan_start = c_d1.date_input("Plan Start Date", value=plan_start_val)
@@ -669,11 +662,17 @@ if choice == "1. AI Route Planner":
             }
         )
         
-        col_down, col_save, col_app, col_can = st.columns([1, 1, 1.2, 1])
+        col_down, col_save, col_tpl, col_app, col_can = st.columns([1, 1, 1.2, 1.2, 1])
         output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
         col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
         
         if col_save.button("💾 Save Draft Plan", type="secondary"):
+            if "route_editor" in st.session_state:
+                changes = st.session_state["route_editor"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    for col_name, new_val in col_changes.items():
+                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
+                        
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
@@ -684,7 +683,6 @@ if choice == "1. AI Route Planner":
                 sn_val = r.get('S/N', index + 1)
                 orig_row = disp_draft.iloc[index]
                 
-                # RECONCILIATION: Auto-Sync Code & Name if one changes
                 d_code = r.get('Driver Code', '')
                 d_name = r.get('Drivers Name', '')
                 if d_name != orig_row.get('Drivers Name'):
@@ -711,7 +709,34 @@ if choice == "1. AI Route Planner":
             st.success("Draft Saved Successfully!")
             st.rerun()
 
+        if col_tpl.button("📝 Save Layout as New Template", type="secondary"):
+            if "route_editor" in st.session_state:
+                changes = st.session_state["route_editor"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    for col_name, new_val in col_changes.items():
+                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
+            
+            run_query("DELETE FROM areas", table_name="areas", action="CLEAR_TABLE")
+            new_areas_tuples = []
+            new_areas_dicts = []
+            for idx, r in edited_df.iterrows():
+                a_name = unify_text(r.get('AREA', f'Area_{idx}'))
+                a_sec = unify_text(r.get('Sector', 'Pharma'))
+                n_h = "No" if str(r.get('Helpers Name', '')).upper() == "NO HELPER REQUIRED" else "Yes"
+                new_areas_tuples.append((a_name, a_name, a_sec, n_h, idx+1))
+                new_areas_dicts.append({"code": a_name, "name": a_name, "sector": a_sec, "needs_helper": n_h, "sort_order": idx+1})
+            
+            run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", new_areas_tuples, table_name="areas", action="INSERT_MANY", data=new_areas_dicts)
+            st.success("New Route Template Saved! Future plans will use this layout.")
+            st.rerun()
+
         if col_app.button("✅ Confirm Plan & Save Experiences", type="primary"):
+            if "route_editor" in st.session_state:
+                changes = st.session_state["route_editor"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    for col_name, new_val in col_changes.items():
+                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
+                        
             run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
@@ -779,13 +804,42 @@ if choice == "1. AI Route Planner":
         disp_active = disp_active[[c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]]
         if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
         
-        st.dataframe(
-            disp_active, use_container_width=True, hide_index=True, column_order=ROUTE_COLUMN_ORDER,
-            column_config={"Driver Code": st.column_config.TextColumn("CODE"), "Helper Code": st.column_config.TextColumn("CODE")}
+        edited_act = st.data_editor(
+            disp_active, use_container_width=True, hide_index=True, column_order=ROUTE_COLUMN_ORDER, key="act_editor",
+            column_config={
+                "Driver Code": st.column_config.SelectboxColumn("CODE", options=drv_codes_opts),
+                "Drivers Name": st.column_config.SelectboxColumn("Drivers Name", options=drv_names_opts),
+                "Helper Code": st.column_config.SelectboxColumn("CODE", options=hlp_codes_opts),
+                "Helpers Name": st.column_config.SelectboxColumn("Helpers Name", options=hlp_names_opts),
+                "VEH NO": st.column_config.SelectboxColumn("VEH NO", options=veh_num_opts),
+                "AREA": st.column_config.SelectboxColumn("AREA", options=area_list_global)
+            }
         )
-        col_dl, col_rm = st.columns(2)
+        col_dl, col_tpl_act, col_rm = st.columns([1, 1.5, 1])
         output = generate_excel_with_sn([disp_active], ['Active Route Plan'])
         col_dl.download_button("📥 Download Active Plan Excel", data=output, file_name=f"Active_Plan_{start_dt}.xlsx")
+        
+        if col_tpl_act.button("📝 Save Layout as New Template", type="secondary"):
+            if "act_editor" in st.session_state:
+                changes = st.session_state["act_editor"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    for col_name, new_val in col_changes.items():
+                        edited_act.iat[row_idx, edited_act.columns.get_loc(col_name)] = new_val
+            
+            run_query("DELETE FROM areas", table_name="areas", action="CLEAR_TABLE")
+            new_areas_tuples = []
+            new_areas_dicts = []
+            for idx, r in edited_act.iterrows():
+                a_name = unify_text(r.get('AREA', f'Area_{idx}'))
+                a_sec = unify_text(r.get('Sector', 'Pharma'))
+                n_h = "No" if str(r.get('Helpers Name', '')).upper() == "NO HELPER REQUIRED" else "Yes"
+                new_areas_tuples.append((a_name, a_name, a_sec, n_h, idx+1))
+                new_areas_dicts.append({"code": a_name, "name": a_name, "sector": a_sec, "needs_helper": n_h, "sort_order": idx+1})
+            
+            run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order) VALUES (?, ?, ?, ?, ?)", new_areas_tuples, table_name="areas", action="INSERT_MANY", data=new_areas_dicts)
+            st.success("New Route Template Saved! Future plans will use this layout.")
+            st.rerun()
+
         if col_rm.button("🗑️ Remove Current Plan", type="secondary"):
             run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE")
             st.rerun()
@@ -856,6 +910,7 @@ if choice == "1. AI Route Planner":
                     prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED"
 
+                    # 1. ASSIGN DRIVER
                     if rot_type == "Drivers" or prev_assignment.empty or prev_assignment.iloc[0].get('driver_code') in ["N/A", "UNASSIGNED", None, ""]:
                         best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                         avail_dr = all_d[~all_d['code'].isin(used_drivers)]
@@ -886,6 +941,7 @@ if choice == "1. AI Route Planner":
                         a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
                         used_drivers.add(a_d_code)
 
+                    # 2. ASSIGN HELPER
                     if not needs_helper:
                         a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
                     elif rot_type == "Helpers" or prev_assignment.empty or prev_assignment.iloc[0].get('helper_code') in ["N/A", "UNASSIGNED", None, ""]:
@@ -917,6 +973,7 @@ if choice == "1. AI Route Planner":
                         a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
 
+                    # 3. ASSIGN VEHICLE
                     if a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else unify_text(d_type)
@@ -931,11 +988,20 @@ if choice == "1. AI Route Planner":
                             
                             if not type_match: continue
                             
-                            v_anchors = [a.strip() for a in str(v.get('anchor_area', 'None')).split(',') if a.strip()]
-                            if "None" in v_anchors and len(v_anchors) == 1: v_anchors = []
+                            v_anchors = [a.strip().upper() for a in str(v.get('anchor_area', 'None')).split(',') if a.strip()]
+                            if "NONE" in v_anchors: v_anchors.remove("NONE")
+                            if "" in v_anchors: v_anchors.remove("")
                             
                             if v_anchors:
-                                if any(unify_text(a) in [area_name, req_sector, tvt] for a in v_anchors):
+                                matched = False
+                                check_list = [unify_text(area_name).upper(), unify_text(req_sector).upper(), unify_text(tvt).upper()]
+                                for anc in v_anchors:
+                                    for chk in check_list:
+                                        if anc in chk or chk in anc:
+                                            matched = True
+                                            break
+                                    if matched: break
+                                if matched:
                                     potential_vs.append((v, True))
                             else:
                                 potential_vs.append((v, False))
@@ -1292,7 +1358,7 @@ elif choice == "2. Database Management":
             for sheet in xls.sheet_names:
                 df = pd.read_excel(xls, sheet_name=sheet)
                 run_query(None, table_name=sheet, action="CLEAR_TABLE")
-
+                
                 insert_data = []
                 insert_dicts = []
                 for _, row in df.iterrows():
@@ -1416,7 +1482,7 @@ elif choice == "3. Past Experience Builder":
                 if code_col and area_col and from_col:
                     for _, row in df_up.iterrows():
                         c_val = str(row[code_col]).strip()
-                        if pd.isna(c_val) or c_val == "nan" or not c_val: continue
+                        if pd.isna(c_val) or c_val.lower() in ["nan", "none", ""]: continue
                         
                         n_val = str(row[name_col]).strip() if name_col else "Unknown"
                         a_val = str(row[area_col]).strip()
