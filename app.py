@@ -88,10 +88,18 @@ except Exception as e:
     st.sidebar.error(f"Firebase Config Error: {str(e)}")
     FIREBASE_READY = False
 
+# Fallback mechanism if quota exceeded on ping
+if FIREBASE_READY:
+    try:
+        list(db_fs.collection("_system_ping").limit(1).stream())
+    except Exception as ping_error:
+        FIREBASE_READY = False
+
 if FIREBASE_READY:
     st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢 Firebase Connected</div>", unsafe_allow_html=True)
 else:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴 Firebase Disconnected (Offline Mode)</div>", unsafe_allow_html=True)
+    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴 Offline/Local Mode Active</div>", unsafe_allow_html=True)
+
 
 # --- HYBRID SQLITE ---
 def init_sqlite_db():
@@ -143,20 +151,28 @@ def clear_cache():
 
 @st.cache_data(show_spinner=False, ttl=86400) 
 def load_table(table_name):
+    global FIREBASE_READY
+    df = pd.DataFrame()
+    
     if FIREBASE_READY:
         try:
             docs = db_fs.collection(table_name).stream()
             data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
             df = pd.DataFrame(data)
         except Exception as e:
-            st.error(f"Error reading from Firebase: {e}")
-            return pd.DataFrame()
-    else:
+            if "429" in str(e) or "Quota" in str(e) or "ResourceExhausted" in str(e):
+                FIREBASE_READY = False # Silently kill Firebase connection, prevent future attempts
+            else:
+                st.error(f"Error reading from Firebase: {e}")
+                
+    # Seamless Fallback to SQLite if Firebase 429'd or is offline
+    if not FIREBASE_READY or df.empty:
         df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
         
     if df.empty: return df
     df = unify_dataframe(df)
     
+    # DB Defaults
     if table_name == 'helpers' and 'health_card' not in df.columns: df['health_card'] = 'No'
     if table_name == 'drivers' and 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
     if table_name == 'areas':
@@ -190,7 +206,9 @@ def load_table(table_name):
     return df
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
+    global FIREBASE_READY
     try:
+        # 1. Primary Save to SQLite
         c = conn.cursor()
         if query:
             if isinstance(data, list) and (action == "INSERT_MANY" or action == "INSERT"): 
@@ -203,34 +221,40 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
             c.execute(f"DELETE FROM {table_name}")
         conn.commit()
 
+        # 2. Sync to Firebase if Active
         if FIREBASE_READY and table_name and action:
-            if action == "INSERT" and data and not isinstance(data, list):
-                db_fs.collection(table_name).add(data)
-            elif action == "INSERT_MANY" and data and isinstance(data, list):
-                batch = db_fs.batch()
-                for count, doc_data in enumerate(data, 1):
-                    doc_ref = db_fs.collection(table_name).document()
-                    batch.set(doc_ref, doc_data)
-                    if count % 400 == 0:
-                        batch.commit()
-                        batch = db_fs.batch()
-                batch.commit()
-            elif action == "UPDATE" and doc_id and data:
-                db_fs.collection(table_name).document(str(doc_id)).update(data)
-            elif action == "DELETE_DOC" and doc_id:
-                db_fs.collection(table_name).document(str(doc_id)).delete()
-            elif action == "CLEAR_TABLE":
-                docs = db_fs.collection(table_name).select([]).stream() 
-                batch = db_fs.batch()
-                for count, doc in enumerate(docs, 1):
-                    batch.delete(doc.reference)
-                    if count % 400 == 0:
-                        batch.commit()
-                        batch = db_fs.batch()
-                batch.commit()
+            try:
+                if action == "INSERT" and data and not isinstance(data, list):
+                    db_fs.collection(table_name).add(data)
+                elif action == "INSERT_MANY" and data and isinstance(data, list):
+                    batch = db_fs.batch()
+                    for count, doc_data in enumerate(data, 1):
+                        doc_ref = db_fs.collection(table_name).document()
+                        batch.set(doc_ref, doc_data)
+                        if count % 400 == 0:
+                            batch.commit()
+                            batch = db_fs.batch()
+                    batch.commit()
+                elif action == "UPDATE" and doc_id and data:
+                    db_fs.collection(table_name).document(str(doc_id)).update(data)
+                elif action == "DELETE_DOC" and doc_id:
+                    db_fs.collection(table_name).document(str(doc_id)).delete()
+                elif action == "CLEAR_TABLE":
+                    docs = db_fs.collection(table_name).select([]).stream() 
+                    batch = db_fs.batch()
+                    for count, doc in enumerate(docs, 1):
+                        batch.delete(doc.reference)
+                        if count % 400 == 0:
+                            batch.commit()
+                            batch = db_fs.batch()
+                    batch.commit()
+            except Exception as fb_e:
+                if "429" in str(fb_e) or "Quota" in str(fb_e):
+                    FIREBASE_READY = False # Fail silently, SQLite saved it successfully.
+                else:
+                    st.error(f"Firebase Error: {fb_e}")
                 
-        if table_name: load_table.clear(table_name)
-        else: st.cache_data.clear()
+        st.cache_data.clear() # Clear cache to refresh UI
         return True
     except Exception as e:
         st.error(f"Database Edit Failed: {str(e)}")
@@ -249,7 +273,7 @@ def generate_excel_with_sn(df_list, sheet_names):
     output.seek(0)
     return output
 
-# --- OPTIONS ---
+# --- OPTIONS & HARDCODED TEMPLATES ---
 VEHICLE_OPTIONS = ["", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 NEEDS_HELPER_OPTIONS = ["Yes", "No", ""]
@@ -258,7 +282,7 @@ ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Drivers Name", "AREA", "Sector", "H
 KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
 KEEP_DRIVERS = ["D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", "D089", "D054", "D088", "D098", "D033"]
 
-# Exactly matching user's Image
+# Exactly matching User's uploaded Image sequence (Row 1 to 39)
 SEED_AREAS_IMAGE = [
     ("PH-FUJ", "FUJAIRAH", "Pharma", "Yes", 1, "Fujairah"), 
     ("PH-RAK", "RAK / UAQ", "Pharma", "Yes", 2, "RAK"),
@@ -273,8 +297,8 @@ SEED_AREAS_IMAGE = [
     ("PH-AJM", "AJMAN", "Pharma", "Yes", 11, "Ajman"),
     ("PH-SHJS", "SHARJAH SANAYA", "Pharma", "Yes", 12, "Sharjah"),
     ("PH-SHJ", "SHARJAH ( BUHAIRA & ROLLA)", "Pharma", "Yes", 13, "Sharjah"), 
-    ("28-CC1", "COLD CHAIN/URGENT ORDERS", "2-8", "No", 14, "Dubai"), 
-    ("28-CC2", "COLD CHAIN/URGENT ORDERS", "2-8", "No", 15, "Dubai"), 
+    ("28-CC1", "COLD CHAIN/URGENT ORDERS", "2-8", "No", 14, "Dubai, Sharjah, Ajman"), 
+    ("28-CC2", "COLD CHAIN/URGENT ORDERS", "2-8", "No", 15, "Dubai, Sharjah, Ajman"), 
     ("PH-SAMP", "Sample Driver", "Pharma", "Yes", 16, "Dubai"), 
     ("PH-2ND1", "SECOND TRIP", "Pharma", "Yes", 17, "Dubai"), 
     ("PH-2ND2", "SECOND TRIP", "Pharma", "Yes", 18, "Dubai"), 
@@ -345,17 +369,16 @@ RAW_NAME_MAP = {
     "H017": "Mujammal", "H126": "Subin Kovammal"
 }
 
+
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False, load_default=False):
         try:
-            if FIREBASE_READY: db_fs.collection("_system_ping").limit(1).get() 
-
             if load_default:
                 for t in ['areas', 'drivers', 'helpers', 'vehicles']:
                     def_df = load_table(f"default_{t}")
                     if not def_df.empty:
                         run_query(f"DELETE FROM {t}", table_name=t, action="CLEAR_TABLE")
-                        dicts = def_df.drop(columns=[c for c in ['id', 'S/N'] if c in def_df.columns]).to_dict('records')
+                        dicts = def_df.drop(columns=[c for c in ['id', 'S/N', 'sort_order'] if c in def_df.columns]).to_dict('records')
                         cols = ', '.join(dicts[0].keys())
                         qmarks = ', '.join(['?'] * len(dicts[0]))
                         vals = [tuple(d.values()) for d in dicts]
@@ -393,24 +416,7 @@ if "db_initialized" not in st.session_state:
     execute_global_init()
     st.session_state.db_initialized = True
 
-
-# --- GLOBAL SHARED VARIABLES ---
-areas_df_global = load_table('areas')
-area_list_global = [""] + (areas_df_global['name'].tolist() if not areas_df_global.empty else [])
-multi_anchor_opts = list(set([a for a in area_list_global + SECTOR_OPTIONS + VEHICLE_OPTIONS if a != ""]))
-multi_anchor_opts.sort()
-
-all_d = load_table('drivers')
-all_h = load_table('helpers')
-vehicles_global = load_table('vehicles')
-
-drv_codes_opts = ["UNASSIGNED", ""] + all_d['code'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
-drv_names_opts = ["UNASSIGNED", ""] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
-hlp_codes_opts = ["UNASSIGNED", "N/A", ""] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", ""]
-hlp_names_opts = ["UNASSIGNED", "NO HELPER REQUIRED", ""] + all_h['name'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "NO HELPER REQUIRED", ""]
-
-
-# --- HIGH PERFORMANCE SCORING HELPERS (WITH CROSS TRAINING SECTOR CACHE) ---
+# --- HIGH PERFORMANCE SCORING HELPERS ---
 def build_experience_cache():
     history_df = load_table('history')
     exp_cache = {}
@@ -468,7 +474,7 @@ def months_until_next_vacation(person_code, vac_cache, target_date):
 # --- WEIGHTED AI SCORING ALGORITHM (WITH MULTI-ANCHOR SUBSTRING SEARCH) ---
 NEVER_WORKED_BONUS = 10000
 NEVER_WORKED_SECTOR_BONUS = 8000
-ANCHOR_MATCH_BONUS = 50000
+ANCHOR_MATCH_BONUS = 50000  # Priority locking for anchors
 MONTHS_WEIGHT = 100
 SECTOR_MONTHS_WEIGHT = 50
 RECENT_AREA_PENALTY = -3000
@@ -577,6 +583,21 @@ def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vac_
         
     return errors
 
+
+# --- GLOBAL SHARED VARIABLES ---
+areas_df_global = load_table('areas')
+area_list_global = [""] + (areas_df_global['name'].tolist() if not areas_df_global.empty else [])
+multi_anchor_opts = list(set([a for a in area_list_global + SECTOR_OPTIONS + VEHICLE_OPTIONS if a != ""]))
+multi_anchor_opts.sort()
+
+all_d = load_table('drivers')
+all_h = load_table('helpers')
+vehicles_global = load_table('vehicles')
+
+drv_codes_opts = ["UNASSIGNED", ""] + all_d['code'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
+drv_names_opts = ["UNASSIGNED", ""] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
+hlp_codes_opts = ["UNASSIGNED", "N/A", ""] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", ""]
+hlp_names_opts = ["UNASSIGNED", "NO HELPER REQUIRED", ""] + all_h['name'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "NO HELPER REQUIRED", ""]
 
 # --- APP ROUTING ---
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
@@ -707,6 +728,12 @@ if choice == "1. AI Route Planner":
         col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
         
         if col_save.button("💾 Save Draft Plan", type="secondary"):
+            if "route_editor" in st.session_state:
+                changes = st.session_state["route_editor"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    for col_name, new_val in col_changes.items():
+                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
+                        
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
@@ -744,6 +771,12 @@ if choice == "1. AI Route Planner":
             st.rerun()
 
         if col_app.button("✅ Confirm Plan & Save Experiences", type="primary"):
+            if "route_editor" in st.session_state:
+                changes = st.session_state["route_editor"].get("edited_rows", {})
+                for row_idx, col_changes in changes.items():
+                    for col_name, new_val in col_changes.items():
+                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
+                        
             run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
@@ -991,9 +1024,9 @@ if choice == "1. AI Route Planner":
                                         matched = True
                                         break
                                 if matched:
-                                    potential_vs.append((v, 100))
+                                    potential_vs.append((v, 100)) # High Priority
                             else:
-                                potential_vs.append((v, 0))
+                                potential_vs.append((v, 0)) # Normal Priority
 
                         potential_vs.sort(key=lambda x: x[1], reverse=True)
 
@@ -1293,7 +1326,7 @@ elif choice == "2. Database Management":
             st.subheader("➕ Add Vehicle")
             v_num = st.text_input("New Vehicle Number", key="add_v_num").strip()
             v_type = st.selectbox("New Vehicle Type", VEHICLE_OPTIONS, key="add_v_type")
-            v_div = st.selectbox("New Vehicle Division", ["Pharma", "Consumer", "2-8 VAN", ""], key="add_v_div")
+            v_div = st.text_input("New Vehicle Division", value="Pharma", key="add_v_div")
             v_perm = st.text_input("Permitted Areas (e.g. Dubai, Sharjah)", value="All", key="add_v_perm")
             v_stat = st.selectbox("Status", ["Active", "Under Service", "In for Service"], key="add_v_stat")
             
@@ -1330,7 +1363,7 @@ elif choice == "2. Database Management":
             for sheet in xls.sheet_names:
                 df = pd.read_excel(xls, sheet_name=sheet)
                 run_query(None, table_name=sheet, action="CLEAR_TABLE")
-                
+
                 insert_data = []
                 insert_dicts = []
                 for _, row in df.iterrows():
@@ -1419,6 +1452,15 @@ elif choice == "3. Past Experience Builder":
             st.success(f"Saved {changes_saved} updates!")
             st.rerun()
 
+    with st.expander("🚨 Emergency Data Restore"):
+        st.warning("Clicking this will wipe out ALL current Past Experience data from the system. (It defaults to empty).")
+        if st.button("♻️ Wipe All Past Experience Data", type="primary"):
+            with st.spinner("Wiping old history..."):
+                run_query(None, table_name="history", action="CLEAR_TABLE")
+                st.cache_data.clear()
+            st.success("Past Experience data fully wiped and reset!")
+            st.rerun()
+
     st.divider()
     
     # --- SMART BULK EXCEL/PDF SYNC ---
@@ -1467,7 +1509,6 @@ elif choice == "3. Past Experience Builder":
                 for page in pdf_reader.pages:
                     text += page.extract_text() + "\n"
                     
-                # SMART OCR SCANNER for "Dispatch Summary" Format
                 date_match = re.search(r"Date\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
                 global_date = parse_date_safe(date_match.group(1)) if date_match else None
                 
@@ -1476,7 +1517,6 @@ elif choice == "3. Past Experience Builder":
                 a_list = load_table('areas').to_dict('records')
                 
                 for line in text.split('\n'):
-                    # Skip empty lines
                     if not line.strip(): continue
                     
                     line_dates = re.findall(r'\d{2}/\d{2}/\d{4}', line)
@@ -1517,7 +1557,7 @@ elif choice == "3. Past Experience Builder":
         if person_list:
             p_person = st.selectbox("Select Person", person_list)
             p_area = st.selectbox("Area Experienced In", area_list)
-            p_sec = st.selectbox("Which Sector was this in?", SECTOR_OPTIONS)
+            p_sec = st.text_input("Which Sector was this in?", value="Pharma")
             d1, d2 = st.columns(2)
             p_start_date = d1.date_input("From Date (Start)")
             p_end_date = d2.date_input("To Date (End)")
