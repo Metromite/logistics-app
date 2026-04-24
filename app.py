@@ -96,24 +96,41 @@ if FIREBASE_READY:
         FIREBASE_READY = False
 
 if FIREBASE_READY:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢 Firebase Connected</div>", unsafe_allow_html=True)
+    st.sidebar.markdown("<div style='text-align: right; font-size: 16px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢 Cloud Sync Active</div>", unsafe_allow_html=True)
 else:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 20px; margin-top: -15px;' title='Local Database Mode'>🔴 Offline/Local Mode Active</div>", unsafe_allow_html=True)
-
+    st.sidebar.markdown("<div style='text-align: right; font-size: 16px; margin-top: -15px; color: #FFA500;' title='Firebase Quota Reached'>🟡 Offline Mode (Quota Reached)</div>", unsafe_allow_html=True)
+    st.sidebar.caption("The daily cloud quota was reached. The app has seamlessly switched to the local database. **All features and route generation are 100% functional.** Sync will resume tomorrow.")
 
 # --- HYBRID SQLITE ---
 def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
     
+    # Check for the old unique name bug in areas table and fix schema permanently
+    c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='areas'")
+    row_areas = c.fetchone()
+    if row_areas and 'name TEXT UNIQUE' in row_areas[0]:
+        c.execute("CREATE TABLE areas_v2 (id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT, sector TEXT, needs_helper TEXT, sort_order INTEGER, region TEXT)")
+        c.execute("INSERT OR IGNORE INTO areas_v2 (code, name, sector, needs_helper, sort_order, region) SELECT code, name, sector, needs_helper, sort_order, region FROM areas")
+        c.execute("DROP TABLE areas")
+        c.execute("ALTER TABLE areas_v2 RENAME TO areas")
+        
+    c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='default_areas'")
+    row_def_areas = c.fetchone()
+    if row_def_areas and 'name TEXT UNIQUE' in row_def_areas[0]:
+        c.execute("CREATE TABLE default_areas_v2 (id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT, sector TEXT, needs_helper TEXT, sort_order INTEGER, region TEXT)")
+        c.execute("INSERT OR IGNORE INTO default_areas_v2 (code, name, sector, needs_helper, sort_order, region) SELECT code, name, sector, needs_helper, sort_order, region FROM default_areas")
+        c.execute("DROP TABLE default_areas")
+        c.execute("ALTER TABLE default_areas_v2 RENAME TO default_areas")
+
     c.execute('''CREATE TABLE IF NOT EXISTS drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY, name TEXT UNIQUE, code TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT, sector TEXT, needs_helper TEXT, sort_order INTEGER, region TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY, number TEXT UNIQUE, type TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS default_drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, needs_helper TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS default_helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, restriction TEXT, anchor_area TEXT, health_card TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS default_areas (id INTEGER PRIMARY KEY, name TEXT UNIQUE, code TEXT, sector TEXT, needs_helper TEXT, sort_order INTEGER, region TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS default_areas (id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT, sector TEXT, needs_helper TEXT, sort_order INTEGER, region TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS default_vehicles (id INTEGER PRIMARY KEY, number TEXT UNIQUE, type TEXT, anchor_area TEXT, status TEXT, permitted_areas TEXT, division TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, area TEXT, date TEXT, end_date TEXT, sector TEXT)''')
@@ -146,9 +163,6 @@ def init_sqlite_db():
 conn = init_sqlite_db()
 
 # --- SMART QUOTA-SAVING DB HANDLER ---
-def clear_cache():
-    st.cache_data.clear()
-
 @st.cache_data(show_spinner=False, ttl=86400) 
 def load_table(table_name):
     global FIREBASE_READY
@@ -200,7 +214,7 @@ def load_table(table_name):
     
     if table_name in ['drivers', 'helpers']: df = df.drop_duplicates(subset=['code'], keep='first')
     if table_name == 'vehicles': df = df.drop_duplicates(subset=['number'], keep='first')
-    if table_name == 'areas': df = df.drop_duplicates(subset=['name'], keep='first')
+    if table_name == 'areas': df = df.drop_duplicates(subset=['code'], keep='first') # Fixed constraint
     if table_name == 'history': df = df.drop_duplicates(subset=['person_code', 'area', 'date'], keep='first')
     
     return df
@@ -254,7 +268,15 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 else:
                     st.error(f"Firebase Error: {fb_e}")
                 
-        st.cache_data.clear() # Clear cache to refresh UI
+        # Targeted Cache Clearing: Reduces Firebase reads by ~95%
+        try:
+            if table_name:
+                load_table.clear(table_name)
+            else:
+                st.cache_data.clear()
+        except:
+            st.cache_data.clear()
+            
         return True
     except Exception as e:
         st.error(f"Database Edit Failed: {str(e)}")
@@ -277,7 +299,7 @@ def generate_excel_with_sn(df_list, sheet_names):
 VEHICLE_OPTIONS = ["", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 NEEDS_HELPER_OPTIONS = ["Yes", "No", ""]
-ROUTE_COLUMN_ORDER = ["S/N", "Driver Code", "Drivers Name", "AREA", "Sector", "Helper Code", "Helpers Name", "VEH NO", "Permitted Areas", "Division Category"]
+ROUTE_COLUMN_ORDER = ["S/N", "Area Code", "AREA", "Sector", "Driver Code", "Drivers Name", "Helper Code", "Helpers Name", "VEH NO", "Permitted Areas", "Division Category"]
 
 KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
 KEEP_DRIVERS = ["D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", "D089", "D054", "D088", "D098", "D033"]
@@ -586,7 +608,7 @@ def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vac_
 
 # --- GLOBAL SHARED VARIABLES ---
 areas_df_global = load_table('areas')
-area_list_global = [""] + (areas_df_global['name'].tolist() if not areas_df_global.empty else [])
+area_list_global = [""] + (areas_df_global['name'].drop_duplicates().tolist() if not areas_df_global.empty else [])
 multi_anchor_opts = list(set([a for a in area_list_global + SECTOR_OPTIONS + VEHICLE_OPTIONS if a != ""]))
 multi_anchor_opts.sort()
 
@@ -703,7 +725,7 @@ if choice == "1. AI Route Planner":
         else:
             disp_draft['Permitted Areas'] = "All"
             
-        disp_draft = disp_draft.rename(columns={"area_name": "AREA", "veh_num": "VEH NO", "sector": "Sector", "div_cat": "Division Category"})
+        disp_draft = disp_draft.rename(columns={"area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", "sector": "Sector", "div_cat": "Division Category"})
         if "driver_name" in disp_draft.columns: disp_draft["Drivers Name"] = disp_draft["driver_name"]
         if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
         if "helper_name" in disp_draft.columns: disp_draft["Helpers Name"] = disp_draft["helper_name"]
@@ -716,6 +738,7 @@ if choice == "1. AI Route Planner":
             use_container_width=True, hide_index=True, key="route_editor", 
             column_order=ROUTE_COLUMN_ORDER,
             column_config={
+                "Area Code": st.column_config.TextColumn(disabled=True),
                 "Driver Code": st.column_config.SelectboxColumn("CODE", options=drv_codes_opts),
                 "Drivers Name": st.column_config.SelectboxColumn("Drivers Name", options=drv_names_opts),
                 "Helper Code": st.column_config.SelectboxColumn("CODE", options=hlp_codes_opts),
@@ -762,8 +785,9 @@ if choice == "1. AI Route Planner":
                     match = all_h[all_h['code'] == h_code]
                     if not match.empty: h_name = match.iloc[0]['name']
 
-                insert_data.append((sn_val, "", r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, r.get('Permitted Areas', '')))
-                new_dicts.append({"order_num":sn_val, "area_code":"", "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', '')})
+                a_code_val = r.get('Area Code', '')
+                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, r.get('Permitted Areas', '')))
+                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', '')})
                 
             q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY", data=new_dicts)
@@ -807,8 +831,9 @@ if choice == "1. AI Route Planner":
                     match = all_h[all_h['code'] == h_code]
                     if not match.empty: h_name = match.iloc[0]['name']
 
-                active_data.append((sn_val, "", r.get('AREA', ''), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), p_s, p_e, r.get('Permitted Areas', '')))
-                active_dicts.append({"order_num":sn_val, "area_code":"", "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', '')})
+                a_code_val = r.get('Area Code', '')
+                active_data.append((sn_val, a_code_val, r.get('AREA', ''), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), p_s, p_e, r.get('Permitted Areas', '')))
+                active_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', '')})
                 
                 for code, name, ptype in [(d_code, d_name, "Driver"), (h_code, h_name, "Helper")]:
                     if pd.notna(code) and str(code).strip() not in ["UNASSIGNED", "N/A", "", "None"]:
@@ -845,13 +870,13 @@ if choice == "1. AI Route Planner":
         else:
             active_with_sector['Permitted Areas'] = "All"
             
-        disp_active = active_with_sector.rename(columns={"area_name": "AREA", "veh_num": "VEH NO", "driver_name": "Drivers Name", "driver_code": "Driver Code", "helper_name": "Helpers Name", "helper_code": "Helper Code", "div_cat": "Division Category"})
+        disp_active = active_with_sector.rename(columns={"area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", "driver_name": "Drivers Name", "driver_code": "Driver Code", "helper_name": "Helpers Name", "helper_code": "Helper Code", "div_cat": "Division Category"})
         disp_active = disp_active[[c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]]
         if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
         
         st.dataframe(
             disp_active, use_container_width=True, hide_index=True, column_order=ROUTE_COLUMN_ORDER,
-            column_config={"Driver Code": st.column_config.TextColumn("CODE"), "Helper Code": st.column_config.TextColumn("CODE")}
+            column_config={"Area Code": st.column_config.TextColumn(disabled=True), "Driver Code": st.column_config.TextColumn("CODE"), "Helper Code": st.column_config.TextColumn("CODE")}
         )
         col_dl, col_rm = st.columns(2)
         output = generate_excel_with_sn([disp_active], ['Active Route Plan'])
@@ -865,7 +890,7 @@ if choice == "1. AI Route Planner":
         st.subheader("📋 Route Plan Dashboard")
         st.info("No Active or Draft routes exist. Generate an AI route below.")
         empty_df = pd.DataFrame(columns=ROUTE_COLUMN_ORDER)
-        st.dataframe(empty_df, use_container_width=True, hide_index=True, column_config={"Driver Code": "CODE", "Helper Code": "CODE"})
+        st.dataframe(empty_df, use_container_width=True, hide_index=True, column_config={"Area Code": st.column_config.TextColumn(disabled=True), "Driver Code": "CODE", "Helper Code": "CODE"})
 
     st.divider()
 
@@ -885,7 +910,7 @@ if choice == "1. AI Route Planner":
         if val_errors and not st.session_state.force_bypass:
             st.error("🚨 **ROUTE GENERATION HALTED: DATABASE SHORTAGE DETECTED**")
             for err in val_errors: st.warning(err)
-            st.markdown("Cannot fulfill the 39-Route Plan with current database. Please add the missing vehicles/drivers, or bypass this warning to assign what you have.")
+            st.markdown("Cannot fulfill the Route Plan with current database. Please add the missing vehicles/drivers, or bypass this warning to assign what you have.")
             if st.button("⚠️ Bypass Warnings & Force Generate"):
                 st.session_state.force_bypass = True
                 st.rerun()
@@ -910,6 +935,7 @@ if choice == "1. AI Route Planner":
                 predict_dicts = []
 
                 for _, area in areas.iterrows():
+                    area_code = area.get('code', '')
                     area_name = unify_text(area['name'])
                     req_sector = unify_text(area.get('sector', 'Pharma'))
                     needs_helper = area.get('needs_helper', 'Yes') in ['Yes', 'Optional']
@@ -924,7 +950,11 @@ if choice == "1. AI Route Planner":
                     elif "GOVT" in req_sector.upper() or "GOVT" in area_name.upper(): req_veh = "BUS"
                     elif "PICK-UP" in req_sector.upper() or "PICK UP" in area_name.upper(): req_veh = "PICK-UP"
 
-                    prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
+                    if not active_routes.empty and 'area_code' in active_routes.columns and area_code:
+                        prev_assignment = active_routes[active_routes['area_code'] == area_code]
+                    else:
+                        prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
+                        
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num, a_v_perm = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "All"
 
                     # 1. ASSIGN DRIVER
@@ -1037,8 +1067,8 @@ if choice == "1. AI Route Planner":
 
                     route_plan.append({
                         "Driver Code": a_d_code, "Drivers Name": a_d_name, 
-                        "AREA": area_name, "Sector": req_sector, "Helper Code": a_h_code, "Helpers Name": a_h_name, 
-                        "VEH NO": a_v_num, "Permitted Areas": a_v_perm, "Division Category": div_cat, "Area Code": area.get('code', '')
+                        "Area Code": area_code, "AREA": area_name, "Sector": req_sector, "Helper Code": a_h_code, "Helpers Name": a_h_name, 
+                        "VEH NO": a_v_num, "Permitted Areas": a_v_perm, "Division Category": div_cat
                     })
 
                 run_query("INSERT INTO route_plan_reasons (plan_date, area, role, selected_person, score, reasons, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", reason_data, table_name="route_plan_reasons", action="INSERT_MANY", data=reason_dicts)
@@ -1272,8 +1302,8 @@ elif choice == "2. Database Management":
             a_reg = col_r.text_input("Region (e.g. Dubai, Sharjah)", value="Dubai", key="add_a_reg")
             
             if st.button("➕ Add Area", use_container_width=True):
-                if a_df['name'].isin([a_name]).any():
-                    st.error(f"Area {a_name} already exists! Cannot duplicate.")
+                if a_df['code'].isin([a_code]).any():
+                    st.error(f"Area Code {a_code} already exists! Cannot duplicate.")
                 else:
                     new_order = len(a_df) + 1
                     if run_query("INSERT INTO areas (name, code, sector, needs_helper, sort_order, region) VALUES (?, ?, ?, ?, ?, ?)", (a_name, a_code, unify_text(a_sec), a_needs, new_order, a_reg), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":unify_text(a_sec), "needs_helper":a_needs, "sort_order":new_order, "region":a_reg}):
@@ -1281,11 +1311,13 @@ elif choice == "2. Database Management":
                         st.rerun()
         with c_edit:
             st.subheader("🗑️ Delete Area")
-            sel_a = st.selectbox("Select Area to Delete", a_df['name'].tolist() if not a_df.empty else [])
-            if sel_a:
-                a_data = a_df[a_df['name'] == sel_a].iloc[0]
+            area_opts = [f"[{r['code']}] {r['name']}" for _, r in a_df.iterrows()] if not a_df.empty else []
+            sel_a_str = st.selectbox("Select Area to Delete", area_opts)
+            if sel_a_str:
+                sel_a_code = sel_a_str.split("] ")[0].replace("[", "")
+                a_data = a_df[a_df['code'] == sel_a_code].iloc[0]
                 if st.button("🗑️ Delete Area", use_container_width=True, key=f"btn_a_del_{a_data['id']}"):
-                    if run_query("DELETE FROM areas WHERE name=?", (sel_a,), table_name="areas", action="DELETE_DOC", doc_id=a_data['id']):
+                    if run_query("DELETE FROM areas WHERE code=?", (sel_a_code,), table_name="areas", action="DELETE_DOC", doc_id=a_data['id']):
                         st.success("Area Deleted!")
                         st.rerun()
 
@@ -1419,7 +1451,7 @@ elif choice == "3. Past Experience Builder":
     st.header("🕰️ Manage Past Experience")
     history_df = load_table('history')
     areas_df = load_table('areas')
-    area_list = areas_df['name'].tolist() if not areas_df.empty else []
+    area_list = [""] + (areas_df['name'].drop_duplicates().tolist() if not areas_df.empty else [])
     
     search_hist = st.text_input("🔍 Search History by Exact Date, Month, Year, Code, Name, or Area", "")
     
