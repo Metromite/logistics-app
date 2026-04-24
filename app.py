@@ -1,4 +1,5 @@
 import streamlit as st
+import json
 
 # --- ANTI-SLEEP PING HANDLER ---
 try:
@@ -44,7 +45,7 @@ def unify_text(val):
 def unify_dataframe(df):
     if df.empty: return df
     df = df.fillna("") 
-    target_cols = ['sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type', 'area', 'anchor_area', 'permitted_areas', 'restriction', 'start_date', 'end_date', 'region']
+    target_cols = ['sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type', 'area', 'anchor_area', 'anchor_vehicle', 'permitted_areas', 'restriction', 'start_date', 'end_date', 'region']
     for col in target_cols:
         if col in df.columns:
             df[col] = df[col].apply(unify_text)
@@ -88,25 +89,17 @@ except Exception as e:
     st.sidebar.error(f"Firebase Config Error: {str(e)}")
     FIREBASE_READY = False
 
-# Fallback mechanism if quota exceeded on ping
 if FIREBASE_READY:
     try:
         list(db_fs.collection("_system_ping").limit(1).stream())
     except Exception as ping_error:
         FIREBASE_READY = False
 
-if FIREBASE_READY:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 16px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢 Cloud Sync Active</div>", unsafe_allow_html=True)
-else:
-    st.sidebar.markdown("<div style='text-align: right; font-size: 16px; margin-top: -15px; color: #FFA500;' title='Firebase Quota Reached'>🟡 Offline Mode (Quota Reached)</div>", unsafe_allow_html=True)
-    st.sidebar.caption("The daily cloud quota was reached. The app has seamlessly switched to the local database. **All features and route generation are 100% functional.** Sync will resume tomorrow.")
-
 # --- HYBRID SQLITE ---
 def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
     
-    # Check for the old unique name bug in areas table and fix schema permanently
     c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='areas'")
     row_areas = c.fetchone()
     if row_areas and 'name TEXT UNIQUE' in row_areas[0]:
@@ -122,6 +115,8 @@ def init_sqlite_db():
         c.execute("INSERT OR IGNORE INTO default_areas_v2 (code, name, sector, needs_helper, sort_order, region) SELECT code, name, sector, needs_helper, sort_order, region FROM default_areas")
         c.execute("DROP TABLE default_areas")
         c.execute("ALTER TABLE default_areas_v2 RENAME TO default_areas")
+
+    c.execute('''CREATE TABLE IF NOT EXISTS _sync_log (id INTEGER PRIMARY KEY, table_name TEXT, action TEXT, doc_id TEXT, payload TEXT)''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
@@ -143,6 +138,8 @@ def init_sqlite_db():
     
     for query in [
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
+        "ALTER TABLE drivers ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
+        "ALTER TABLE default_drivers ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
         "ALTER TABLE helpers ADD COLUMN health_card TEXT DEFAULT 'No'",
         "ALTER TABLE areas ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
@@ -162,33 +159,97 @@ def init_sqlite_db():
 
 conn = init_sqlite_db()
 
-# --- SMART QUOTA-SAVING DB HANDLER ---
+# --- SMART DELTA SYNC ENGINE ---
+def process_sync_log():
+    global FIREBASE_READY
+    if not FIREBASE_READY: return
+    try:
+        c = conn.cursor()
+        c.execute("SELECT id, table_name, action, doc_id, payload FROM _sync_log ORDER BY id ASC")
+        rows = c.fetchall()
+        if not rows: return
+        
+        for row in rows:
+            log_id, t_name, act, d_id, payload_str = row
+            data = json.loads(payload_str) if payload_str else None
+            ref = db_fs.collection(t_name)
+            
+            try:
+                if act == "INSERT":
+                    ref.document(str(d_id)).set(data)
+                elif act == "UPDATE":
+                    if d_id: 
+                        try: ref.document(str(d_id)).update(data)
+                        except: ref.document(str(d_id)).set(data) # Fallback if doc doesn't exist remotely
+                elif act == "DELETE_DOC":
+                    if d_id: ref.document(str(d_id)).delete()
+                elif act == "CLEAR_TABLE":
+                    docs = ref.limit(150).stream() 
+                    for d in docs: d.reference.delete()
+                elif act == "INSERT_MANY":
+                    batch = db_fs.batch()
+                    for i, item in enumerate(data):
+                        item_id = str(item.get('id', f"{d_id}_{i}"))
+                        batch.set(ref.document(item_id), item)
+                    batch.commit()
+                    
+                c.execute("DELETE FROM _sync_log WHERE id=?", (log_id,))
+                conn.commit()
+            except Exception as e:
+                if "429" in str(e) or "Quota" in str(e) or "ResourceExhausted" in str(e):
+                    FIREBASE_READY = False
+                    break 
+    except Exception as e:
+        pass
+
+def sync_down_from_cloud():
+    global FIREBASE_READY
+    if not FIREBASE_READY: return False
+    try:
+        for t in ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations', 'active_routes']:
+            docs = db_fs.collection(t).stream()
+            data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
+            if data:
+                run_query(f"DELETE FROM {t}", table_name=t, action="CLEAR_TABLE", bypass_queue=True)
+                cols = ', '.join([k for k in data[0].keys() if k != 'id'])
+                qmarks = ', '.join(['?'] * len([k for k in data[0].keys() if k != 'id']))
+                vals = [tuple([v for k, v in d.items() if k != 'id']) for d in data]
+                c = conn.cursor()
+                c.executemany(f"INSERT INTO {t} ({cols}) VALUES ({qmarks})", vals)
+                conn.commit()
+        return True
+    except Exception as e:
+        return False
+
+# Initialize missing db purely from cloud if empty
+c_check = conn.cursor()
+c_check.execute("SELECT COUNT(*) FROM areas")
+if c_check.fetchone()[0] == 0 and FIREBASE_READY:
+    sync_down_from_cloud()
+
+# UI Sync Status Indicator
+sync_count = pd.read_sql("SELECT COUNT(*) FROM _sync_log", conn).iloc[0,0]
+if FIREBASE_READY and sync_count == 0:
+    st.sidebar.markdown("<div style='text-align: right; font-size: 15px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢 Cloud Sync Active</div>", unsafe_allow_html=True)
+elif FIREBASE_READY and sync_count > 0:
+    st.sidebar.markdown(f"<div style='text-align: right; font-size: 15px; margin-top: -15px; color: #2e8b57;' title='Syncing'>🔄 Syncing {sync_count} items...</div>", unsafe_allow_html=True)
+    process_sync_log() # Trigger background sync
+else:
+    st.sidebar.markdown(f"<div style='text-align: right; font-size: 15px; margin-top: -15px; color: #FFA500;' title='Offline'>🟡 Offline ({sync_count} pending syncs)</div>", unsafe_allow_html=True)
+    st.sidebar.caption("App is running fully offline. Changes are saved locally and will auto-sync when online.")
+
 @st.cache_data(show_spinner=False, ttl=86400) 
 def load_table(table_name):
-    global FIREBASE_READY
-    df = pd.DataFrame()
-    
-    if FIREBASE_READY:
-        try:
-            docs = db_fs.collection(table_name).stream()
-            data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
-            df = pd.DataFrame(data)
-        except Exception as e:
-            if "429" in str(e) or "Quota" in str(e) or "ResourceExhausted" in str(e):
-                FIREBASE_READY = False # Silently kill Firebase connection, prevent future attempts
-            else:
-                st.error(f"Error reading from Firebase: {e}")
-                
-    # Seamless Fallback to SQLite if Firebase 429'd or is offline
-    if not FIREBASE_READY or df.empty:
-        df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    # 100% Local Read - Zero Firebase Read Quota Hit!
+    df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
         
     if df.empty: return df
     df = unify_dataframe(df)
     
-    # DB Defaults
     if table_name == 'helpers' and 'health_card' not in df.columns: df['health_card'] = 'No'
-    if table_name == 'drivers' and 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
+    if table_name == 'drivers':
+        if 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
+        if 'anchor_vehicle' not in df.columns: df['anchor_vehicle'] = ''
     if table_name == 'areas':
         if 'sector' not in df.columns: df['sector'] = 'Pharma'
         if 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
@@ -214,15 +275,13 @@ def load_table(table_name):
     
     if table_name in ['drivers', 'helpers']: df = df.drop_duplicates(subset=['code'], keep='first')
     if table_name == 'vehicles': df = df.drop_duplicates(subset=['number'], keep='first')
-    if table_name == 'areas': df = df.drop_duplicates(subset=['code'], keep='first') # Fixed constraint
+    if table_name == 'areas': df = df.drop_duplicates(subset=['code'], keep='first') 
     if table_name == 'history': df = df.drop_duplicates(subset=['person_code', 'area', 'date'], keep='first')
     
     return df
 
-def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
-    global FIREBASE_READY
+def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None, bypass_queue=False):
     try:
-        # 1. Primary Save to SQLite
         c = conn.cursor()
         if query:
             if isinstance(data, list) and (action == "INSERT_MANY" or action == "INSERT"): 
@@ -231,49 +290,21 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 c.executemany(query, params)
             else: 
                 c.execute(query, params)
+                if action == "INSERT" and not doc_id: doc_id = c.lastrowid
         elif action == "CLEAR_TABLE" and table_name:
             c.execute(f"DELETE FROM {table_name}")
         conn.commit()
 
-        # 2. Sync to Firebase if Active
-        if FIREBASE_READY and table_name and action:
-            try:
-                if action == "INSERT" and data and not isinstance(data, list):
-                    db_fs.collection(table_name).add(data)
-                elif action == "INSERT_MANY" and data and isinstance(data, list):
-                    batch = db_fs.batch()
-                    for count, doc_data in enumerate(data, 1):
-                        doc_ref = db_fs.collection(table_name).document()
-                        batch.set(doc_ref, doc_data)
-                        if count % 400 == 0:
-                            batch.commit()
-                            batch = db_fs.batch()
-                    batch.commit()
-                elif action == "UPDATE" and doc_id and data:
-                    db_fs.collection(table_name).document(str(doc_id)).update(data)
-                elif action == "DELETE_DOC" and doc_id:
-                    db_fs.collection(table_name).document(str(doc_id)).delete()
-                elif action == "CLEAR_TABLE":
-                    docs = db_fs.collection(table_name).select([]).stream() 
-                    batch = db_fs.batch()
-                    for count, doc in enumerate(docs, 1):
-                        batch.delete(doc.reference)
-                        if count % 400 == 0:
-                            batch.commit()
-                            batch = db_fs.batch()
-                    batch.commit()
-            except Exception as fb_e:
-                if "429" in str(fb_e) or "Quota" in str(fb_e):
-                    FIREBASE_READY = False # Fail silently, SQLite saved it successfully.
-                else:
-                    st.error(f"Firebase Error: {fb_e}")
-                
-        # Targeted Cache Clearing: Reduces Firebase reads by ~95%
+        if not bypass_queue and table_name and action:
+            data_str = json.dumps(data) if data else ""
+            c.execute("INSERT INTO _sync_log (table_name, action, doc_id, payload) VALUES (?, ?, ?, ?)",
+                      (table_name, action, str(doc_id) if doc_id else "", data_str))
+            conn.commit()
+            process_sync_log()
+
         try:
-            if table_name:
-                load_table.clear(table_name)
-            else:
-                st.cache_data.clear()
+            if table_name: load_table.clear(table_name)
+            else: st.cache_data.clear()
         except:
             st.cache_data.clear()
             
@@ -290,10 +321,35 @@ def generate_excel_with_sn(df_list, sheet_names):
             if 'id' in export_df.columns: export_df = export_df.drop(columns=['id'])
             if 'sort_order' in export_df.columns: export_df = export_df.drop(columns=['sort_order'])
             if 'S/N' in export_df.columns: export_df = export_df.drop(columns=['S/N'])
+            if 'vacation_status' in export_df.columns: export_df = export_df.drop(columns=['vacation_status'])
             export_df.insert(0, 'S/N', range(1, 1 + len(export_df)))
             export_df.to_excel(writer, sheet_name=sheet, index=False)
     output.seek(0)
     return output
+
+def get_vac_status(code, vac_cache, today_date):
+    today_str = today_date.strftime("%Y-%m-%d")
+    vacs = vac_cache.get(code, [])
+    if not vacs: return "Never"
+    
+    for s, e in vacs:
+        if s <= today_str <= e:
+            days_left = (datetime.strptime(e, "%Y-%m-%d").date() - today_date).days
+            return f"On leave ({days_left} days left)"
+            
+    past_vacs = sorted([e for s, e in vacs if e < today_str], reverse=True)
+    if past_vacs:
+        last_e = past_vacs[0]
+        days_since = (today_date - datetime.strptime(last_e, "%Y-%m-%d").date()).days
+        return f"Back ({days_since} days ago)"
+        
+    future_vacs = sorted([s for s, e in vacs if s > today_str])
+    if future_vacs:
+        next_s = future_vacs[0]
+        days_until = (datetime.strptime(next_s, "%Y-%m-%d").date() - today_date).days
+        return f"Upcoming (in {days_until} days)"
+        
+    return "Never"
 
 # --- OPTIONS & HARDCODED TEMPLATES ---
 VEHICLE_OPTIONS = ["", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
@@ -304,7 +360,6 @@ ROUTE_COLUMN_ORDER = ["S/N", "Area Code", "AREA", "Sector", "Driver Code", "Driv
 KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
 KEEP_DRIVERS = ["D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", "D089", "D054", "D088", "D098", "D033"]
 
-# Exactly matching User's uploaded Image sequence (Row 1 to 39)
 SEED_AREAS_IMAGE = [
     ("PH-FUJ", "FUJAIRAH", "Pharma", "Yes", 1, "Fujairah"), 
     ("PH-RAK", "RAK / UAQ", "Pharma", "Yes", 2, "RAK"),
@@ -391,7 +446,6 @@ RAW_NAME_MAP = {
     "H017": "Mujammal", "H126": "Subin Kovammal"
 }
 
-
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False, load_default=False):
         try:
@@ -400,7 +454,7 @@ if "db_initialized" not in st.session_state:
                     def_df = load_table(f"default_{t}")
                     if not def_df.empty:
                         run_query(f"DELETE FROM {t}", table_name=t, action="CLEAR_TABLE")
-                        dicts = def_df.drop(columns=[c for c in ['id', 'S/N', 'sort_order'] if c in def_df.columns]).to_dict('records')
+                        dicts = def_df.drop(columns=[c for c in ['id', 'S/N', 'sort_order', 'vacation_status'] if c in def_df.columns]).to_dict('records')
                         cols = ', '.join(dicts[0].keys())
                         qmarks = ', '.join(['?'] * len(dicts[0]))
                         vals = [tuple(d.values()) for d in dicts]
@@ -415,9 +469,9 @@ if "db_initialized" not in st.session_state:
             
             d_df = load_table('drivers')
             if len(d_df) == 0:
-                d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "", "", "", "") for code in KEEP_DRIVERS]
-                d_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": ""} for code in KEEP_DRIVERS]
-                run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data)
+                d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "", "", "", "", "") for code in KEEP_DRIVERS]
+                d_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": "", "anchor_vehicle": ""} for code in KEEP_DRIVERS]
+                run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data)
             
             h_df = load_table('helpers')
             if len(h_df) == 0:
@@ -492,11 +546,10 @@ def months_until_next_vacation(person_code, vac_cache, target_date):
     days_since = (target_date - datetime.strptime(last_vac, "%Y-%m-%d").date()).days
     return max(0, 365 - days_since) / 30.0
 
-
 # --- WEIGHTED AI SCORING ALGORITHM (WITH MULTI-ANCHOR SUBSTRING SEARCH) ---
 NEVER_WORKED_BONUS = 10000
 NEVER_WORKED_SECTOR_BONUS = 8000
-ANCHOR_MATCH_BONUS = 50000  # Priority locking for anchors
+ANCHOR_MATCH_BONUS = 50000 
 MONTHS_WEIGHT = 100
 SECTOR_MONTHS_WEIGHT = 50
 RECENT_AREA_PENALTY = -3000
@@ -574,7 +627,6 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
 
     return score, " | ".join(reasons)
 
-
 def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vac_cache, today_date):
     errors = []
     req_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
@@ -620,6 +672,8 @@ drv_codes_opts = ["UNASSIGNED", ""] + all_d['code'].dropna().unique().tolist() i
 drv_names_opts = ["UNASSIGNED", ""] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
 hlp_codes_opts = ["UNASSIGNED", "N/A", ""] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", ""]
 hlp_names_opts = ["UNASSIGNED", "NO HELPER REQUIRED", ""] + all_h['name'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "NO HELPER REQUIRED", ""]
+
+v_num_opts = [""] + vehicles_global['number'].tolist() if not vehicles_global.empty else [""]
 
 # --- APP ROUTING ---
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
@@ -1025,9 +1079,21 @@ if choice == "1. AI Route Planner":
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else unify_text(d_type)
                         
+                        drv_row = all_d[all_d['code'] == a_d_code]
+                        d_anch_veh_str = drv_row.iloc[0].get('anchor_vehicle', '') if 'anchor_vehicle' in drv_row.columns and not drv_row.empty else ""
+                        d_anch_vehs = [v.strip().upper() for v in str(d_anch_veh_str).split(',') if v.strip()]
+                        if "NONE" in d_anch_vehs: d_anch_vehs.remove("NONE")
+                        if "" in d_anch_vehs: d_anch_vehs.remove("")
+                        
                         potential_vs = []
                         active_vehicles_df = vehicles[~vehicles.get('status', 'Active').str.contains('Under Service|In for Service', case=False, na=False)]
                         for _, v in active_vehicles_df[~active_vehicles_df['number'].isin(used_vehicles)].iterrows():
+                            v_num_chk = unify_text(v.get('number', '')).upper()
+                            
+                            if v_num_chk in d_anch_vehs:
+                                potential_vs.append((v, 1000)) 
+                                continue
+                                
                             v_type = unify_text(v.get('type', 'VAN'))
                             type_match = False
                             if v_type == tvt: type_match = True
@@ -1128,18 +1194,24 @@ if choice == "1. AI Route Planner":
 # ==========================================
 elif choice == "2. Database Management":
     st.header("🗄️ Manage Database")
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Bulk Excel Sync"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Cloud & File Sync"])
 
-    d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "restriction"]
-    h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "restriction"]
+    d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "anchor_vehicle", "vacation_status"]
+    h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "vacation_status"]
     a_col_order = ["S/N", "code", "name", "sector", "region", "needs_helper", "sort_order"]
     v_col_order = ["S/N", "number", "type", "division", "status", "anchor_area", "permitted_areas"]
+
+    today = date.today()
+    vac_cache = build_vacation_cache()
 
     # DRIVERS TAB
     with tab1:
         st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
         disp_df = drivers_df.drop(columns=['restriction'], errors='ignore').copy()
+        
+        if not disp_df.empty:
+            disp_df['vacation_status'] = disp_df['code'].apply(lambda x: get_vac_status(x, vac_cache, today))
         
         search_d = st.text_input("🔍 Search Drivers by Code, Name, Area, etc.", key="search_drivers")
         if search_d and not disp_df.empty:
@@ -1150,7 +1222,9 @@ elif choice == "2. Database Management":
             disp_df, 
             column_order=[c for c in d_col_order if c in disp_df.columns],
             column_config={
-                "id": None, "S/N": st.column_config.NumberColumn(disabled=True)
+                "id": None, 
+                "S/N": st.column_config.NumberColumn(disabled=True),
+                "vacation_status": st.column_config.TextColumn("Vacation Status", disabled=True)
             }, use_container_width=True, height=250, hide_index=True, key="ed_drivers"
         )
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
@@ -1158,7 +1232,7 @@ elif choice == "2. Database Management":
             for idx in disp_df.index:
                 row_id = disp_df.loc[idx, 'id']
                 if not disp_df.loc[idx].equals(edited_d.loc[idx]):
-                    update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N', 'vacation_status'], errors='ignore').to_dict()
                     update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
@@ -1173,20 +1247,35 @@ elif choice == "2. Database Management":
             st.subheader("➕ Add Driver")
             d_name = st.text_input("New Driver Name", key="add_d_name")
             d_code = st.text_input("New Driver Code", key="add_d_code").strip()
-            col_t, col_s, col_h = st.columns(3)
-            d_type = col_t.selectbox("New Driver Veh Type", VEHICLE_OPTIONS, key="add_d_type")
-            d_sec = col_s.selectbox("New Driver Sector", SECTOR_OPTIONS, key="add_d_sec")
-            d_needs_h = col_h.selectbox("New Driver Needs Helper?", NEEDS_HELPER_OPTIONS, index=2, key="add_d_nh")
             
-            d_anchor_opts = st.multiselect("New Driver Anchor(s)", multi_anchor_opts, key="add_d_anchor")
-            d_anchor_str = ", ".join(d_anchor_opts) if d_anchor_opts else ""
+            c1, c2 = st.columns(2)
+            d_type_sel = c1.selectbox("Veh Type (Select)", VEHICLE_OPTIONS, key="add_d_type_s")
+            d_type_man = c2.text_input("Or manual Veh Type", key="add_d_type_m")
+            d_type = d_type_man.strip() if d_type_man.strip() else d_type_sel
+
+            c3, c4 = st.columns(2)
+            d_sec_sel = c3.selectbox("Sector (Select)", SECTOR_OPTIONS, key="add_d_sec_s")
+            d_sec_man = c4.text_input("Or manual Sector", key="add_d_sec_m")
+            d_sec = d_sec_man.strip() if d_sec_man.strip() else d_sec_sel
+
+            d_needs_h = st.selectbox("New Driver Needs Helper?", NEEDS_HELPER_OPTIONS, index=0, key="add_d_nh")
+            
+            d_anchor_opts = st.multiselect("Anchor Area(s)", multi_anchor_opts, key="add_d_anchor")
+            d_anchor_man = st.text_input("Or manual Anchor Areas (comma-separated)", key="add_d_anchor_m")
+            d_anchor_list = d_anchor_opts + [x.strip() for x in d_anchor_man.split(',') if x.strip()]
+            d_anchor_str = ", ".join(list(set(d_anchor_list)))
+            
+            d_anchor_v_opts = st.multiselect("Anchor Vehicle(s)", v_num_opts, key="add_d_anchor_v")
+            d_anchor_v_man = st.text_input("Or manual Anchor Vehicles (comma-separated)", key="add_d_anchor_v_m")
+            d_anchor_v_list = d_anchor_v_opts + [x.strip() for x in d_anchor_v_man.split(',') if x.strip()]
+            d_anchor_v_str = ", ".join(list(set(d_anchor_v_list)))
             
             if st.button("➕ Add Driver", use_container_width=True):
                 if drivers_df['code'].isin([d_code]).any():
                     st.error(f"Driver Code {d_code} already exists! Cannot duplicate.")
                 else:
-                    if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                              (d_name, d_code, unify_text(d_type), unify_text(d_sec), d_needs_h, "", d_anchor_str), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":unify_text(d_type), "sector":unify_text(d_sec), "needs_helper":d_needs_h, "restriction":"", "anchor_area":d_anchor_str}):
+                    if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+                              (d_name, d_code, unify_text(d_type), unify_text(d_sec), d_needs_h, "", d_anchor_str, d_anchor_v_str), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":unify_text(d_type), "sector":unify_text(d_sec), "needs_helper":d_needs_h, "restriction":"", "anchor_area":d_anchor_str, "anchor_vehicle":d_anchor_v_str}):
                         st.success("Driver Added!")
                         st.rerun()
 
@@ -1206,6 +1295,9 @@ elif choice == "2. Database Management":
         helpers_df = load_table('helpers')
         disp_h = helpers_df.drop(columns=['restriction'], errors='ignore').copy()
         
+        if not disp_h.empty:
+            disp_h['vacation_status'] = disp_h['code'].apply(lambda x: get_vac_status(x, vac_cache, today))
+
         search_h = st.text_input("🔍 Search Helpers", key="search_helpers")
         if search_h and not disp_h.empty: disp_h = disp_h[disp_h.astype(str).apply(lambda x: x.str.contains(search_h, case=False, na=False)).any(axis=1)]
         if not disp_h.empty: disp_h.insert(0, 'S/N', range(1, 1 + len(disp_h)))
@@ -1214,7 +1306,9 @@ elif choice == "2. Database Management":
             disp_h, 
             column_order=[c for c in h_col_order if c in disp_h.columns],
             column_config={
-                "id": None, "S/N": st.column_config.NumberColumn(disabled=True)
+                "id": None, 
+                "S/N": st.column_config.NumberColumn(disabled=True),
+                "vacation_status": st.column_config.TextColumn("Vacation Status", disabled=True)
             }, use_container_width=True, height=250, hide_index=True, key="ed_helpers"
         )
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
@@ -1222,7 +1316,7 @@ elif choice == "2. Database Management":
             for idx in disp_h.index:
                 row_id = disp_h.loc[idx, 'id']
                 if not disp_h.loc[idx].equals(edited_h.loc[idx]):
-                    update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                    update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N', 'vacation_status'], errors='ignore').to_dict()
                     update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
@@ -1239,8 +1333,10 @@ elif choice == "2. Database Management":
             h_code = st.text_input("New Helper Code", key="add_h_code").strip()
             h_health = st.selectbox("New Helper Health Card?", ["No", "Yes"], key="add_h_hc")
             
-            h_anchor_opts = st.multiselect("New Helper Anchor(s)", multi_anchor_opts, key="add_h_anc")
-            h_anchor_str = ", ".join(h_anchor_opts) if h_anchor_opts else ""
+            h_anchor_opts = st.multiselect("Anchor Area(s)", multi_anchor_opts, key="add_h_anc")
+            h_anchor_man = st.text_input("Or manual Anchor Areas (comma-separated)", key="add_h_anc_m")
+            h_anchor_list = h_anchor_opts + [x.strip() for x in h_anchor_man.split(',') if x.strip()]
+            h_anchor_str = ", ".join(list(set(h_anchor_list)))
             
             if st.button("➕ Add Helper", use_container_width=True):
                 if helpers_df['code'].isin([h_code]).any():
@@ -1296,10 +1392,15 @@ elif choice == "2. Database Management":
             st.subheader("➕ Add Area")
             a_name = st.text_input("New Area Name", key="add_a_name").strip()
             a_code = st.text_input("New Area Code", key="add_a_code")
-            col_s, col_n, col_r = st.columns(3)
-            a_sec = col_s.selectbox("New Area Sector", SECTOR_OPTIONS, key="add_a_sec")
-            a_needs = col_n.selectbox("New Area Needs Helper?", NEEDS_HELPER_OPTIONS, key="add_a_nh")
-            a_reg = col_r.text_input("Region (e.g. Dubai, Sharjah)", value="Dubai", key="add_a_reg")
+            
+            c1, c2 = st.columns(2)
+            a_sec_sel = c1.selectbox("Sector (Select)", SECTOR_OPTIONS, key="add_a_sec_s")
+            a_sec_man = c2.text_input("Or manual Sector", key="add_a_sec_m")
+            a_sec = a_sec_man.strip() if a_sec_man.strip() else a_sec_sel
+            
+            c3, c4 = st.columns(2)
+            a_needs = c3.selectbox("Needs Helper?", NEEDS_HELPER_OPTIONS, key="add_a_nh")
+            a_reg = c4.text_input("Region (e.g. Dubai, Sharjah)", value="Dubai", key="add_a_reg")
             
             if st.button("➕ Add Area", use_container_width=True):
                 if a_df['code'].isin([a_code]).any():
@@ -1357,13 +1458,25 @@ elif choice == "2. Database Management":
         with c_add:
             st.subheader("➕ Add Vehicle")
             v_num = st.text_input("New Vehicle Number", key="add_v_num").strip()
-            v_type = st.selectbox("New Vehicle Type", VEHICLE_OPTIONS, key="add_v_type")
-            v_div = st.text_input("New Vehicle Division", value="Pharma", key="add_v_div")
-            v_perm = st.text_input("Permitted Areas (e.g. Dubai, Sharjah)", value="All", key="add_v_perm")
-            v_stat = st.selectbox("Status", ["Active", "Under Service", "In for Service"], key="add_v_stat")
             
-            v_anchor_opts = st.multiselect("New Vehicle Anchor(s)", multi_anchor_opts, key="add_v_anc")
-            v_anchor_str = ", ".join(v_anchor_opts) if v_anchor_opts else ""
+            c1, c2 = st.columns(2)
+            v_type_sel = c1.selectbox("Veh Type (Select)", VEHICLE_OPTIONS, key="add_v_type_s")
+            v_type_man = c2.text_input("Or manual Veh Type", key="add_v_type_m")
+            v_type = v_type_man.strip() if v_type_man.strip() else v_type_sel
+
+            c3, c4 = st.columns(2)
+            v_div_sel = c3.selectbox("Division (Select)", SECTOR_OPTIONS, key="add_v_div_s")
+            v_div_man = c4.text_input("Or manual Division", value="Pharma", key="add_v_div_m")
+            v_div = v_div_man.strip() if v_div_man.strip() else v_div_sel
+
+            c5, c6 = st.columns(2)
+            v_perm = c5.text_input("Permitted Areas", value="All", key="add_v_perm")
+            v_stat = c6.selectbox("Status", ["Active", "Under Service", "In for Service"], key="add_v_stat")
+            
+            v_anchor_opts = st.multiselect("Anchor Area(s)", multi_anchor_opts, key="add_v_anc")
+            v_anchor_man = st.text_input("Or manual Anchor Areas (comma-separated)", key="add_v_anc_m")
+            v_anchor_list = v_anchor_opts + [x.strip() for x in v_anchor_man.split(',') if x.strip()]
+            v_anchor_str = ", ".join(list(set(v_anchor_list)))
             
             if st.button("➕ Add Vehicle", use_container_width=True):
                 if v_df['number'].isin([v_num]).any():
@@ -1399,7 +1512,7 @@ elif choice == "2. Database Management":
                 insert_data = []
                 insert_dicts = []
                 for _, row in df.iterrows():
-                    data_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N']}
+                    data_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N', 'vacation_status']}
                     cols = ', '.join(data_dict.keys())
                     vals = tuple(data_dict.values())
                     qmarks = ', '.join(['?'] * len(data_dict))
@@ -1412,8 +1525,7 @@ elif choice == "2. Database Management":
             st.success("Database synchronized successfully!")
 
         st.divider()
-        st.subheader("🚨 System & Database Master Controls")
-        st.caption("Use these buttons to backup your current custom layout, restore an old one, or wipe everything.")
+        st.subheader("🚨 System & Cloud Master Controls")
         
         c_r1, c_r2, c_r3 = st.columns(3)
         if c_r1.button("♻️ Restore Default Template", type="secondary"):
@@ -1422,19 +1534,13 @@ elif choice == "2. Database Management":
             st.success("Layout restored successfully!")
             st.rerun()
             
-        if c_r2.button("💾 Save Current as Default Template", type="primary"):
-            with st.spinner("Saving custom default..."):
-                for t in ['areas', 'drivers', 'helpers', 'vehicles']:
-                    df = load_table(t)
-                    run_query(f"DELETE FROM default_{t}", table_name=f"default_{t}", action="CLEAR_TABLE")
-                    if not df.empty:
-                        dicts = df.drop(columns=[c for c in ['id', 'S/N'] if c in df.columns]).to_dict('records')
-                        cols = ', '.join(dicts[0].keys())
-                        qmarks = ', '.join(['?'] * len(dicts[0]))
-                        vals = [tuple(d.values()) for d in dicts]
-                        run_query(f"INSERT INTO default_{t} ({cols}) VALUES ({qmarks})", vals, table_name=f"default_{t}", action="INSERT_MANY", data=dicts)
-            st.success("Current Database saved as Default Template!")
-            st.rerun()
+        if c_r2.button("📥 Force Pull from Cloud", type="primary"):
+            with st.spinner("Downloading all data from Firebase..."):
+                if sync_down_from_cloud():
+                    st.success("Successfully synchronized all data from the cloud!")
+                    st.rerun()
+                else:
+                    st.error("Failed to connect to Firebase or quota exceeded.")
 
         if c_r3.button("💥 WIPE ENTIRE DATABASE", type="primary"):
             with st.spinner("Wiping everything..."):
