@@ -132,6 +132,13 @@ def init_sqlite_db():
     c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_history ON history(person_code, area, sector, date)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS vacations (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, start_date DATE, end_date DATE)''')
+    
+    # Safely clear out existing duplicate vacation entries before applying the unique index
+    try:
+        c.execute('''DELETE FROM vacations WHERE id NOT IN (SELECT MIN(id) FROM vacations GROUP BY person_code, start_date, end_date)''')
+    except sqlite3.OperationalError:
+        pass
+
     c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_vacations ON vacations(person_code, start_date, end_date)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS active_routes (id INTEGER PRIMARY KEY, order_num INTEGER, area_code TEXT, area_name TEXT, driver_code TEXT, driver_name TEXT, helper_code TEXT, helper_name TEXT, veh_num TEXT, start_date TEXT, end_date TEXT)''')
@@ -479,7 +486,7 @@ if "db_initialized" not in st.session_state:
                     def_df = load_table(f"default_{t}")
                     if not def_df.empty:
                         run_query(f"DELETE FROM {t}", table_name=t, action="CLEAR_TABLE")
-                        dicts = def_df.drop(columns=[c for c in ['id', 'S/N', 'sort_order'] if c in def_df.columns]).to_dict('records')
+                        dicts = def_df.drop(columns=[c for c in ['id', 'S/N', 'sort_order', 'vacation_status'] if c in def_df.columns]).to_dict('records')
                         cols = ', '.join(dicts[0].keys())
                         qmarks = ', '.join(['?'] * len(dicts[0]))
                         vals = [tuple(d.values()) for d in dicts]
