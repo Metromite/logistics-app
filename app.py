@@ -203,29 +203,35 @@ def process_sync_log():
         pass
 
 def sync_down_from_cloud():
+    # Safely merges data from Firebase to local SQLite without deleting local modifications
     global FIREBASE_READY
     if not FIREBASE_READY: return False
     try:
+        c = conn.cursor()
         for t in ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations', 'active_routes']:
             docs = db_fs.collection(t).stream()
-            data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
-            if data:
-                run_query(f"DELETE FROM {t}", table_name=t, action="CLEAR_TABLE", bypass_queue=True)
-                cols = ', '.join([k for k in data[0].keys() if k != 'id'])
-                qmarks = ', '.join(['?'] * len([k for k in data[0].keys() if k != 'id']))
-                vals = [tuple([v for k, v in d.items() if k != 'id']) for d in data]
-                c = conn.cursor()
-                c.executemany(f"INSERT INTO {t} ({cols}) VALUES ({qmarks})", vals)
-                conn.commit()
+            for doc in docs:
+                d = doc.to_dict()
+                d.pop('id', None) # Let SQLite manage the primary keys automatically
+                if not d: continue
+                cols = ', '.join(d.keys())
+                qmarks = ', '.join(['?'] * len(d))
+                vals = tuple(d.values())
+                try:
+                    c.execute(f"INSERT OR IGNORE INTO {t} ({cols}) VALUES ({qmarks})", vals)
+                except sqlite3.OperationalError:
+                    pass # Safely ignore schema mismatches
+            conn.commit()
+        st.cache_data.clear()
         return True
     except Exception as e:
         return False
 
-# Initialize missing db purely from cloud if empty
-c_check = conn.cursor()
-c_check.execute("SELECT COUNT(*) FROM areas")
-if c_check.fetchone()[0] == 0 and FIREBASE_READY:
-    sync_down_from_cloud()
+# Auto-merge missing cloud data ONCE per session to protect quota
+if "initial_cloud_sync_done" not in st.session_state:
+    if FIREBASE_READY:
+        sync_down_from_cloud()
+    st.session_state.initial_cloud_sync_done = True
 
 # UI Sync Status Indicator
 sync_count = pd.read_sql("SELECT COUNT(*) FROM _sync_log", conn).iloc[0,0]
