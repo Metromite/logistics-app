@@ -62,7 +62,8 @@ def parse_date_safe(d_str):
 # --- FIREBASE INITIALIZATION & DB ADAPTER ---
 FIREBASE_READY = False
 conn = None
-SYNC_TABLES = ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations']
+
+SYNC_TABLES = ['drivers', 'helpers', 'areas', 'vehicles', 'history', 'vacations', 'active_routes', 'draft_routes', 'route_plan_reasons', 'vacation_predictions']
 
 try:
     if "firebase" in st.secrets:
@@ -100,7 +101,7 @@ def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
     
-    # Fix old schema bug
+    # Fix old schema bug that caused infinite quota usage
     c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='areas'")
     row_areas = c.fetchone()
     if row_areas and 'name TEXT UNIQUE' in row_areas[0]:
@@ -117,7 +118,7 @@ def init_sqlite_db():
         c.execute("DROP TABLE default_areas")
         c.execute("ALTER TABLE default_areas_v2 RENAME TO default_areas")
 
-    c.execute('''CREATE TABLE IF NOT EXISTS _sync_queue (table_name TEXT PRIMARY KEY)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS _sync_log (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, action TEXT, doc_id TEXT, payload TEXT)''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
     c.execute('''CREATE TABLE IF NOT EXISTS helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, restriction TEXT, anchor_area TEXT, last_vacation DATE)''')
@@ -160,70 +161,84 @@ def init_sqlite_db():
 
 conn = init_sqlite_db()
 
-# --- HIGH-EFFICIENCY SINGLE-DOCUMENT SYNC ENGINE ---
-def process_sync_queue():
+# --- HIGH-EFFICIENCY DELTA SYNC ENGINE ---
+def process_sync_log():
     global FIREBASE_READY
     if not FIREBASE_READY: return
     try:
         c = conn.cursor()
-        c.execute("SELECT table_name FROM _sync_queue")
-        dirty_tables = [row[0] for row in c.fetchall()]
+        c.execute("SELECT id, table_name, action, doc_id, payload FROM _sync_log ORDER BY id ASC")
+        rows = c.fetchall()
+        if not rows: return
         
-        for t in dirty_tables:
-            df = pd.read_sql(f"SELECT * FROM {t}", conn)
-            payload_str = df.to_json(orient='records')
+        for row in rows:
+            log_id, t_name, act, d_id, payload_str = row
+            data = json.loads(payload_str) if payload_str else None
+            ref = db_fs.collection(t_name)
             
             try:
-                db_fs.collection('app_state').document(t).set({'payload': payload_str})
-                c.execute("DELETE FROM _sync_queue WHERE table_name=?", (t,))
+                if act == "INSERT":
+                    if d_id and str(d_id) != "None" and str(d_id).strip() != "": ref.document(str(d_id)).set(data)
+                    else: ref.add(data)
+                elif act == "UPDATE":
+                    if d_id: ref.document(str(d_id)).set(data, merge=True)
+                elif act == "DELETE_DOC":
+                    if d_id: ref.document(str(d_id)).delete()
+                elif act == "CLEAR_TABLE":
+                    docs = ref.limit(200).stream() 
+                    for d in docs: d.reference.delete()
+                    
+                c.execute("DELETE FROM _sync_log WHERE id=?", (log_id,))
                 conn.commit()
             except Exception as e:
                 if "429" in str(e) or "Quota" in str(e) or "ResourceExhausted" in str(e):
                     FIREBASE_READY = False
-                    break
-    except:
+                    break 
+    except Exception as e:
         pass
 
 def sync_down_from_cloud():
     global FIREBASE_READY
     if not FIREBASE_READY: return False
     try:
-        success = False
         for t in SYNC_TABLES:
-            doc = db_fs.collection('app_state').document(t).get()
-            if doc.exists:
-                data_str = doc.to_dict().get('payload', '[]')
-                records = json.loads(data_str)
-                if records:
-                    c = conn.cursor()
-                    c.execute(f"DELETE FROM {t}")
-                    cols = ", ".join(records[0].keys())
-                    qmarks = ", ".join(["?"] * len(records[0]))
-                    vals = [tuple(r.values()) for r in records]
-                    c.executemany(f"INSERT INTO {t} ({cols}) VALUES ({qmarks})", vals)
-                    conn.commit()
-                    success = True
-        return success
-    except:
+            docs = db_fs.collection(t).stream()
+            data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
+            if data:
+                c = conn.cursor()
+                c.execute(f"DELETE FROM {t}")
+                cols = ', '.join([k for k in data[0].keys() if k != 'id'])
+                qmarks = ', '.join(['?'] * len([k for k in data[0].keys() if k != 'id']))
+                vals = []
+                for d in data:
+                    row_vals = []
+                    for k in data[0].keys():
+                        if k != 'id':
+                            row_vals.append(str(d.get(k, '')))
+                    vals.append(tuple(row_vals))
+                c.executemany(f"INSERT INTO {t} ({cols}) VALUES ({qmarks})", vals)
+                conn.commit()
+        return True
+    except Exception as e:
+        st.error(f"Sync failed: {e}")
         return False
 
-# Initialize missing db purely from cloud if empty
+# Initialize missing db purely from cloud if empty (Streamlit Wakeup)
 c_check = conn.cursor()
 c_check.execute("SELECT COUNT(*) FROM areas")
 if c_check.fetchone()[0] == 0 and FIREBASE_READY:
     sync_down_from_cloud()
 
 # UI Sync Status Indicator
-sync_count = pd.read_sql("SELECT COUNT(*) FROM _sync_queue", conn).iloc[0,0]
+sync_count = pd.read_sql("SELECT COUNT(*) FROM _sync_log", conn).iloc[0,0]
 if FIREBASE_READY and sync_count == 0:
     st.sidebar.markdown("<div style='text-align: right; font-size: 15px; margin-top: -15px;' title='Connected to Secure Cloud'>🟢 Cloud Sync Active</div>", unsafe_allow_html=True)
 elif FIREBASE_READY and sync_count > 0:
-    st.sidebar.markdown(f"<div style='text-align: right; font-size: 15px; margin-top: -15px; color: #2e8b57;' title='Syncing'>🔄 Syncing {sync_count} tables...</div>", unsafe_allow_html=True)
-    process_sync_queue() # Trigger background sync
+    st.sidebar.markdown(f"<div style='text-align: right; font-size: 15px; margin-top: -15px; color: #2e8b57;' title='Syncing'>🔄 Syncing {sync_count} items...</div>", unsafe_allow_html=True)
+    process_sync_log() # Trigger background sync
 else:
     st.sidebar.markdown(f"<div style='text-align: right; font-size: 15px; margin-top: -15px; color: #FFA500;' title='Offline'>🟡 Offline Queue: {sync_count}</div>", unsafe_allow_html=True)
     st.sidebar.caption("App is running perfectly offline. Changes save locally and auto-sync when quota resets.")
-
 
 @st.cache_data(show_spinner=False, ttl=86400) 
 def load_table(table_name):
@@ -268,7 +283,7 @@ def load_table(table_name):
     
     return df
 
-def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None):
+def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None, bypass_queue=False):
     try:
         c = conn.cursor()
         if query:
@@ -278,22 +293,26 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 c.executemany(query, params)
             else: 
                 c.execute(query, params)
+                if action == "INSERT" and not doc_id: doc_id = c.lastrowid
         elif action == "CLEAR_TABLE" and table_name:
             c.execute(f"DELETE FROM {table_name}")
         conn.commit()
 
-        # Queue the table for Firebase Sync ONLY if it's a master config table
-        if table_name in SYNC_TABLES:
-            c.execute("INSERT OR IGNORE INTO _sync_queue (table_name) VALUES (?)", (table_name,))
-            conn.commit()
-            process_sync_queue()
-
-        try:
-            if table_name: load_table.clear(table_name)
-            else: st.cache_data.clear()
-        except:
-            st.cache_data.clear()
+        # Queue individual row changes to prevent 1MB JSON limits
+        if not bypass_queue and table_name and action and table_name in SYNC_TABLES:
+            if action == "INSERT_MANY" and isinstance(data, list):
+                for item in data:
+                    item_id = item.get('id') or item.get('code')
+                    c.execute("INSERT INTO _sync_log (table_name, action, doc_id, payload) VALUES (?, ?, ?, ?)", (table_name, "INSERT", str(item_id) if item_id else "", json.dumps(item)))
+            elif action == "CLEAR_TABLE":
+                c.execute("INSERT INTO _sync_log (table_name, action, doc_id, payload) VALUES (?, ?, ?, ?)", (table_name, action, "", ""))
+            else:
+                c.execute("INSERT INTO _sync_log (table_name, action, doc_id, payload) VALUES (?, ?, ?, ?)", (table_name, action, str(doc_id) if doc_id else "", json.dumps(data) if data else ""))
             
+            conn.commit()
+            process_sync_log()
+
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"Database Edit Failed: {str(e)}")
@@ -664,8 +683,7 @@ v_num_opts = [""] + vehicles_global['number'].tolist() if not vehicles_global.em
 # DYNAMIC DROPDOWN HELPERS
 def get_dynamic_opts(df, col_name, standard_opts):
     opts = list(set(standard_opts + (df[col_name].dropna().tolist() if not df.empty and col_name in df.columns else [])))
-    return [x for x in opts if pd.notna(x) and str(x).strip() != ""] + [""]
-
+    return sorted([str(x) for x in opts if pd.notna(x) and str(x).strip() != ""]) + [""]
 
 # --- APP ROUTING ---
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
@@ -1225,15 +1243,19 @@ elif choice == "2. Database Management":
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
             changes_saved = 0
             for idx in disp_df.index:
-                row_id = disp_df.loc[idx, 'id']
+                row_id = int(disp_df.loc[idx, 'id'])
                 if not disp_df.loc[idx].equals(edited_d.loc[idx]):
                     update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N', 'vacation_status'], errors='ignore').to_dict()
-                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                    update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
+                    for col in ['sector', 'veh_type', 'division', 'type']:
+                        if col in update_dict: update_dict[col] = unify_text(update_dict[col])
+                        
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
+                    params = tuple(list(update_dict.values()) + [row_id])
+                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", params, table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
                     changes_saved += 1
             if changes_saved > 0:
-                st.success(f"Saved {changes_saved} updates locally & queued for sync!")
+                st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
                 st.rerun()
             
         st.divider()
@@ -1310,15 +1332,19 @@ elif choice == "2. Database Management":
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
             changes_saved = 0
             for idx in disp_h.index:
-                row_id = disp_h.loc[idx, 'id']
+                row_id = int(disp_h.loc[idx, 'id'])
                 if not disp_h.loc[idx].equals(edited_h.loc[idx]):
                     update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N', 'vacation_status'], errors='ignore').to_dict()
-                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                    update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
+                    for col in ['sector', 'veh_type', 'division', 'type']:
+                        if col in update_dict: update_dict[col] = unify_text(update_dict[col])
+                        
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
+                    params = tuple(list(update_dict.values()) + [row_id])
+                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", params, table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
                     changes_saved += 1
             if changes_saved > 0:
-                st.success(f"Saved {changes_saved} updates locally & queued for sync!")
+                st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
                 st.rerun()
 
         st.divider()
@@ -1374,15 +1400,19 @@ elif choice == "2. Database Management":
         if st.button("💾 Save Table Edits", key="save_table_areas"):
             changes_saved = 0
             for idx in disp_a.index:
-                row_id = disp_a.loc[idx, 'id']
+                row_id = int(disp_a.loc[idx, 'id'])
                 if not disp_a.loc[idx].equals(edited_a.loc[idx]):
                     update_dict = edited_a.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                    update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
+                    for col in ['sector', 'veh_type', 'division', 'type']:
+                        if col in update_dict: update_dict[col] = unify_text(update_dict[col])
+                        
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="areas", action="UPDATE", doc_id=row_id, data=update_dict)
+                    params = tuple(list(update_dict.values()) + [row_id])
+                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", params, table_name="areas", action="UPDATE", doc_id=row_id, data=update_dict)
                     changes_saved += 1
             if changes_saved > 0:
-                st.success(f"Saved {changes_saved} updates locally & queued for sync!")
+                st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
                 st.rerun()
 
         st.divider()
@@ -1446,15 +1476,19 @@ elif choice == "2. Database Management":
         if st.button("💾 Save Table Edits", key="save_table_vehicles"):
             changes_saved = 0
             for idx in disp_v.index:
-                row_id = disp_v.loc[idx, 'id']
+                row_id = int(disp_v.loc[idx, 'id'])
                 if not disp_v.loc[idx].equals(edited_v.loc[idx]):
                     update_dict = edited_v.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                    update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                    update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
+                    for col in ['sector', 'veh_type', 'division', 'type']:
+                        if col in update_dict: update_dict[col] = unify_text(update_dict[col])
+                        
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vehicles", action="UPDATE", doc_id=row_id, data=update_dict)
+                    params = tuple(list(update_dict.values()) + [row_id])
+                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", params, table_name="vehicles", action="UPDATE", doc_id=row_id, data=update_dict)
                     changes_saved += 1
             if changes_saved > 0:
-                st.success(f"Saved {changes_saved} updates locally & queued for sync!")
+                st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
                 st.rerun()
 
         st.divider()
@@ -1583,15 +1617,19 @@ elif choice == "3. Past Experience Builder":
     if st.button("💾 Save Table Edits", key="save_table_hist"):
         changes_saved = 0
         for idx in disp_hist.index:
-            row_id = disp_hist.loc[idx, 'id']
+            row_id = int(disp_hist.loc[idx, 'id'])
             if not disp_hist.loc[idx].equals(edited_hist.loc[idx]):
                 update_dict = edited_hist.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
+                for col in ['sector', 'veh_type', 'division', 'type']:
+                    if col in update_dict: update_dict[col] = unify_text(update_dict[col])
+                    
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="history", action="UPDATE", doc_id=row_id, data=update_dict)
+                params = tuple(list(update_dict.values()) + [row_id])
+                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", params, table_name="history", action="UPDATE", doc_id=row_id, data=update_dict)
                 changes_saved += 1
         if changes_saved > 0:
-            st.success(f"Saved {changes_saved} updates locally & queued for sync!")
+            st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
             st.rerun()
 
     with st.expander("🚨 Emergency Data Restore"):
@@ -1805,15 +1843,19 @@ elif choice == "4. Vacation Schedule":
     if st.button("💾 Save Table Edits", key="save_table_vacs"):
         changes_saved = 0
         for idx in disp_vac.index:
-            row_id = disp_vac.loc[idx, 'id']
+            row_id = int(disp_vac.loc[idx, 'id'])
             if not disp_vac.loc[idx].equals(edited_vac.loc[idx]):
                 update_dict = edited_vac.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
-                update_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in update_dict.items()}
+                update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
+                for col in ['sector', 'veh_type', 'division', 'type']:
+                    if col in update_dict: update_dict[col] = unify_text(update_dict[col])
+                    
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
-                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", tuple(list(update_dict.values()) + [row_id]), table_name="vacations", action="UPDATE", doc_id=row_id, data=update_dict)
+                params = tuple(list(update_dict.values()) + [row_id])
+                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", params, table_name="vacations", action="UPDATE", doc_id=row_id, data=update_dict)
                 changes_saved += 1
         if changes_saved > 0:
-            st.success(f"Saved {changes_saved} updates locally & queued for sync!")
+            st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
             st.rerun()
 
     with st.expander("📥 Export / 📤 Import Vacation Data"):
