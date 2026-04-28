@@ -225,7 +225,10 @@ def process_sync_log():
     except Exception as e:
         pass
 
-def sync_down_from_cloud():
+def sync_down_from_cloud(merge=False):
+    """
+    Safely pulls data from Firebase. If merge=True, it will INSERT OR IGNORE to prevent dropping any existing data.
+    """
     global FIREBASE_READY
     if not FIREBASE_READY: return False
     try:
@@ -235,9 +238,7 @@ def sync_down_from_cloud():
                 docs = list(db_fs.collection(t).stream())
                 if not docs: continue
                 
-                c.execute(f"DELETE FROM {t}")
                 c.execute(f"PRAGMA table_info({t})")
-                # Exclude id and fb_id from dynamic column matching
                 valid_cols = [row[1] for row in c.fetchall() if row[1] not in ('id', 'fb_id')]
                 
                 vals = []
@@ -247,13 +248,28 @@ def sync_down_from_cloud():
                     for col in valid_cols:
                         val = d.get(col, '')
                         row_vals.append(str(val) if val is not None else '')
-                    row_vals.append(str(doc.id)) # Explicitly inject Firebase ID into fb_id mapping
+                    row_vals.append(str(doc.id)) # Explicitly inject Firebase ID
                     vals.append(tuple(row_vals))
                     
                 cols_str = ', '.join(valid_cols) + ', fb_id'
                 qmarks = ', '.join(['?'] * (len(valid_cols) + 1))
-                c.executemany(f"INSERT INTO {t} ({cols_str}) VALUES ({qmarks})", vals)
+                
+                if not merge:
+                    c.execute(f"DELETE FROM {t}")
+                
+                # Use robust INSERT methodology to prevent duplicate errors
+                if t in ['history', 'drivers', 'helpers', 'areas', 'vehicles']:
+                    c.executemany(f"INSERT OR IGNORE INTO {t} ({cols_str}) VALUES ({qmarks})", vals)
+                else:
+                    c.executemany(f"INSERT INTO {t} ({cols_str}) VALUES ({qmarks})", vals)
+                    
                 conn.commit()
+                
+                # Cleanup potential duplicates for non-indexed tables if merging
+                if merge and t == 'vacations':
+                    c.execute(f"DELETE FROM {t} WHERE rowid NOT IN (SELECT MIN(rowid) FROM {t} GROUP BY person_code, start_date, end_date)")
+                    conn.commit()
+                    
             except Exception as table_e:
                 print(f"Error syncing {t}: {table_e}") # Safe fail, prevents one broken table from crashing others
         return True
@@ -442,50 +458,6 @@ SEED_AREAS_IMAGE = [
     ("CON-SHJS", "SHARJAH SANAYA", "Consumer", "Yes", 38, "Sharjah"), 
     ("CON-SUB", "SUBTITUTE / URGENT ORDERS", "Substitute", "No", 39, "Dubai")
 ]
-
-SEED_VEHICLES = [
-    ("M 95321", "PICK-UP", "DUBAI", "Pharma"), ("C 47055", "PICK-UP", "SHARJAH", "Pharma"),
-    ("B 14813", "BUS", "DUBAI", "Pharma"), ("C 58107", "PICK-UP", "SHARJAH", "Pharma"),
-    ("C 58801", "VAN", "DUBAI", "Pharma"), ("16 47645", "BUS", "DUBAI", "Pharma"),
-    ("I 85664", "PICK-UP", "DUBAI", "Pharma"), ("I 86488", "VAN", "DUBAI", "Pharma"),
-    ("R 96871", "BUS", "DUBAI", "Pharma"), ("U 65986", "PICK-UP", "SHARJAH", "Consumer"),
-    ("U 65988", "VAN", "SHARJAH", "Pharma"), ("U 65990", "VAN", "DUBAI", "Pharma"),
-    ("V-83576", "VAN", "DUBAI", "Pharma"), ("V-84049", "VAN", "SHARJAH", "Pharma"),
-    ("V-84050", "VAN", "SHARJAH", "Pharma"), ("W 49535", "PICK-UP", "DUBAI", "Consumer"),
-    ("W 49536", "VAN", "DUBAI", "Pharma"), ("W 49539", "VAN", "DUBAI", "Pharma"),
-    ("W 49540", "VAN", "DUBAI", "Consumer"), ("O 72506", "VAN", "AJMAN AND SHARJAH", "Consumer"),
-    ("O 72533", "PICK-UP", "DUBAI", "Pharma"), ("O 72548", "PICK-UP", "DUBAI", "2-8 VAN"),
-    ("O 72567", "VAN", "DUBAI", "Pharma"), ("O 72578", "VAN", "DUBAI", "Pharma"),
-    ("O 72579", "VAN", "DUBAI", "Pharma"), ("O 72581", "VAN", "SHARJAH", "Consumer"),
-    ("D 85038", "VAN", "DUBAI", "Consumer"), ("D 85076", "VAN", "DUBAI", "Pharma"),
-    ("D 85823", "VAN", "DUBAI", "Pharma"), ("C 26596", "BUS", "DUBAI", "Pharma"),
-    ("V 60857", "VAN", "AJMAN", "Pharma"), ("N 31329", "VAN", "DUBAI", "Pharma"),
-    ("N 32094", "VAN", "DUBAI", "Pharma"), ("N 32119", "VAN", "DUBAI", "Pharma"),
-    ("N 32126", "VAN", "RAK", "Pharma"), ("N 33680", "VAN", "RAK", "Consumer"),
-    ("E 18104", "VAN", "DUBAI", "Pharma"), ("E 18316", "VAN", "DUBAI", "Consumer"),
-    ("BB 72473", "BUS", "DUBAI", "Pharma"), ("I 71528", "PICK-UP", "DUBAI", "2-8 VAN"),
-    ("W 11792", "VAN", "FUJAIRAH", "Pharma"), ("T 26701", "VAN", "SHARJAH", "2-8 VAN"),
-    ("CC 98174", "VAN", "DUBAI", "Pharma"), ("CC 98175", "VAN", "DUBAI", "Pharma"),
-    ("CC 98176", "VAN", "DUBAI", "2-8 VAN")
-]
-
-RAW_NAME_MAP = {
-    "D085": "Rahul R.P", "D034": "Adil Hassan", "D101": "Tintu V Joseph", "D038": "Ismail Korokkaran", "D107": "Muneeb Hussain", 
-    "D048": "Moideen Azeez", "D104": "Mahammed Ansar", "D040": "Hussain Mohammed", "D019": "Muhammed Kunji", "D064": "Shabeer Ali A.Rahman", 
-    "D029": "Baderudheen", "D036": "Rashid Baderzaman", "D011": "Imran Khan", "D050": "Abdul Mansoor", "D094": "Shuhaib Mullantakath", 
-    "D109": "Yousuf Nobi Shakib", "D010": "Nasar", "D102": "Mohammed Nasiruddeen", "D027": "Sultan", "D024": "Sadiq Shah", 
-    "D023": "Sabir Shah", "D026": "Jahaberudheen", "D032": "Sayd Mubarak", "D047": "Ahmed Faraj", "D061": "Said Alavy", 
-    "D044": "Zainul Abid", "D052": "Noushad Ali", "D099": "Muhammed Noushad P", "D042": "Gulam Khan Mohammad", "D103": "Jamseer PV Ibrahim", 
-    "D037": "Nijavudeen", "D046": "Azeez Abdulla", "D049": "Abdul Jabbar", "D089": "Jisam K Saleem", "D054": "Sameer Zakariyah", 
-    "D088": "Saheer Ali V Z", "D098": "Muhammed Aslam K", "D033": "Naeem Fazal",
-    "H116": "Munawir P Kabeer", "H131": "Said Ahmed Ibrahim", "H121": "Afreen Salam", "H119": "Muhammed Janees P", "H046": "Shihabudeen", 
-    "H070": "A. Harshad", "H129": "Pratik Bista", "H113": "Chadi Otmani", "H132": "Ahmed Younis", "H118": "Muhammed Shamil P", 
-    "H115": "Omar AlSaeed", "H122": "Mohamed Arsath", "H114": "Abdul Khader", "H066": "Christopherlov Brian", "H011": "Sudhakaran", 
-    "H005": "Aboobacker Aliyar", "H023": "Adil", "H050": "Ranjith. P", "H062": "Rakshith.p", "H051": "Shar Bahadar", 
-    "H104": "Mohammed Shakeer", "H130": "Javed Akhtar", "H034": "Riyasudheen Khuthubudheen", "H013": "Haris K", "H109": "AL Ameen", 
-    "H024": "Mohd Musthafa", "H026": "Riyas Ahmed", "H049": "Shobith", "H099": "Muhammed Rajas", "H082": "Hassan Mohammed", 
-    "H017": "Mujammal", "H126": "Subin Kovammal"
-}
 
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False, load_default=False):
@@ -1621,10 +1593,10 @@ elif choice == "2. Database Management":
             st.success("Layout restored successfully!")
             st.rerun()
             
-        if c_r2.button("📥 Force Pull from Cloud", type="primary"):
-            with st.spinner("Downloading all data from Firebase..."):
-                if sync_down_from_cloud():
-                    st.success("Successfully synchronized all data from the cloud!")
+        if c_r2.button("🚑 Safe Recover Data from Cloud", type="primary"):
+            with st.spinner("Deep scanning Firebase for legacy data and safely merging..."):
+                if sync_down_from_cloud(merge=True):
+                    st.success("Successfully recovered and merged all available data from the cloud!")
                     st.rerun()
                 else:
                     st.error("Failed to connect to Firebase or quota exceeded.")
