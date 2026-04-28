@@ -101,7 +101,7 @@ def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
     
-    # Fix old schema bug that caused infinite quota usage
+    # Fix old schema bugs permanently
     c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='areas'")
     row_areas = c.fetchone()
     if row_areas and 'name TEXT UNIQUE' in row_areas[0]:
@@ -138,21 +138,32 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS route_plan_reasons (id INTEGER PRIMARY KEY, plan_date TEXT, area TEXT, role TEXT, selected_person TEXT, score REAL, reasons TEXT, generated_at TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS vacation_predictions (id INTEGER PRIMARY KEY, person_code TEXT, person_name TEXT, role TEXT, suggested_start TEXT, suggested_end TEXT, reason TEXT, replacement_person TEXT, replacement_date TEXT)''')
     
+    # Introduce fb_id mapping to prevent edit/delete sync issues
     for query in [
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
         "ALTER TABLE drivers ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
+        "ALTER TABLE drivers ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE default_drivers ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
         "ALTER TABLE helpers ADD COLUMN health_card TEXT DEFAULT 'No'",
+        "ALTER TABLE helpers ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE areas ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
         "ALTER TABLE areas ADD COLUMN sort_order INTEGER DEFAULT 99",
         "ALTER TABLE areas ADD COLUMN region TEXT DEFAULT 'Dubai'",
+        "ALTER TABLE areas ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE vehicles ADD COLUMN anchor_area TEXT DEFAULT ''",
         "ALTER TABLE vehicles ADD COLUMN status TEXT DEFAULT 'Active'",
         "ALTER TABLE vehicles ADD COLUMN permitted_areas TEXT DEFAULT 'All'",
         "ALTER TABLE vehicles ADD COLUMN division TEXT DEFAULT 'Pharma'",
+        "ALTER TABLE vehicles ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN veh_perm TEXT DEFAULT ''",
-        "ALTER TABLE draft_routes ADD COLUMN veh_perm TEXT DEFAULT ''"
+        "ALTER TABLE draft_routes ADD COLUMN veh_perm TEXT DEFAULT ''",
+        "ALTER TABLE history ADD COLUMN fb_id TEXT DEFAULT ''",
+        "ALTER TABLE vacations ADD COLUMN fb_id TEXT DEFAULT ''",
+        "ALTER TABLE active_routes ADD COLUMN fb_id TEXT DEFAULT ''",
+        "ALTER TABLE draft_routes ADD COLUMN fb_id TEXT DEFAULT ''",
+        "ALTER TABLE route_plan_reasons ADD COLUMN fb_id TEXT DEFAULT ''",
+        "ALTER TABLE vacation_predictions ADD COLUMN fb_id TEXT DEFAULT ''"
     ]:
         try: c.execute(query)
         except sqlite3.OperationalError: pass
@@ -161,7 +172,7 @@ def init_sqlite_db():
 
 conn = init_sqlite_db()
 
-# --- HIGH-EFFICIENCY DELTA SYNC ENGINE ---
+# --- HIGH-EFFICIENCY DELTA SYNC ENGINE (BURST LIMIT SAFE) ---
 def process_sync_log():
     global FIREBASE_READY
     if not FIREBASE_READY: return
@@ -178,15 +189,32 @@ def process_sync_log():
             
             try:
                 if act == "INSERT":
-                    if d_id and str(d_id) != "None" and str(d_id).strip() != "": ref.document(str(d_id)).set(data)
-                    else: ref.add(data)
+                    clean_data = {k:v for k,v in data.items() if k != 'fb_id'} if data else {}
+                    if d_id and str(d_id) != "None" and str(d_id).strip() != "": ref.document(str(d_id)).set(clean_data)
+                    else: ref.add(clean_data)
                 elif act == "UPDATE":
-                    if d_id: ref.document(str(d_id)).set(data, merge=True)
+                    clean_data = {k:v for k,v in data.items() if k != 'fb_id'} if data else {}
+                    if d_id: ref.document(str(d_id)).set(clean_data, merge=True)
                 elif act == "DELETE_DOC":
                     if d_id: ref.document(str(d_id)).delete()
                 elif act == "CLEAR_TABLE":
-                    docs = ref.limit(200).stream() 
-                    for d in docs: d.reference.delete()
+                    while True:
+                        docs = list(ref.limit(200).stream())
+                        if not docs: break
+                        batch = db_fs.batch()
+                        for d in docs: batch.delete(d.reference)
+                        batch.commit()
+                elif act == "INSERT_MANY":
+                    # Batched insert prevents Firebase 429 Burst Quota errors
+                    batch = db_fs.batch()
+                    for i, item in enumerate(data):
+                        item_id = item.get('fb_id') or item.get('id') or item.get('code') or db_fs.collection(t_name).document().id
+                        clean_item = {k:v for k,v in item.items() if k != 'fb_id'}
+                        batch.set(ref.document(str(item_id)), clean_item)
+                        if (i + 1) % 400 == 0:
+                            batch.commit()
+                            batch = db_fs.batch()
+                    batch.commit()
                     
                 c.execute("DELETE FROM _sync_log WHERE id=?", (log_id,))
                 conn.commit()
@@ -201,23 +229,33 @@ def sync_down_from_cloud():
     global FIREBASE_READY
     if not FIREBASE_READY: return False
     try:
+        c = conn.cursor()
         for t in SYNC_TABLES:
-            docs = db_fs.collection(t).stream()
-            data = [{**doc.to_dict(), 'id': doc.id} for doc in docs]
-            if data:
-                c = conn.cursor()
+            try:
+                docs = list(db_fs.collection(t).stream())
+                if not docs: continue
+                
                 c.execute(f"DELETE FROM {t}")
-                cols = ', '.join([k for k in data[0].keys() if k != 'id'])
-                qmarks = ', '.join(['?'] * len([k for k in data[0].keys() if k != 'id']))
+                c.execute(f"PRAGMA table_info({t})")
+                # Exclude id and fb_id from dynamic column matching
+                valid_cols = [row[1] for row in c.fetchall() if row[1] not in ('id', 'fb_id')]
+                
                 vals = []
-                for d in data:
+                for doc in docs:
+                    d = doc.to_dict()
                     row_vals = []
-                    for k in data[0].keys():
-                        if k != 'id':
-                            row_vals.append(str(d.get(k, '')))
+                    for col in valid_cols:
+                        val = d.get(col, '')
+                        row_vals.append(str(val) if val is not None else '')
+                    row_vals.append(str(doc.id)) # Explicitly inject Firebase ID into fb_id mapping
                     vals.append(tuple(row_vals))
-                c.executemany(f"INSERT INTO {t} ({cols}) VALUES ({qmarks})", vals)
+                    
+                cols_str = ', '.join(valid_cols) + ', fb_id'
+                qmarks = ', '.join(['?'] * (len(valid_cols) + 1))
+                c.executemany(f"INSERT INTO {t} ({cols_str}) VALUES ({qmarks})", vals)
                 conn.commit()
+            except Exception as table_e:
+                print(f"Error syncing {t}: {table_e}") # Safe fail, prevents one broken table from crashing others
         return True
     except Exception as e:
         st.error(f"Sync failed: {e}")
@@ -293,17 +331,14 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
                 c.executemany(query, params)
             else: 
                 c.execute(query, params)
-                if action == "INSERT" and not doc_id: doc_id = c.lastrowid
+                if action == "INSERT" and not doc_id: doc_id = str(c.lastrowid)
         elif action == "CLEAR_TABLE" and table_name:
             c.execute(f"DELETE FROM {table_name}")
         conn.commit()
 
-        # Queue individual row changes to prevent 1MB JSON limits
         if not bypass_queue and table_name and action and table_name in SYNC_TABLES:
             if action == "INSERT_MANY" and isinstance(data, list):
-                for item in data:
-                    item_id = item.get('id') or item.get('code')
-                    c.execute("INSERT INTO _sync_log (table_name, action, doc_id, payload) VALUES (?, ?, ?, ?)", (table_name, "INSERT", str(item_id) if item_id else "", json.dumps(item)))
+                c.execute("INSERT INTO _sync_log (table_name, action, doc_id, payload) VALUES (?, ?, ?, ?)", (table_name, action, "", json.dumps(data)))
             elif action == "CLEAR_TABLE":
                 c.execute("INSERT INTO _sync_log (table_name, action, doc_id, payload) VALUES (?, ?, ?, ?)", (table_name, action, "", ""))
             else:
@@ -324,6 +359,7 @@ def generate_excel_with_sn(df_list, sheet_names):
         for df, sheet in zip(df_list, sheet_names):
             export_df = df.copy()
             if 'id' in export_df.columns: export_df = export_df.drop(columns=['id'])
+            if 'fb_id' in export_df.columns: export_df = export_df.drop(columns=['fb_id'])
             if 'sort_order' in export_df.columns: export_df = export_df.drop(columns=['sort_order'])
             if 'S/N' in export_df.columns: export_df = export_df.drop(columns=['S/N'])
             if 'vacation_status' in export_df.columns: export_df = export_df.drop(columns=['vacation_status'])
@@ -454,41 +490,42 @@ RAW_NAME_MAP = {
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False, load_default=False):
         try:
+            bq = not force
             if load_default:
                 for t in ['areas', 'drivers', 'helpers', 'vehicles']:
                     def_df = load_table(f"default_{t}")
                     if not def_df.empty:
-                        run_query(f"DELETE FROM {t}", table_name=t, action="CLEAR_TABLE")
-                        dicts = def_df.drop(columns=[c for c in ['id', 'S/N', 'sort_order', 'vacation_status'] if c in def_df.columns]).to_dict('records')
+                        run_query(f"DELETE FROM {t}", table_name=t, action="CLEAR_TABLE", bypass_queue=bq)
+                        dicts = def_df.drop(columns=[c for c in ['id', 'S/N', 'sort_order', 'vacation_status', 'fb_id'] if c in def_df.columns]).to_dict('records')
                         cols = ', '.join(dicts[0].keys())
                         qmarks = ', '.join(['?'] * len(dicts[0]))
                         vals = [tuple(d.values()) for d in dicts]
-                        run_query(f"INSERT OR REPLACE INTO {t} ({cols}) VALUES ({qmarks})", vals, table_name=t, action="INSERT_MANY", data=dicts)
+                        run_query(f"INSERT OR REPLACE INTO {t} ({cols}) VALUES ({qmarks})", vals, table_name=t, action="INSERT_MANY", data=dicts, bypass_queue=bq)
                         continue
             
             current_areas = load_table("areas")
-            if force or len(current_areas) != 39:
-                run_query("DELETE FROM areas", table_name="areas", action="CLEAR_TABLE")
+            if force or len(current_areas) == 0:
+                run_query("DELETE FROM areas", table_name="areas", action="CLEAR_TABLE", bypass_queue=bq)
                 areas_data = [{"code": c, "name": n, "sector": unify_text(s), "needs_helper": nh, "sort_order": o, "region": r} for c, n, s, nh, o, r in SEED_AREAS_IMAGE]
-                run_query("INSERT OR IGNORE INTO areas (code, name, sector, needs_helper, sort_order, region) VALUES (?, ?, ?, ?, ?, ?)", SEED_AREAS_IMAGE, table_name="areas", action="INSERT_MANY", data=areas_data)
+                run_query("INSERT OR IGNORE INTO areas (code, name, sector, needs_helper, sort_order, region) VALUES (?, ?, ?, ?, ?, ?)", SEED_AREAS_IMAGE, table_name="areas", action="INSERT_MANY", data=areas_data, bypass_queue=bq)
             
             d_df = load_table('drivers')
             if len(d_df) == 0:
                 d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "", "", "", "", "") for code in KEEP_DRIVERS]
                 d_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": "", "anchor_vehicle": ""} for code in KEEP_DRIVERS]
-                run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data)
+                run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data, bypass_queue=bq)
             
             h_df = load_table('helpers')
             if len(h_df) == 0:
                 h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "", "No", "") for code in KEEP_HELPERS]
                 h_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "", "health_card": "No", "anchor_area": ""} for code in KEEP_HELPERS]
-                run_query("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed, table_name="helpers", action="INSERT_MANY", data=h_data)
+                run_query("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed, table_name="helpers", action="INSERT_MANY", data=h_data, bypass_queue=bq)
 
             v_df = load_table('vehicles')
             if len(v_df) == 0:
                 v_seed = [(v_num, unify_text(v_type), permitted, unify_text(division), "", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
                 v_data = [{"number": v_num, "type": unify_text(v_type), "permitted_areas": permitted, "division": unify_text(division), "anchor_area": "", "status": "Active"} for v_num, v_type, permitted, division in SEED_VEHICLES]
-                run_query("INSERT OR IGNORE INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed, table_name="vehicles", action="INSERT_MANY", data=v_data)
+                run_query("INSERT OR IGNORE INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed, table_name="vehicles", action="INSERT_MANY", data=v_data, bypass_queue=bq)
             
             st.cache_data.clear()
         except Exception as e:
@@ -1232,7 +1269,7 @@ elif choice == "2. Database Management":
             disp_df, 
             column_order=[c for c in d_col_order if c in disp_df.columns],
             column_config={
-                "id": None, 
+                "id": None, "fb_id": None, 
                 "S/N": st.column_config.NumberColumn(disabled=True),
                 "vacation_status": st.column_config.TextColumn("Vacation Status", disabled=True),
                 "veh_type": st.column_config.SelectboxColumn("Veh Type", options=get_dynamic_opts(drivers_df, 'veh_type', VEHICLE_OPTIONS)),
@@ -1245,6 +1282,7 @@ elif choice == "2. Database Management":
             for idx in disp_df.index:
                 row_id = int(disp_df.loc[idx, 'id'])
                 if not disp_df.loc[idx].equals(edited_d.loc[idx]):
+                    fb_id = str(disp_df.loc[idx, 'fb_id']) if 'fb_id' in disp_df.columns and pd.notna(disp_df.loc[idx, 'fb_id']) and str(disp_df.loc[idx, 'fb_id']).strip() else str(row_id)
                     update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N', 'vacation_status'], errors='ignore').to_dict()
                     update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                     for col in ['sector', 'veh_type', 'division', 'type']:
@@ -1252,7 +1290,7 @@ elif choice == "2. Database Management":
                         
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     params = tuple(list(update_dict.values()) + [row_id])
-                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", params, table_name="drivers", action="UPDATE", doc_id=row_id, data=update_dict)
+                    run_query(f"UPDATE drivers SET {sql_sets} WHERE id=?", params, table_name="drivers", action="UPDATE", doc_id=fb_id, data=update_dict)
                     changes_saved += 1
             if changes_saved > 0:
                 st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
@@ -1302,7 +1340,9 @@ elif choice == "2. Database Management":
             if sel_d_code:
                 d_data = drivers_df[drivers_df['code'] == sel_d_code].iloc[0]
                 if st.button("🗑️ Delete Driver", use_container_width=True, key=f"btn_d_del_{d_data['id']}"):
-                    if run_query("DELETE FROM drivers WHERE code=?", (sel_d_code,), table_name="drivers", action="DELETE_DOC", doc_id=d_data['id']):
+                    fb_id = str(d_data.get('fb_id', ''))
+                    if not fb_id.strip() or fb_id == 'nan': fb_id = str(d_data['id'])
+                    if run_query("DELETE FROM drivers WHERE code=?", (sel_d_code,), table_name="drivers", action="DELETE_DOC", doc_id=fb_id):
                         st.success("Driver Deleted!")
                         st.rerun()
 
@@ -1323,7 +1363,7 @@ elif choice == "2. Database Management":
             disp_h, 
             column_order=[c for c in h_col_order if c in disp_h.columns],
             column_config={
-                "id": None, 
+                "id": None, "fb_id": None,
                 "S/N": st.column_config.NumberColumn(disabled=True),
                 "vacation_status": st.column_config.TextColumn("Vacation Status", disabled=True),
                 "health_card": st.column_config.SelectboxColumn("Health Card", options=["Yes", "No", ""])
@@ -1334,6 +1374,7 @@ elif choice == "2. Database Management":
             for idx in disp_h.index:
                 row_id = int(disp_h.loc[idx, 'id'])
                 if not disp_h.loc[idx].equals(edited_h.loc[idx]):
+                    fb_id = str(disp_h.loc[idx, 'fb_id']) if 'fb_id' in disp_h.columns and pd.notna(disp_h.loc[idx, 'fb_id']) and str(disp_h.loc[idx, 'fb_id']).strip() else str(row_id)
                     update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N', 'vacation_status'], errors='ignore').to_dict()
                     update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                     for col in ['sector', 'veh_type', 'division', 'type']:
@@ -1341,7 +1382,7 @@ elif choice == "2. Database Management":
                         
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     params = tuple(list(update_dict.values()) + [row_id])
-                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", params, table_name="helpers", action="UPDATE", doc_id=row_id, data=update_dict)
+                    run_query(f"UPDATE helpers SET {sql_sets} WHERE id=?", params, table_name="helpers", action="UPDATE", doc_id=fb_id, data=update_dict)
                     changes_saved += 1
             if changes_saved > 0:
                 st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
@@ -1373,7 +1414,9 @@ elif choice == "2. Database Management":
             if sel_h_code:
                 h_data = helpers_df[helpers_df['code'] == sel_h_code].iloc[0]
                 if st.button("🗑️ Delete Helper", use_container_width=True, key=f"btn_h_del_{h_data['id']}"):
-                    if run_query("DELETE FROM helpers WHERE code=?", (sel_h_code,), table_name="helpers", action="DELETE_DOC", doc_id=h_data['id']):
+                    fb_id = str(h_data.get('fb_id', ''))
+                    if not fb_id.strip() or fb_id == 'nan': fb_id = str(h_data['id'])
+                    if run_query("DELETE FROM helpers WHERE code=?", (sel_h_code,), table_name="helpers", action="DELETE_DOC", doc_id=fb_id):
                         st.success("Helper Deleted!")
                         st.rerun()
 
@@ -1391,7 +1434,7 @@ elif choice == "2. Database Management":
             disp_a, 
             column_order=[c for c in a_col_order if c in disp_a.columns],
             column_config={
-                "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
+                "id": None, "fb_id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "sector": st.column_config.SelectboxColumn("Sector", options=get_dynamic_opts(a_df, 'sector', SECTOR_OPTIONS)),
                 "needs_helper": st.column_config.SelectboxColumn("Needs Helper", options=NEEDS_HELPER_OPTIONS),
                 "region": st.column_config.SelectboxColumn("Region", options=get_dynamic_opts(a_df, 'region', ["Dubai", "Sharjah", "Ajman", "RAK", "Fujairah"]))
@@ -1402,6 +1445,7 @@ elif choice == "2. Database Management":
             for idx in disp_a.index:
                 row_id = int(disp_a.loc[idx, 'id'])
                 if not disp_a.loc[idx].equals(edited_a.loc[idx]):
+                    fb_id = str(disp_a.loc[idx, 'fb_id']) if 'fb_id' in disp_a.columns and pd.notna(disp_a.loc[idx, 'fb_id']) and str(disp_a.loc[idx, 'fb_id']).strip() else str(row_id)
                     update_dict = edited_a.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                     update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                     for col in ['sector', 'veh_type', 'division', 'type']:
@@ -1409,7 +1453,7 @@ elif choice == "2. Database Management":
                         
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     params = tuple(list(update_dict.values()) + [row_id])
-                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", params, table_name="areas", action="UPDATE", doc_id=row_id, data=update_dict)
+                    run_query(f"UPDATE areas SET {sql_sets} WHERE id=?", params, table_name="areas", action="UPDATE", doc_id=fb_id, data=update_dict)
                     changes_saved += 1
             if changes_saved > 0:
                 st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
@@ -1449,7 +1493,9 @@ elif choice == "2. Database Management":
                 sel_a_code = sel_a_str.split("] ")[0].replace("[", "")
                 a_data = a_df[a_df['code'] == sel_a_code].iloc[0]
                 if st.button("🗑️ Delete Area", use_container_width=True, key=f"btn_a_del_{a_data['id']}"):
-                    if run_query("DELETE FROM areas WHERE code=?", (sel_a_code,), table_name="areas", action="DELETE_DOC", doc_id=a_data['id']):
+                    fb_id = str(a_data.get('fb_id', ''))
+                    if not fb_id.strip() or fb_id == 'nan': fb_id = str(a_data['id'])
+                    if run_query("DELETE FROM areas WHERE code=?", (sel_a_code,), table_name="areas", action="DELETE_DOC", doc_id=fb_id):
                         st.success("Area Deleted!")
                         st.rerun()
 
@@ -1467,7 +1513,7 @@ elif choice == "2. Database Management":
             disp_v, 
             column_order=[c for c in v_col_order if c in disp_v.columns],
             column_config={
-                "id": None, "S/N": st.column_config.NumberColumn(disabled=True),
+                "id": None, "fb_id": None, "S/N": st.column_config.NumberColumn(disabled=True),
                 "type": st.column_config.SelectboxColumn("Veh Type", options=get_dynamic_opts(v_df, 'type', VEHICLE_OPTIONS)),
                 "division": st.column_config.SelectboxColumn("Division", options=get_dynamic_opts(v_df, 'division', SECTOR_OPTIONS)),
                 "status": st.column_config.SelectboxColumn("Status", options=["Active", "Under Service", "In for Service"])
@@ -1478,6 +1524,7 @@ elif choice == "2. Database Management":
             for idx in disp_v.index:
                 row_id = int(disp_v.loc[idx, 'id'])
                 if not disp_v.loc[idx].equals(edited_v.loc[idx]):
+                    fb_id = str(disp_v.loc[idx, 'fb_id']) if 'fb_id' in disp_v.columns and pd.notna(disp_v.loc[idx, 'fb_id']) and str(disp_v.loc[idx, 'fb_id']).strip() else str(row_id)
                     update_dict = edited_v.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                     update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                     for col in ['sector', 'veh_type', 'division', 'type']:
@@ -1485,7 +1532,7 @@ elif choice == "2. Database Management":
                         
                     sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                     params = tuple(list(update_dict.values()) + [row_id])
-                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", params, table_name="vehicles", action="UPDATE", doc_id=row_id, data=update_dict)
+                    run_query(f"UPDATE vehicles SET {sql_sets} WHERE id=?", params, table_name="vehicles", action="UPDATE", doc_id=fb_id, data=update_dict)
                     changes_saved += 1
             if changes_saved > 0:
                 st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
@@ -1529,7 +1576,9 @@ elif choice == "2. Database Management":
             if sel_v:
                 v_data = v_df[v_df['number'] == sel_v].iloc[0]
                 if st.button("🗑️ Delete Veh", use_container_width=True, key=f"btn_v_del_{v_data['id']}"):
-                    if run_query("DELETE FROM vehicles WHERE number=?", (sel_v,), table_name="vehicles", action="DELETE_DOC", doc_id=v_data['id']):
+                    fb_id = str(v_data.get('fb_id', ''))
+                    if not fb_id.strip() or fb_id == 'nan': fb_id = str(v_data['id'])
+                    if run_query("DELETE FROM vehicles WHERE number=?", (sel_v,), table_name="vehicles", action="DELETE_DOC", doc_id=fb_id):
                         st.success("Vehicle Deleted!")
                         st.rerun()
 
@@ -1550,7 +1599,7 @@ elif choice == "2. Database Management":
                 insert_data = []
                 insert_dicts = []
                 for _, row in df.iterrows():
-                    data_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N', 'vacation_status']}
+                    data_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N', 'vacation_status', 'fb_id']}
                     cols = ', '.join(data_dict.keys())
                     vals = tuple(data_dict.values())
                     qmarks = ', '.join(['?'] * len(data_dict))
@@ -1610,7 +1659,7 @@ elif choice == "3. Past Experience Builder":
     
     edited_hist = st.data_editor(
         disp_hist, column_config={
-            "id": None, "S/N": st.column_config.NumberColumn(disabled=True)
+            "id": None, "fb_id": None, "S/N": st.column_config.NumberColumn(disabled=True)
         }, use_container_width=True, height=350, hide_index=True, key="ed_hist"
     )
     
@@ -1619,6 +1668,7 @@ elif choice == "3. Past Experience Builder":
         for idx in disp_hist.index:
             row_id = int(disp_hist.loc[idx, 'id'])
             if not disp_hist.loc[idx].equals(edited_hist.loc[idx]):
+                fb_id = str(disp_hist.loc[idx, 'fb_id']) if 'fb_id' in disp_hist.columns and pd.notna(disp_hist.loc[idx, 'fb_id']) and str(disp_hist.loc[idx, 'fb_id']).strip() else str(row_id)
                 update_dict = edited_hist.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                 update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                 for col in ['sector', 'veh_type', 'division', 'type']:
@@ -1626,7 +1676,7 @@ elif choice == "3. Past Experience Builder":
                     
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                 params = tuple(list(update_dict.values()) + [row_id])
-                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", params, table_name="history", action="UPDATE", doc_id=row_id, data=update_dict)
+                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", params, table_name="history", action="UPDATE", doc_id=fb_id, data=update_dict)
                 changes_saved += 1
         if changes_saved > 0:
             st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
@@ -1771,9 +1821,12 @@ elif choice == "3. Past Experience Builder":
 
             sel_hist_str = st.selectbox("Select Record to Delete", hist_options)
             if sel_hist_str:
-                hist_id = hist_map[sel_hist_str]
+                hist_id = int(hist_map[sel_hist_str])
                 if st.button("🗑️ Delete Experience", use_container_width=True, key=f"he_del_{hist_id}"):
-                    if run_query("DELETE FROM history WHERE id=?", (hist_id,), table_name="history", action="DELETE_DOC", doc_id=hist_id):
+                    row_data = history_df[history_df['id'] == hist_id].iloc[0]
+                    fb_id = str(row_data.get('fb_id', ''))
+                    if not fb_id.strip() or fb_id == 'nan': fb_id = str(hist_id)
+                    if run_query("DELETE FROM history WHERE id=?", (hist_id,), table_name="history", action="DELETE_DOC", doc_id=fb_id):
                         st.success("Experience Deleted!")
                         st.rerun()
 
@@ -1836,7 +1889,7 @@ elif choice == "4. Vacation Schedule":
     
     edited_vac = st.data_editor(
         disp_vac, column_config={
-            "id": None, "S/N": st.column_config.NumberColumn(disabled=True)
+            "id": None, "fb_id": None, "S/N": st.column_config.NumberColumn(disabled=True)
         }, use_container_width=True, height=250, hide_index=True, key="ed_vac"
     )
     
@@ -1845,6 +1898,7 @@ elif choice == "4. Vacation Schedule":
         for idx in disp_vac.index:
             row_id = int(disp_vac.loc[idx, 'id'])
             if not disp_vac.loc[idx].equals(edited_vac.loc[idx]):
+                fb_id = str(disp_vac.loc[idx, 'fb_id']) if 'fb_id' in disp_vac.columns and pd.notna(disp_vac.loc[idx, 'fb_id']) and str(disp_vac.loc[idx, 'fb_id']).strip() else str(row_id)
                 update_dict = edited_vac.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
                 update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                 for col in ['sector', 'veh_type', 'division', 'type']:
@@ -1852,7 +1906,7 @@ elif choice == "4. Vacation Schedule":
                     
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                 params = tuple(list(update_dict.values()) + [row_id])
-                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", params, table_name="vacations", action="UPDATE", doc_id=row_id, data=update_dict)
+                run_query(f"UPDATE vacations SET {sql_sets} WHERE id=?", params, table_name="vacations", action="UPDATE", doc_id=fb_id, data=update_dict)
                 changes_saved += 1
         if changes_saved > 0:
             st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
@@ -1870,7 +1924,7 @@ elif choice == "4. Vacation Schedule":
             insert_data = []
             insert_dicts = []
             for _, row in df.iterrows():
-                data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N']}
+                data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N', 'fb_id']}
                 cols = ', '.join(data_dict.keys())
                 vals = tuple(data_dict.values())
                 qmarks = ', '.join(['?'] * len(data_dict))
@@ -1923,8 +1977,11 @@ elif choice == "4. Vacation Schedule":
 
             sel_vac_str = st.selectbox("Select Vacation to Delete", vac_options)
             if sel_vac_str:
-                vac_id = vac_map[sel_vac_str]
+                vac_id = int(vac_map[sel_vac_str])
                 if st.button("🗑️ Delete Vacation", use_container_width=True, key=f"vac_del_{vac_id}"):
-                    if run_query("DELETE FROM vacations WHERE id=?", (vac_id,), table_name="vacations", action="DELETE_DOC", doc_id=vac_id):
+                    row_data = vacs_df[vacs_df['id'] == vac_id].iloc[0]
+                    fb_id = str(row_data.get('fb_id', ''))
+                    if not fb_id.strip() or fb_id == 'nan': fb_id = str(vac_id)
+                    if run_query("DELETE FROM vacations WHERE id=?", (vac_id,), table_name="vacations", action="DELETE_DOC", doc_id=fb_id):
                         st.success("Vacation Deleted!")
                         st.rerun()
