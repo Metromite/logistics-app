@@ -45,7 +45,7 @@ def unify_text(val):
 def unify_dataframe(df):
     if df.empty: return df
     df = df.fillna("") 
-    target_cols = ['sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type', 'area', 'anchor_area', 'anchor_vehicle', 'permitted_areas', 'restriction', 'start_date', 'end_date', 'region', 'needs_driver', 'needs_helper']
+    target_cols = ['sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type', 'area', 'anchor_area', 'anchor_vehicle', 'permitted_areas', 'restriction', 'start_date', 'end_date', 'region']
     for col in target_cols:
         if col in df.columns:
             df[col] = df[col].apply(unify_text)
@@ -149,10 +149,12 @@ def init_sqlite_db():
         "ALTER TABLE areas ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN needs_driver TEXT DEFAULT 'Yes'",
         "ALTER TABLE areas ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
+        "ALTER TABLE areas ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
         "ALTER TABLE areas ADD COLUMN sort_order INTEGER DEFAULT 99",
         "ALTER TABLE areas ADD COLUMN region TEXT DEFAULT 'Dubai'",
         "ALTER TABLE areas ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE default_areas ADD COLUMN needs_driver TEXT DEFAULT 'Yes'",
+        "ALTER TABLE default_areas ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
         "ALTER TABLE vehicles ADD COLUMN anchor_area TEXT DEFAULT ''",
         "ALTER TABLE vehicles ADD COLUMN status TEXT DEFAULT 'Active'",
         "ALTER TABLE vehicles ADD COLUMN permitted_areas TEXT DEFAULT 'All'",
@@ -305,6 +307,7 @@ def load_table(table_name):
         if 'sector' not in df.columns: df['sector'] = 'Pharma'
         if 'needs_driver' not in df.columns: df['needs_driver'] = 'Yes'
         if 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
+        if 'anchor_vehicle' not in df.columns: df['anchor_vehicle'] = ''
         if 'sort_order' not in df.columns: df['sort_order'] = 99
         if 'region' not in df.columns: df['region'] = 'Dubai'
         df['sort_order'] = pd.to_numeric(df['sort_order'], errors='coerce').fillna(99)
@@ -328,9 +331,13 @@ def load_table(table_name):
     if table_name in ['drivers', 'helpers']: df = df.drop_duplicates(subset=['code'], keep='first')
     if table_name == 'vehicles': df = df.drop_duplicates(subset=['number'], keep='first')
     if table_name == 'areas': df = df.drop_duplicates(subset=['code'], keep='first') 
-    if table_name == 'history': df = df.drop_duplicates(subset=['person_code', 'area', 'date'], keep='first')
+    if table_name == 'history': df = drop_duplicates_safe(df, ['person_code', 'area', 'date'])
     
     return df
+
+def drop_duplicates_safe(df, subset):
+    if df.empty: return df
+    return df.drop_duplicates(subset=subset, keep='first')
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None, bypass_queue=False):
     try:
@@ -694,7 +701,7 @@ drv_names_opts = ["UNASSIGNED", ""] + all_d['name'].dropna().unique().tolist() i
 hlp_codes_opts = ["UNASSIGNED", "N/A", ""] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", ""]
 hlp_names_opts = ["UNASSIGNED", "NO HELPER REQUIRED", ""] + all_h['name'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "NO HELPER REQUIRED", ""]
 
-v_num_opts = [""] + vehicles_global['number'].tolist() if not vehicles_global.empty else [""]
+v_num_opts = ["UNASSIGNED", "N/A", ""] + vehicles_global['number'].dropna().unique().tolist() if not vehicles_global.empty else ["UNASSIGNED", "N/A", ""]
 
 # DYNAMIC DROPDOWN HELPERS
 def get_dynamic_opts(df, col_name, standard_opts):
@@ -822,7 +829,8 @@ if choice == "1. AI Route Planner":
                 "Driver Code": st.column_config.SelectboxColumn("CODE", options=drv_codes_opts),
                 "Drivers Name": st.column_config.SelectboxColumn("Drivers Name", options=drv_names_opts),
                 "Helper Code": st.column_config.SelectboxColumn("CODE", options=hlp_codes_opts),
-                "Helpers Name": st.column_config.SelectboxColumn("Helpers Name", options=hlp_names_opts)
+                "Helpers Name": st.column_config.SelectboxColumn("Helpers Name", options=hlp_names_opts),
+                "VEH NO": st.column_config.SelectboxColumn("VEH NO", options=v_num_opts)
             }
         )
         
@@ -1040,6 +1048,7 @@ if choice == "1. AI Route Planner":
                     area_code = area.get('code', '')
                     area_name = unify_text(area['name'])
                     req_sector = unify_text(area.get('sector', 'Pharma'))
+                    needs_helper = area.get('needs_helper', 'Yes') in ['Yes', 'Optional']
                     
                     div_cat = "PHARMA DIVISION"
                     if "2-8" in req_sector or "GOVT" in req_sector.upper() or "FLEET" in req_sector.upper(): div_cat = "2-8 / URGENT ORDERS"
@@ -1157,13 +1166,37 @@ if choice == "1. AI Route Planner":
                         if "NONE" in d_anch_vehs: d_anch_vehs.remove("NONE")
                         if "" in d_anch_vehs: d_anch_vehs.remove("")
                         
+                        a_anch_veh_str = area.get('anchor_vehicle', '')
+                        a_anch_vehs = [v.strip().upper() for v in str(a_anch_veh_str).split(',') if v.strip()]
+                        if "NONE" in a_anch_vehs: a_anch_vehs.remove("NONE")
+                        if "" in a_anch_vehs: a_anch_vehs.remove("")
+                        
                         potential_vs = []
                         active_vehicles_df = vehicles[~vehicles.get('status', 'Active').str.contains('Under Service|In for Service', case=False, na=False)]
                         for _, v in active_vehicles_df[~active_vehicles_df['number'].isin(used_vehicles)].iterrows():
                             v_num_chk = unify_text(v.get('number', '')).upper()
                             
-                            if v_num_chk in d_anch_vehs:
-                                potential_vs.append((v, 1000)) 
+                            is_area_anchored = v_num_chk in a_anch_vehs
+                            is_drv_anchored = v_num_chk in d_anch_vehs
+                            
+                            v_anchors = [a.strip().upper() for a in str(v.get('anchor_area', '')).split(',') if a.strip()]
+                            if "NONE" in v_anchors: v_anchors.remove("NONE")
+                            if "" in v_anchors: v_anchors.remove("")
+                            
+                            is_veh_area_anchored = False
+                            if v_anchors:
+                                check_list = [unify_text(area_name).upper(), unify_text(req_sector).upper(), unify_text(tvt).upper()]
+                                if any(any(anc in chk or chk in anc for chk in check_list) for anc in v_anchors):
+                                    is_veh_area_anchored = True
+                            
+                            if is_area_anchored:
+                                potential_vs.append((v, 2000))
+                                continue
+                            if is_drv_anchored:
+                                potential_vs.append((v, 1000))
+                                continue
+                            if is_veh_area_anchored:
+                                potential_vs.append((v, 100))
                                 continue
                                 
                             v_type = unify_text(v.get('type', 'VAN'))
@@ -1180,21 +1213,7 @@ if choice == "1. AI Route Planner":
                             if v_perm_chk != "ALL" and a_reg not in v_perm_chk and v_perm_chk not in a_reg:
                                 continue 
                             
-                            v_anchors = [a.strip().upper() for a in str(v.get('anchor_area', '')).split(',') if a.strip()]
-                            if "NONE" in v_anchors: v_anchors.remove("NONE")
-                            if "" in v_anchors: v_anchors.remove("")
-                            
-                            if v_anchors:
-                                matched = False
-                                check_list = [unify_text(area_name).upper(), unify_text(req_sector).upper(), unify_text(tvt).upper()]
-                                for anc in v_anchors:
-                                    if any(anc in chk or chk in anc for chk in check_list):
-                                        matched = True
-                                        break
-                                if matched:
-                                    potential_vs.append((v, 100)) # High Priority
-                            else:
-                                potential_vs.append((v, 0)) # Normal Priority
+                            potential_vs.append((v, 0)) # Normal Priority
 
                         potential_vs.sort(key=lambda x: x[1], reverse=True)
 
@@ -1271,7 +1290,7 @@ elif choice == "2. Database Management":
 
     d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "anchor_vehicle", "vacation_status"]
     h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "vacation_status"]
-    a_col_order = ["S/N", "code", "name", "sector", "region", "needs_driver", "needs_helper", "sort_order"]
+    a_col_order = ["S/N", "code", "name", "sector", "region", "needs_driver", "needs_helper", "anchor_vehicle", "sort_order"]
     v_col_order = ["S/N", "number", "type", "division", "status", "anchor_area", "permitted_areas"]
 
     today = date.today()
@@ -1470,6 +1489,7 @@ elif choice == "2. Database Management":
                 "sector": st.column_config.SelectboxColumn("Sector", options=get_dynamic_opts(a_df, 'sector', SECTOR_OPTIONS)),
                 "needs_driver": st.column_config.SelectboxColumn("Needs Driver", options=NEEDS_OPTIONS),
                 "needs_helper": st.column_config.SelectboxColumn("Needs Helper", options=NEEDS_OPTIONS),
+                "anchor_vehicle": st.column_config.SelectboxColumn("Anchor Vehicle", options=v_num_opts),
                 "region": st.column_config.SelectboxColumn("Region", options=get_dynamic_opts(a_df, 'region', ["Dubai", "Sharjah", "Ajman", "RAK", "Fujairah"]))
             }, use_container_width=True, height=250, hide_index=True, key="ed_areas"
         )
@@ -1511,12 +1531,17 @@ elif choice == "2. Database Management":
             a_reg_man = c5.text_input("Or manual Region", key="add_a_reg_m")
             a_reg = a_reg_man.strip() if a_reg_man.strip() else a_reg_sel
             
+            c6, c7 = st.columns(2)
+            a_anch_veh_sel = c6.selectbox("Anchor Vehicle (Select)", v_num_opts, key="add_a_anch_v_s")
+            a_anch_veh_man = c7.text_input("Or manual Vehicle", key="add_a_anch_v_m")
+            a_anch_veh = a_anch_veh_man.strip() if a_anch_veh_man.strip() else a_anch_veh_sel
+            
             if st.button("➕ Add Area", use_container_width=True):
                 if a_df['code'].isin([a_code]).any():
                     st.error(f"Area Code {a_code} already exists! Cannot duplicate.")
                 else:
                     new_order = len(a_df) + 1
-                    if run_query("INSERT INTO areas (name, code, sector, needs_driver, needs_helper, sort_order, region) VALUES (?, ?, ?, ?, ?, ?, ?)", (a_name, a_code, unify_text(a_sec), a_needs_d, a_needs_h, new_order, a_reg), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":unify_text(a_sec), "needs_driver":a_needs_d, "needs_helper":a_needs_h, "sort_order":new_order, "region":a_reg}):
+                    if run_query("INSERT INTO areas (name, code, sector, needs_driver, needs_helper, anchor_vehicle, sort_order, region) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (a_name, a_code, unify_text(a_sec), a_needs_d, a_needs_h, a_anch_veh, new_order, a_reg), table_name="areas", action="INSERT", data={"name":a_name, "code":a_code, "sector":unify_text(a_sec), "needs_driver":a_needs_d, "needs_helper":a_needs_h, "anchor_vehicle":a_anch_veh, "sort_order":new_order, "region":a_reg}):
                         st.success("Area Added!")
                         st.rerun()
         with c_edit:
