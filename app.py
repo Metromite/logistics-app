@@ -52,9 +52,11 @@ def unify_dataframe(df):
     return df
 
 def parse_date_safe(d_str):
-    if pd.isna(d_str) or not str(d_str).strip() or str(d_str).lower() in ["none", "nan", "nat", ""]: return ""
+    if pd.isna(d_str) or d_str is None: return ""
+    if isinstance(d_str, (datetime, pd.Timestamp)): return d_str.strftime("%Y-%m-%d")
     d_str = str(d_str).strip().split(" ")[0]
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
+    if d_str.lower() in ["none", "nan", "nat", ""]: return ""
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S"):
         try: return datetime.strptime(d_str, fmt).strftime("%Y-%m-%d")
         except ValueError: pass
     return d_str
@@ -101,7 +103,6 @@ def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
     
-    # Fix old schema bugs permanently
     c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='areas'")
     row_areas = c.fetchone()
     if row_areas and 'name TEXT UNIQUE' in row_areas[0]:
@@ -138,7 +139,6 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS route_plan_reasons (id INTEGER PRIMARY KEY, plan_date TEXT, area TEXT, role TEXT, selected_person TEXT, score REAL, reasons TEXT, generated_at TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS vacation_predictions (id INTEGER PRIMARY KEY, person_code TEXT, person_name TEXT, role TEXT, suggested_start TEXT, suggested_end TEXT, reason TEXT, replacement_person TEXT, replacement_date TEXT)''')
     
-    # Introduce fb_id mapping to prevent edit/delete sync issues
     for query in [
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
         "ALTER TABLE drivers ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
@@ -205,7 +205,6 @@ def process_sync_log():
                         for d in docs: batch.delete(d.reference)
                         batch.commit()
                 elif act == "INSERT_MANY":
-                    # Batched insert prevents Firebase 429 Burst Quota errors
                     batch = db_fs.batch()
                     for i, item in enumerate(data):
                         item_id = item.get('fb_id') or item.get('id') or item.get('code') or db_fs.collection(t_name).document().id
@@ -226,9 +225,6 @@ def process_sync_log():
         pass
 
 def sync_down_from_cloud(merge=False):
-    """
-    Safely pulls data from Firebase utilizing robust Pandas parsing to prevent schema mismatches.
-    """
     global FIREBASE_READY
     if not FIREBASE_READY: return False
     try:
@@ -296,13 +292,11 @@ else:
 
 @st.cache_data(show_spinner=False, ttl=86400) 
 def load_table(table_name):
-    # 100% Local Read - Zero Firebase Read Quota Hit!
     df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
         
     if df.empty: return df
     df = unify_dataframe(df)
     
-    # DB Defaults
     if table_name == 'helpers' and 'health_card' not in df.columns: df['health_card'] = 'No'
     if table_name == 'drivers':
         if 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
@@ -379,6 +373,7 @@ def generate_excel_with_sn(df_list, sheet_names):
             if 'sort_order' in export_df.columns: export_df = export_df.drop(columns=['sort_order'])
             if 'S/N' in export_df.columns: export_df = export_df.drop(columns=['S/N'])
             if 'vacation_status' in export_df.columns: export_df = export_df.drop(columns=['vacation_status'])
+            if 'Days' in export_df.columns: export_df = export_df.drop(columns=['Days'])
             export_df.insert(0, 'S/N', range(1, 1 + len(export_df)))
             export_df.to_excel(writer, sheet_name=sheet, index=False)
     output.seek(0)
@@ -569,7 +564,7 @@ SECTOR_MONTHS_WEIGHT = 50
 RECENT_AREA_PENALTY = -3000
 VACATION_SOON_PENALTY = -1500
 
-def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date, exp_cache, vac_cache, role="Driver"):
+def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date, exp_cache, vac_cache, role="Driver", hc_assigned=0):
     code = candidate['code']
     score = 0
     reasons = []
@@ -631,13 +626,21 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
         reasons.append(f"Vacation soon ({VACATION_SOON_PENALTY})")
 
     if role == "Helper":
-        if "Consumer" in req_sector:
+        if "Consumer" in unify_text(req_sector):
             if candidate.get('health_card') == 'Yes':
-                score += 1500; reasons.append("Health Card (+1500)")
+                if hc_assigned < 3:
+                    score += 5000; reasons.append("Required HC for Consumer (+5000)")
+                else:
+                    score += 500; reasons.append("HC in Consumer (+500)")
             else:
-                score -= 1500; reasons.append("No Health Card (-1500)")
-        elif candidate.get('health_card') == 'Yes':
-            score -= 1000; reasons.append("Waste Health Card (-1000)")
+                if hc_assigned < 3:
+                    score -= 2000; reasons.append("Non-HC Penalty (-2000)")
+        else:
+            if candidate.get('health_card') == 'Yes':
+                if hc_assigned < 3:
+                    score -= 3000; reasons.append("Reserved HC for Consumer (-3000)")
+                else:
+                    score -= 200; reasons.append("Saved HC (-200)")
 
     return score, " | ".join(reasons)
 
@@ -1006,6 +1009,8 @@ if choice == "1. AI Route Planner":
                 reason_dicts = []
                 predict_data = []
                 predict_dicts = []
+                
+                consumer_hc_assigned = 0
 
                 for _, area in areas.iterrows():
                     area_code = area.get('code', '')
@@ -1069,13 +1074,17 @@ if choice == "1. AI Route Planner":
                         avail_hl = all_h[~all_h['code'].isin(used_helpers)]
                         
                         for _, p in avail_hl.iterrows():
-                            score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper")
+                            score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
                             if score is not None and score > best_h_score:
                                 best_h_score, best_h, h_reason = score, p, rsn
                                 
                         if best_h is not None:
                             a_h_code, a_h_name = best_h['code'], best_h['name']
                             used_helpers.add(a_h_code)
+                            
+                            if "Consumer" in req_sector and best_h.get('health_card') == 'Yes':
+                                consumer_hc_assigned += 1
+                                
                             reason_data.append((p_s_gen, area_name, "Helper", a_h_name, best_h_score, h_reason, timestamp))
                             reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":a_h_name, "score":best_h_score, "reasons":h_reason, "generated_at":timestamp})
                             
@@ -1083,7 +1092,7 @@ if choice == "1. AI Route Planner":
                             if vac_start:
                                 repl_h, best_r_score, _ = None, -999999, ""
                                 for _, rp in all_h[~all_h['code'].isin([a_h_code])].iterrows():
-                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, datetime.strptime(vac_start, "%Y-%m-%d").date(), exp_cache, vac_cache, role="Helper")
+                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, datetime.strptime(vac_start, "%Y-%m-%d").date(), exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
                                     if r_score is not None and r_score > best_r_score:
                                         best_r_score, repl_h = r_score, rp
                                 repl_name = repl_h['name'] if repl_h is not None else "CRITICAL SHORTAGE"
@@ -1573,7 +1582,13 @@ elif choice == "2. Database Management":
                 insert_data = []
                 insert_dicts = []
                 for _, row in df.iterrows():
-                    data_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N', 'vacation_status', 'fb_id']}
+                    data_dict = {k: unify_text(v) if k in ['sector', 'veh_type', 'division', 'type'] else v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N', 'vacation_status', 'fb_id', 'Days']}
+                    
+                    if sheet in ['history', 'vacations']:
+                        if 'start_date' in data_dict: data_dict['start_date'] = parse_date_safe(data_dict['start_date'])
+                        if 'end_date' in data_dict: data_dict['end_date'] = parse_date_safe(data_dict['end_date'])
+                        if 'date' in data_dict: data_dict['date'] = parse_date_safe(data_dict['date'])
+                            
                     cols = ', '.join(data_dict.keys())
                     vals = tuple(data_dict.values())
                     qmarks = ', '.join(['?'] * len(data_dict))
@@ -1637,18 +1652,27 @@ elif choice == "3. Past Experience Builder":
     
     search_hist = st.text_input("🔍 Search History by Exact Date, Month, Year, Code, Name, or Area", "")
     
-    if not history_df.empty and 'date' in history_df.columns:
-        disp_hist = history_df.sort_values(by="date", ascending=False).copy()
-    else:
-        disp_hist = history_df.copy()
+    disp_hist = history_df.sort_values(by="date", ascending=False).copy() if not history_df.empty and 'date' in history_df.columns else history_df.copy()
     
     if search_hist and not disp_hist.empty:
         disp_hist = disp_hist[disp_hist.astype(str).apply(lambda x: x.str.contains(search_hist, case=False, na=False)).any(axis=1)]
-    if not disp_hist.empty: disp_hist.insert(0, 'S/N', range(1, 1 + len(disp_hist)))
+        
+    if not disp_hist.empty:
+        def calc_days(row):
+            s = parse_date_safe(row.get('date', ''))
+            e = parse_date_safe(row.get('end_date', ''))
+            if s and e:
+                try: return (datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(s, "%Y-%m-%d")).days + 1
+                except: return 0
+            return 0
+        disp_hist['Days'] = disp_hist.apply(calc_days, axis=1)
+        disp_hist.insert(0, 'S/N', range(1, 1 + len(disp_hist)))
     
     edited_hist = st.data_editor(
         disp_hist, column_config={
-            "id": None, "fb_id": None, "S/N": st.column_config.NumberColumn(disabled=True)
+            "id": None, "fb_id": None, 
+            "S/N": st.column_config.NumberColumn(disabled=True),
+            "Days": st.column_config.NumberColumn("Days", disabled=True)
         }, use_container_width=True, height=350, hide_index=True, key="ed_hist"
     )
     
@@ -1658,7 +1682,7 @@ elif choice == "3. Past Experience Builder":
             row_id = int(disp_hist.loc[idx, 'id'])
             if not disp_hist.loc[idx].equals(edited_hist.loc[idx]):
                 fb_id = str(disp_hist.loc[idx, 'fb_id']) if 'fb_id' in disp_hist.columns and pd.notna(disp_hist.loc[idx, 'fb_id']) and str(disp_hist.loc[idx, 'fb_id']).strip() else str(row_id)
-                update_dict = edited_hist.loc[idx].drop(labels=['id', 'S/N'], errors='ignore').to_dict()
+                update_dict = edited_hist.loc[idx].drop(labels=['id', 'S/N', 'Days'], errors='ignore').to_dict()
                 update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                 for col in ['sector', 'veh_type', 'division', 'type']:
                     if col in update_dict: update_dict[col] = unify_text(update_dict[col])
@@ -1699,28 +1723,33 @@ elif choice == "3. Past Experience Builder":
             if bulk_file.name.endswith('.xlsx'):
                 df_up = pd.read_excel(bulk_file)
                 
-                code_col = next((c for c in df_up.columns if 'code' in c.lower()), None)
-                name_col = next((c for c in df_up.columns if 'name' in c.lower()), None)
-                area_col = next((c for c in df_up.columns if 'area' in c.lower()), None)
-                div_col = next((c for c in df_up.columns if 'div' in c.lower()), None)
-                from_col = next((c for c in df_up.columns if 'from' in c.lower() or 'start' in c.lower()), None)
-                to_col = next((c for c in df_up.columns if 'to' in c.lower() or 'end' in c.lower()), None)
+                col_map = {}
+                for c in df_up.columns:
+                    cl = str(c).lower().strip()
+                    if 'code' in cl: col_map[c] = 'person_code'
+                    elif 'name' in cl: col_map[c] = 'person_name'
+                    elif 'type' in cl or 'role' in cl: col_map[c] = 'person_type'
+                    elif 'area' in cl: col_map[c] = 'area'
+                    elif 'div' in cl: col_map[c] = 'sector'
+                    elif 'start' in cl or 'from' in cl or 'date' in cl: col_map[c] = 'date'
+                    elif 'end' in cl or 'to' in cl: col_map[c] = 'end_date'
+                df_up = df_up.rename(columns=col_map)
                 
-                if code_col and area_col and from_col:
-                    for _, row in df_up.iterrows():
-                        c_val = str(row[code_col]).strip()
-                        if pd.isna(c_val) or c_val.lower() in ["nan", "none", ""]: continue
-                        
-                        n_val = str(row[name_col]).strip() if name_col else "Unknown"
-                        a_val = str(row[area_col]).strip()
-                        d_val = unify_text(str(row[div_col]).strip() if div_col else "Pharma")
-                        f_val = parse_date_safe(row[from_col])
-                        t_val = parse_date_safe(row[to_col]) if to_col else f_val
-                        
-                        if f_val and t_val:
-                            ptype = "Helper" if c_val.startswith('H') else "Driver"
-                            new_records.append((ptype, c_val, n_val, a_val, d_val, f_val, t_val))
-                            new_dicts.append({"person_type": ptype, "person_code": c_val, "person_name": n_val, "area": a_val, "sector": d_val, "date": f_val, "end_date": t_val})
+                for _, row in df_up.iterrows():
+                    c_val = str(row.get('person_code', '')).strip()
+                    if pd.isna(c_val) or c_val.lower() in ["nan", "none", ""]: continue
+                    
+                    n_val = str(row.get('person_name', '')).strip()
+                    a_val = str(row.get('area', '')).strip()
+                    d_val = unify_text(str(row.get('sector', '')).strip()) if 'sector' in row else "Pharma"
+                    
+                    f_val = parse_date_safe(row.get('date'))
+                    t_val = parse_date_safe(row.get('end_date')) if 'end_date' in row else f_val
+                    
+                    if f_val and t_val:
+                        ptype = "Helper" if c_val.startswith('H') else "Driver"
+                        new_records.append((ptype, c_val, n_val, a_val, d_val, f_val, t_val))
+                        new_dicts.append({"person_type": ptype, "person_code": c_val, "person_name": n_val, "area": a_val, "sector": d_val, "date": f_val, "end_date": t_val})
                             
             elif bulk_file.name.endswith('.pdf') and PDF_ENABLED:
                 pdf_reader = PyPDF2.PdfReader(bulk_file)
@@ -1908,18 +1937,49 @@ elif choice == "4. Vacation Schedule":
         up_vac = st.file_uploader("Upload Vacation Excel", type=['xlsx'], key="up_vac")
         if up_vac and st.button("Sync Vacation Database"):
             df = pd.read_excel(up_vac)
+            
+            # Fuzzy match columns
+            col_map = {}
+            for c in df.columns:
+                cl = str(c).lower().strip()
+                if 'code' in cl: col_map[c] = 'person_code'
+                elif 'name' in cl: col_map[c] = 'person_name'
+                elif 'type' in cl or 'role' in cl: col_map[c] = 'person_type'
+                elif 'start' in cl or 'from' in cl: col_map[c] = 'start_date'
+                elif 'end' in cl or 'to' in cl: col_map[c] = 'end_date'
+            df = df.rename(columns=col_map)
+            
             run_query(None, table_name="vacations", action="CLEAR_TABLE")
             
             insert_data = []
             insert_dicts = []
             for _, row in df.iterrows():
-                data_dict = {k: v for k, v in row.to_dict().items() if pd.notna(v) and k not in ['id', 'S/N', 'fb_id']}
+                sd_raw = row.get('start_date')
+                ed_raw = row.get('end_date')
+                sd = parse_date_safe(sd_raw)
+                ed = parse_date_safe(ed_raw)
+                if not sd or not ed: continue 
+                
+                ptype = str(row.get('person_type', '')).strip()
+                pcode = str(row.get('person_code', '')).strip()
+                pname = str(row.get('person_name', '')).strip()
+                if not pcode or pcode.lower() == 'nan': continue
+                
+                data_dict = {
+                    "person_type": ptype,
+                    "person_code": pcode,
+                    "person_name": pname,
+                    "start_date": sd,
+                    "end_date": ed
+                }
+                
                 cols = ', '.join(data_dict.keys())
                 vals = tuple(data_dict.values())
                 qmarks = ', '.join(['?'] * len(data_dict))
                 query = f"INSERT OR IGNORE INTO vacations ({cols}) VALUES ({qmarks})"
                 insert_data.append(vals)
                 insert_dicts.append(data_dict)
+                
             if insert_data:
                 run_query(query, insert_data, table_name="vacations", action="INSERT_MANY", data=insert_dicts)
             st.rerun()
