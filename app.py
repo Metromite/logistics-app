@@ -205,7 +205,6 @@ def process_sync_log():
                         for d in docs: batch.delete(d.reference)
                         batch.commit()
                 elif act == "INSERT_MANY":
-                    # Batched insert prevents Firebase 429 Burst Quota errors
                     batch = db_fs.batch()
                     for i, item in enumerate(data):
                         item_id = item.get('fb_id') or item.get('id') or item.get('code') or db_fs.collection(t_name).document().id
@@ -227,7 +226,7 @@ def process_sync_log():
 
 def sync_down_from_cloud(merge=False):
     """
-    Safely pulls data from Firebase. If merge=True, it will INSERT OR IGNORE to prevent dropping any existing data.
+    Safely pulls data from Firebase utilizing robust Pandas parsing to prevent schema mismatches.
     """
     global FIREBASE_READY
     if not FIREBASE_READY: return False
@@ -238,40 +237,40 @@ def sync_down_from_cloud(merge=False):
                 docs = list(db_fs.collection(t).stream())
                 if not docs: continue
                 
-                c.execute(f"PRAGMA table_info({t})")
-                valid_cols = [row[1] for row in c.fetchall() if row[1] not in ('id', 'fb_id')]
+                df_cloud = pd.DataFrame([{**doc.to_dict(), 'fb_id': doc.id} for doc in docs])
+                if df_cloud.empty: continue
+                df_cloud = unify_dataframe(df_cloud)
                 
-                vals = []
-                for doc in docs:
-                    d = doc.to_dict()
-                    row_vals = []
-                    for col in valid_cols:
-                        val = d.get(col, '')
-                        row_vals.append(str(val) if val is not None else '')
-                    row_vals.append(str(doc.id)) # Explicitly inject Firebase ID
-                    vals.append(tuple(row_vals))
-                    
-                cols_str = ', '.join(valid_cols) + ', fb_id'
-                qmarks = ', '.join(['?'] * (len(valid_cols) + 1))
+                c.execute(f"PRAGMA table_info({t})")
+                local_cols = [row[1] for row in c.fetchall() if row[1] != 'id']
+                
+                for col in local_cols:
+                    if col not in df_cloud.columns: df_cloud[col] = ""
+                        
+                df_export = df_cloud[local_cols].copy()
                 
                 if not merge:
                     c.execute(f"DELETE FROM {t}")
+                    
+                cols_str = ', '.join(local_cols)
+                qmarks = ', '.join(['?'] * len(local_cols))
+                vals = [tuple(x) for x in df_export.to_numpy()]
                 
-                # Use robust INSERT methodology to prevent duplicate errors
-                if t in ['history', 'drivers', 'helpers', 'areas', 'vehicles']:
+                if merge and t in ['history']:
+                    c.executemany(f"INSERT OR IGNORE INTO {t} ({cols_str}) VALUES ({qmarks})", vals)
+                elif merge and t in ['drivers', 'helpers', 'areas', 'vehicles']:
                     c.executemany(f"INSERT OR IGNORE INTO {t} ({cols_str}) VALUES ({qmarks})", vals)
                 else:
                     c.executemany(f"INSERT INTO {t} ({cols_str}) VALUES ({qmarks})", vals)
                     
                 conn.commit()
                 
-                # Cleanup potential duplicates for non-indexed tables if merging
                 if merge and t == 'vacations':
                     c.execute(f"DELETE FROM {t} WHERE rowid NOT IN (SELECT MIN(rowid) FROM {t} GROUP BY person_code, start_date, end_date)")
                     conn.commit()
                     
             except Exception as table_e:
-                print(f"Error syncing {t}: {table_e}") # Safe fail, prevents one broken table from crashing others
+                print(f"Error syncing {t}: {table_e}") 
         return True
     except Exception as e:
         st.error(f"Sync failed: {e}")
@@ -281,7 +280,7 @@ def sync_down_from_cloud(merge=False):
 c_check = conn.cursor()
 c_check.execute("SELECT COUNT(*) FROM areas")
 if c_check.fetchone()[0] == 0 and FIREBASE_READY:
-    sync_down_from_cloud()
+    sync_down_from_cloud(merge=False)
 
 # UI Sync Status Indicator
 sync_count = pd.read_sql("SELECT COUNT(*) FROM _sync_log", conn).iloc[0,0]
@@ -1561,7 +1560,9 @@ elif choice == "2. Database Management":
         st.download_button("📥 Download Master Database (Excel)", data=output, file_name="Master_Database.xlsx", type="primary")
 
         st.divider()
-        uploaded_file = st.file_uploader("Upload your modified Excel to Sync", type=['xlsx'])
+        st.subheader("📤 Import Database via Excel")
+        st.caption("Did the cloud quota crash delete your cloud data yesterday? Upload the Master_Database.xlsx file you downloaded yesterday to instantly restore everything.")
+        uploaded_file = st.file_uploader("Upload Master Database Excel", type=['xlsx'])
         if uploaded_file and st.button("Sync Data to System", type="primary"):
             xls = pd.ExcelFile(uploaded_file)
             for sheet in xls.sheet_names:
@@ -1581,10 +1582,25 @@ elif choice == "2. Database Management":
                 
                 if insert_data:
                     run_query(query, insert_data, table_name=sheet, action="INSERT_MANY", data=insert_dicts)
-            st.success("Database synchronized successfully!")
+            st.success("Database restored completely from Excel!")
 
         st.divider()
-        st.subheader("🚨 System & Cloud Master Controls")
+        st.subheader("🚨 Cloud Diagnostic Scanner & Data Recovery")
+        if FIREBASE_READY:
+            if st.button("🔍 Deep Scan Firebase Cloud"):
+                with st.spinner("Scanning all Firebase tables..."):
+                    counts = {}
+                    for t in SYNC_TABLES:
+                        try: counts[t] = len(list(db_fs.collection(t).stream()))
+                        except: counts[t] = 0
+                    st.json(counts)
+                    
+                    if counts.get('history', 0) == 0 and counts.get('vacations', 0) == 0:
+                        st.error("🚨 **Your Firebase cloud is completely empty for History and Vacations.** The data was wiped by the quota crash yesterday. **You MUST use the Excel Upload tool above** to restore your data from your `Master_Database.xlsx` backup.")
+                    else:
+                        st.success("✅ Found data in Firebase! Click the button below to merge it back into your app.")
+        else:
+            st.warning("Firebase is currently offline. Connect to check cloud status.")
         
         c_r1, c_r2, c_r3 = st.columns(3)
         if c_r1.button("♻️ Restore Default Template", type="secondary"):
