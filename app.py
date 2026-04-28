@@ -205,6 +205,7 @@ def process_sync_log():
                         for d in docs: batch.delete(d.reference)
                         batch.commit()
                 elif act == "INSERT_MANY":
+                    # Batched insert prevents Firebase 429 Burst Quota errors
                     batch = db_fs.batch()
                     for i, item in enumerate(data):
                         item_id = item.get('fb_id') or item.get('id') or item.get('code') or db_fs.collection(t_name).document().id
