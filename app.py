@@ -1054,6 +1054,15 @@ if choice == "1. AI Route Planner":
                 used_helpers.update(pre_locked_helpers)
                 used_vehicles.update(pre_locked_vehicles)
                 
+                # Calculate Surplus for Optional Assignments
+                strict_d_req = len(areas[areas['needs_driver'] == 'Yes'])
+                avail_d_count = len([1 for _, r in all_d.iterrows() if not is_on_vacation(r['code'], month_target, vac_cache)])
+                surplus_drivers = avail_d_count - strict_d_req
+
+                strict_h_req = len(areas[areas['needs_helper'] == 'Yes'])
+                avail_h_count = len([1 for _, r in all_h.iterrows() if not is_on_vacation(r['code'], month_target, vac_cache)])
+                surplus_helpers = avail_h_count - strict_h_req
+
                 # --- PASS 1: Strict Assignments ---
                 for _, area in areas.iterrows():
                     area_code = area.get('code', '')
@@ -1507,10 +1516,23 @@ if choice == "1. AI Route Planner":
         with st.expander("🤖 View AI Reasoning & Future Replacement Logs", expanded=False):
             st.caption("Detailed breakdown of why the AI selected each candidate based on the weighted scoring logic.")
             
+            areas_exp_df['occurrence'] = areas_exp_df.groupby(areas_exp_df['name'].astype(str).str.lower()).cumcount()
+            d_rsn_df = reasons_df[reasons_df['role'] == 'Driver'].copy()
+            h_rsn_df = reasons_df[reasons_df['role'] == 'Helper'].copy()
+            
+            if not d_rsn_df.empty: d_rsn_df['occurrence'] = d_rsn_df.groupby(d_rsn_df['area'].astype(str).str.lower()).cumcount()
+            else: d_rsn_df['occurrence'] = []
+                
+            if not h_rsn_df.empty: h_rsn_df['occurrence'] = h_rsn_df.groupby(h_rsn_df['area'].astype(str).str.lower()).cumcount()
+            else: h_rsn_df['occurrence'] = []
+
             explain_list = []
-            for area in areas_exp_df['name'].unique():
-                d_rsn = reasons_df[(reasons_df['area'] == area) & (reasons_df['role'] == 'Driver')]
-                h_rsn = reasons_df[(reasons_df['area'] == area) & (reasons_df['role'] == 'Helper')]
+            for _, area_row in areas_exp_df.iterrows():
+                area = area_row['name']
+                occ = area_row['occurrence']
+                
+                d_rsn = d_rsn_df[(d_rsn_df['area'].astype(str).str.lower() == str(area).lower()) & (d_rsn_df['occurrence'] == occ)]
+                h_rsn = h_rsn_df[(h_rsn_df['area'].astype(str).str.lower() == str(area).lower()) & (h_rsn_df['occurrence'] == occ)]
                 
                 d_name = d_rsn.iloc[0]['selected_person'] if not d_rsn.empty else "Kept Previous"
                 d_text = f"[{d_rsn.iloc[0]['score']}] {d_rsn.iloc[0]['reasons']}" if not d_rsn.empty else "N/A"
