@@ -45,7 +45,7 @@ def unify_text(val):
 def unify_dataframe(df):
     if df.empty: return df
     df = df.fillna("") 
-    target_cols = ['sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type', 'area', 'anchor_area', 'anchor_vehicle', 'permitted_areas', 'restriction', 'start_date', 'end_date', 'region']
+    target_cols = ['sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type', 'area', 'anchor_area', 'anchor_vehicle', 'permitted_areas', 'restriction', 'start_date', 'end_date', 'region', 'needs_driver', 'needs_helper']
     for col in target_cols:
         if col in df.columns:
             df[col] = df[col].apply(unify_text)
@@ -331,13 +331,9 @@ def load_table(table_name):
     if table_name in ['drivers', 'helpers']: df = df.drop_duplicates(subset=['code'], keep='first')
     if table_name == 'vehicles': df = df.drop_duplicates(subset=['number'], keep='first')
     if table_name == 'areas': df = df.drop_duplicates(subset=['code'], keep='first') 
-    if table_name == 'history': df = drop_duplicates_safe(df, ['person_code', 'area', 'date'])
+    if table_name == 'history': df = df.drop_duplicates(subset=['person_code', 'area', 'date'], keep='first')
     
     return df
-
-def drop_duplicates_safe(df, subset):
-    if df.empty: return df
-    return df.drop_duplicates(subset=subset, keep='first')
 
 def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=None, bypass_queue=False):
     try:
@@ -696,8 +692,8 @@ all_d = load_table('drivers')
 all_h = load_table('helpers')
 vehicles_global = load_table('vehicles')
 
-drv_codes_opts = ["UNASSIGNED", ""] + all_d['code'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
-drv_names_opts = ["UNASSIGNED", ""] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", ""]
+drv_codes_opts = ["UNASSIGNED", "N/A", ""] + all_d['code'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", "N/A", ""]
+drv_names_opts = ["UNASSIGNED", "NO DRIVER REQUIRED", ""] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", "NO DRIVER REQUIRED", ""]
 hlp_codes_opts = ["UNASSIGNED", "N/A", ""] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", ""]
 hlp_names_opts = ["UNASSIGNED", "NO HELPER REQUIRED", ""] + all_h['name'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "NO HELPER REQUIRED", ""]
 
@@ -1035,6 +1031,29 @@ if choice == "1. AI Route Planner":
                 
                 consumer_hc_assigned = 0
                 
+                active_draft_df = load_table('draft_routes')
+                if active_draft_df.empty:
+                    active_draft_df = load_table('active_routes')
+                    
+                # PRE-LOCK ENTITIES FROM DRAFT TO PREVENT THE AI FROM STEALING MANUALLY ASSIGNED STAFF
+                pre_locked_drivers = set()
+                pre_locked_helpers = set()
+                pre_locked_vehicles = set()
+                
+                if not active_draft_df.empty:
+                    if rot_type == "Helpers":
+                        pre_locked_drivers = set(active_draft_df['driver_code'].dropna().tolist())
+                        pre_locked_vehicles = set(active_draft_df['veh_num'].dropna().tolist())
+                        pre_locked_drivers -= {"UNASSIGNED", "N/A", ""}
+                        pre_locked_vehicles -= {"UNASSIGNED", "N/A", ""}
+                    elif rot_type == "Drivers":
+                        pre_locked_helpers = set(active_draft_df['helper_code'].dropna().tolist())
+                        pre_locked_helpers -= {"UNASSIGNED", "N/A", ""}
+                        
+                used_drivers.update(pre_locked_drivers)
+                used_helpers.update(pre_locked_helpers)
+                used_vehicles.update(pre_locked_vehicles)
+                
                 # Calculate Surplus for Optional Assignments
                 strict_d_req = len(areas[areas['needs_driver'] == 'Yes'])
                 avail_d_count = len([1 for _, r in all_d.iterrows() if not is_on_vacation(r['code'], month_target, vac_cache)])
@@ -1060,10 +1079,10 @@ if choice == "1. AI Route Planner":
                     elif "GOVT" in req_sector.upper() or "GOVT" in area_name.upper(): req_veh = "BUS"
                     elif "PICK-UP" in req_sector.upper() or "PICK UP" in area_name.upper(): req_veh = "PICK-UP"
 
-                    if not active_routes.empty and 'area_code' in active_routes.columns and area_code:
-                        prev_assignment = active_routes[active_routes['area_code'] == area_code]
+                    if not active_draft_df.empty and 'area_code' in active_draft_df.columns and area_code:
+                        prev_assignment = active_draft_df[active_draft_df['area_code'] == area_code]
                     else:
-                        prev_assignment = active_routes[active_routes['area_name'] == area_name] if not active_routes.empty else pd.DataFrame()
+                        prev_assignment = active_draft_df[active_draft_df['area_name'] == area_name] if not active_draft_df.empty else pd.DataFrame()
                         
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num, a_v_perm = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "All"
 
@@ -1083,6 +1102,15 @@ if choice == "1. AI Route Planner":
                                 if score is not None and score > best_d_score:
                                     best_d_score, best_d, d_reason = score, p, rsn
                                     
+                            if best_d is None:
+                                fallback_dr = all_d[~all_d['code'].isin(used_drivers)]
+                                fallback_dr = fallback_dr[~fallback_dr['code'].apply(lambda x: is_on_vacation(x, month_target, vac_cache))]
+                                if not fallback_dr.empty:
+                                    type_match = fallback_dr[fallback_dr['veh_type'] == req_veh]
+                                    if not type_match.empty: best_d = type_match.iloc[0]
+                                    else: best_d = fallback_dr.iloc[0]
+                                    best_d_score, d_reason = 0, "Fallback Assignment (Shortage Override)"
+
                             if best_d is not None:
                                 a_d_code, a_d_name = best_d['code'], best_d['name']
                                 used_drivers.add(a_d_code)
@@ -1102,8 +1130,23 @@ if choice == "1. AI Route Planner":
                                     predict_data.append((a_d_code, a_d_name, "Driver", vac_start, "Scheduled Vacation", repl_name, vac_start))
                                     predict_dicts.append({"person_code":a_d_code, "person_name":a_d_name, "role":"Driver", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start})
                     else:
-                        a_d_code, a_d_name = prev_assignment.iloc[0]['driver_code'], prev_assignment.iloc[0]['driver_name']
+                        a_d_code = prev_assignment.iloc[0]['driver_code']
+                        a_d_name = prev_assignment.iloc[0]['driver_name']
+                        a_v_num = prev_assignment.iloc[0].get('veh_num', 'UNASSIGNED')
+                        a_v_perm = prev_assignment.iloc[0].get('veh_perm', 'All')
                         used_drivers.add(a_d_code)
+                        if a_v_num not in ["N/A", "UNASSIGNED", ""]:
+                            used_vehicles.add(a_v_num)
+                            
+                        d_row = all_d[all_d['code'] == a_d_code]
+                        if not d_row.empty:
+                            score_res = calculate_candidate_score(d_row.iloc[0], area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Driver")
+                            c_score, c_rsn = (0, f"Kept from Draft / Manual ({score_res[1]})") if score_res is None or score_res[0] is None else (score_res[0], f"Kept from Draft / Manual | {score_res[1]}")
+                        else:
+                            c_score, c_rsn = 0, "Kept from Draft (Unknown Driver)"
+                        
+                        reason_data.append((p_s_gen, area_name, "Driver", a_d_name, c_score, c_rsn, timestamp))
+                        reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Driver", "selected_person":a_d_name, "score":c_score, "reasons":c_rsn, "generated_at":timestamp})
 
                     # 2. ASSIGN HELPER
                     nh = str(area.get('needs_helper', 'Yes')).strip()
@@ -1126,6 +1169,13 @@ if choice == "1. AI Route Planner":
                                 score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
                                 if score is not None and score > best_h_score:
                                     best_h_score, best_h, h_reason = score, p, rsn
+                                    
+                            if best_h is None:
+                                fallback_hl = all_h[~all_h['code'].isin(used_helpers)]
+                                fallback_hl = fallback_hl[~fallback_hl['code'].apply(lambda x: is_on_vacation(x, month_target, vac_cache))]
+                                if not fallback_hl.empty:
+                                    best_h = fallback_hl.iloc[0]
+                                    best_h_score, h_reason = 0, "Fallback Assignment (Shortage Override)"
                                     
                             if best_h is not None:
                                 a_h_code, a_h_name = best_h['code'], best_h['name']
@@ -1150,13 +1200,22 @@ if choice == "1. AI Route Planner":
                                     predict_data.append((a_h_code, a_h_name, "Helper", vac_start, "Scheduled Vacation", repl_name, vac_start))
                                     predict_dicts.append({"person_code":a_h_code, "person_name":a_h_name, "role":"Helper", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start})
                     else:
-                        a_h_code, a_h_name = prev_assignment.iloc[0]['helper_code'], prev_assignment.iloc[0]['helper_name']
+                        a_h_code = prev_assignment.iloc[0]['helper_code']
+                        a_h_name = prev_assignment.iloc[0]['helper_name']
                         used_helpers.add(a_h_code)
+                        h_row = all_h[all_h['code'] == a_h_code]
+                        if not h_row.empty:
+                            score_res = calculate_candidate_score(h_row.iloc[0], area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
+                            c_score, c_rsn = (0, f"Kept from Draft / Manual ({score_res[1]})") if score_res is None or score_res[0] is None else (score_res[0], f"Kept from Draft / Manual | {score_res[1]}")
+                        else:
+                            c_score, c_rsn = 0, "Kept from Draft (Unknown Helper)"
+                        reason_data.append((p_s_gen, area_name, "Helper", a_h_name, c_score, c_rsn, timestamp))
+                        reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":a_h_name, "score":c_score, "reasons":c_rsn, "generated_at":timestamp})
 
                     # 3. ASSIGN VEHICLE
                     if a_d_code == "N/A":
                         a_v_num, a_v_perm = "N/A", "N/A"
-                    elif a_d_code != "UNASSIGNED" and a_v_num == "UNASSIGNED":
+                    elif a_d_code != "UNASSIGNED" and a_v_num in ["UNASSIGNED", ""]:
                         d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else unify_text(d_type)
                         
@@ -1179,24 +1238,11 @@ if choice == "1. AI Route Planner":
                             is_area_anchored = v_num_chk in a_anch_vehs
                             is_drv_anchored = v_num_chk in d_anch_vehs
                             
-                            v_anchors = [a.strip().upper() for a in str(v.get('anchor_area', '')).split(',') if a.strip()]
-                            if "NONE" in v_anchors: v_anchors.remove("NONE")
-                            if "" in v_anchors: v_anchors.remove("")
-                            
-                            is_veh_area_anchored = False
-                            if v_anchors:
-                                check_list = [unify_text(area_name).upper(), unify_text(req_sector).upper(), unify_text(tvt).upper()]
-                                if any(any(anc in chk or chk in anc for chk in check_list) for anc in v_anchors):
-                                    is_veh_area_anchored = True
-                            
                             if is_area_anchored:
                                 potential_vs.append((v, 2000))
                                 continue
                             if is_drv_anchored:
-                                potential_vs.append((v, 1000))
-                                continue
-                            if is_veh_area_anchored:
-                                potential_vs.append((v, 100))
+                                potential_vs.append((v, 1500))
                                 continue
                                 
                             v_type = unify_text(v.get('type', 'VAN'))
@@ -1213,6 +1259,16 @@ if choice == "1. AI Route Planner":
                             if v_perm_chk != "ALL" and a_reg not in v_perm_chk and v_perm_chk not in a_reg:
                                 continue 
                             
+                            v_anchors = [a.strip().upper() for a in str(v.get('anchor_area', '')).split(',') if a.strip()]
+                            if "NONE" in v_anchors: v_anchors.remove("NONE")
+                            if "" in v_anchors: v_anchors.remove("")
+                            
+                            if v_anchors:
+                                check_list = [unify_text(area_name).upper(), unify_text(req_sector).upper(), unify_text(tvt).upper()]
+                                if any(any(anc in chk or chk in anc for chk in check_list) for anc in v_anchors):
+                                    potential_vs.append((v, 100)) # High Priority
+                                    continue
+                                    
                             potential_vs.append((v, 0)) # Normal Priority
 
                         potential_vs.sort(key=lambda x: x[1], reverse=True)
@@ -1221,6 +1277,17 @@ if choice == "1. AI Route Planner":
                             a_v_num = potential_vs[0][0]['number']
                             a_v_perm = potential_vs[0][0]['permitted_areas']
                             used_vehicles.add(a_v_num)
+                        else:
+                            fallback_vs = active_vehicles_df[~active_vehicles_df['number'].isin(used_vehicles)]
+                            if not fallback_vs.empty:
+                                type_vs = fallback_vs[fallback_vs['type'].str.contains(tvt, case=False, na=False)]
+                                if not type_vs.empty:
+                                    a_v_num = type_vs.iloc[0]['number']
+                                    a_v_perm = type_vs.iloc[0]['permitted_areas']
+                                else:
+                                    a_v_num = fallback_vs.iloc[0]['number']
+                                    a_v_perm = fallback_vs.iloc[0]['permitted_areas']
+                                used_vehicles.add(a_v_num)
 
                     route_plan.append({
                         "Driver Code": a_d_code, "Drivers Name": a_d_name, 
