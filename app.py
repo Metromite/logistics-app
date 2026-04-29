@@ -1106,12 +1106,12 @@ if choice == "1. AI Route Planner":
                     prev_d_code = prev_assignment.iloc[0].get('driver_code', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     prev_d_name = prev_assignment.iloc[0].get('driver_name', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     
-                    if nd == 'No':
-                        a_d_code, a_d_name = "N/A", "NO DRIVER REQUIRED"
-                    elif rot_type == "Helpers":
+                    if rot_type == "Helpers":
                         a_d_code, a_d_name = prev_d_code, prev_d_name
                         if a_d_code not in ["UNASSIGNED", "N/A", "", None]:
                             used_drivers.add(a_d_code)
+                    elif nd == 'No':
+                        a_d_code, a_d_name = "N/A", "NO DRIVER REQUIRED"
                     elif prev_d_code not in ["UNASSIGNED", "N/A", "", None]:
                         a_d_code, a_d_name = prev_d_code, prev_d_name
                         used_drivers.add(a_d_code)
@@ -1171,12 +1171,12 @@ if choice == "1. AI Route Planner":
                     prev_h_code = prev_assignment.iloc[0].get('helper_code', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     prev_h_name = prev_assignment.iloc[0].get('helper_name', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     
-                    if nh == 'No' or (nh == 'Optional' and not driver_needs_h):
-                        a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
-                    elif rot_type == "Drivers":
+                    if rot_type == "Drivers":
                         a_h_code, a_h_name = prev_h_code, prev_h_name
                         if a_h_code not in ["UNASSIGNED", "N/A", "", None]:
                             used_helpers.add(a_h_code)
+                    elif nh == 'No' or (nh == 'Optional' and not driver_needs_h):
+                        a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
                     elif prev_h_code not in ["UNASSIGNED", "N/A", "", None]:
                         a_h_code, a_h_name = prev_h_code, prev_h_name
                         used_helpers.add(a_h_code)
@@ -1229,11 +1229,11 @@ if choice == "1. AI Route Planner":
                     prev_v_num = prev_assignment.iloc[0].get('veh_num', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     prev_v_perm = prev_assignment.iloc[0].get('veh_perm', 'All') if not prev_assignment.empty else 'All'
                     
-                    if a_d_code == "N/A":
-                        a_v_num, a_v_perm = "N/A", "N/A"
-                    elif rot_type == "Helpers":
+                    if rot_type == "Helpers":
                         a_v_num, a_v_perm = prev_v_num, prev_v_perm
                         if a_v_num not in ["UNASSIGNED", "N/A", "", None]: used_vehicles.add(a_v_num)
+                    elif a_d_code == "N/A" and nd == 'No':
+                        a_v_num, a_v_perm = "N/A", "N/A"
                     elif prev_v_num not in ["UNASSIGNED", "N/A", "", None]:
                         a_v_num, a_v_perm = prev_v_num, prev_v_perm
                         used_vehicles.add(a_v_num)
@@ -1254,7 +1254,7 @@ if choice == "1. AI Route Planner":
                         if "NONE" in a_anch_vehs: a_anch_vehs.remove("NONE")
                         if "" in a_anch_vehs: a_anch_vehs.remove("")
                         
-                        def can_use_veh(v_num):
+                        def can_use_veh_p1(v_num):
                             vn = unify_text(v_num).upper()
                             if any((a != area_name and vn in lst) for a, lst in area_anchors_map.items()): return False
                             if any((d != a_d_code and vn in lst) for d, lst in driver_anchors_map.items()): return False
@@ -1264,7 +1264,7 @@ if choice == "1. AI Route Planner":
                         active_vehicles_df = vehicles[~vehicles.get('status', 'Active').str.contains('Under Service|In for Service', case=False, na=False)]
                         for _, v in active_vehicles_df[~active_vehicles_df['number'].isin(used_vehicles)].iterrows():
                             v_num_chk = unify_text(v.get('number', '')).upper()
-                            if not can_use_veh(v_num_chk): continue
+                            if not can_use_veh_p1(v_num_chk): continue
                             
                             v_div_chk = unify_text(v.get('division', '')).upper()
                             route_sec_chk = unify_text(req_sector).upper()
@@ -1324,7 +1324,7 @@ if choice == "1. AI Route Planner":
                             used_vehicles.add(a_v_num)
                         else:
                             fallback_vs = active_vehicles_df[~active_vehicles_df['number'].isin(used_vehicles)]
-                            fallback_vs = fallback_vs[fallback_vs['number'].apply(can_use_veh)]
+                            fallback_vs = fallback_vs[fallback_vs['number'].apply(can_use_veh_p1)]
                             if not fallback_vs.empty:
                                 type_vs = fallback_vs[fallback_vs['type'].str.contains(tvt, case=False, na=False)]
                                 if not type_vs.empty:
