@@ -176,7 +176,7 @@ def init_sqlite_db():
 
 conn = init_sqlite_db()
 
-# --- HIGH-EFFICIENCY DELTA SYNC ENGINE ---
+# --- HIGH-EFFICIENCY DELTA SYNC ENGINE (BURST LIMIT SAFE) ---
 def process_sync_log():
     global FIREBASE_READY
     if not FIREBASE_READY: return
@@ -1040,6 +1040,24 @@ if choice == "1. AI Route Planner":
                 # Strict exclusion of staff on vacation right now
                 avail_d_pool = all_d[~all_d['code'].apply(lambda x: is_on_vacation(x, month_target, vac_cache))]
                 avail_h_pool = all_h[~all_h['code'].apply(lambda x: is_on_vacation(x, month_target, vac_cache))]
+                
+                # Pre-lock manual assignments so AI doesn't steal them or duplicate them
+                if not base_df.empty:
+                    for _, row in base_df.iterrows():
+                        dc = str(row.get('driver_code', '')).strip()
+                        hc = str(row.get('helper_code', '')).strip()
+                        vn = str(row.get('veh_num', '')).strip()
+                        
+                        if has_draft:
+                            if dc not in ["UNASSIGNED", "N/A", ""]: used_drivers.add(dc)
+                            if hc not in ["UNASSIGNED", "N/A", ""]: used_helpers.add(hc)
+                            if vn not in ["UNASSIGNED", "N/A", ""]: used_vehicles.add(vn)
+                        else:
+                            if rot_type == "Helpers":
+                                if dc not in ["UNASSIGNED", "N/A", ""]: used_drivers.add(dc)
+                                if vn not in ["UNASSIGNED", "N/A", ""]: used_vehicles.add(vn)
+                            elif rot_type == "Drivers":
+                                if hc not in ["UNASSIGNED", "N/A", ""]: used_helpers.add(hc)
                 
                 strict_d_req = len(areas[areas['needs_driver'] == 'Yes'])
                 avail_d_count = len(avail_d_pool)
