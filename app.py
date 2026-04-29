@@ -990,6 +990,7 @@ if choice == "1. AI Route Planner":
     if st.button("Generate Smart AI Route Plan", type="primary"):
         st.session_state.attempt_generate = True
         st.session_state.force_bypass = False
+        st.rerun()
 
     if st.session_state.attempt_generate:
         areas = load_table('areas')
@@ -1067,7 +1068,6 @@ if choice == "1. AI Route Planner":
                     area_code = area.get('code', '')
                     area_name = unify_text(area['name'])
                     req_sector = unify_text(area.get('sector', 'Pharma'))
-                    needs_helper = area.get('needs_helper', 'Yes') in ['Yes', 'Optional']
                     
                     div_cat = "PHARMA DIVISION"
                     if "2-8" in req_sector or "GOVT" in req_sector.upper() or "FLEET" in req_sector.upper(): div_cat = "2-8 / URGENT ORDERS"
@@ -1156,7 +1156,7 @@ if choice == "1. AI Route Planner":
                         if not d_row.empty and str(d_row.iloc[0].get('needs_helper')).strip() == 'No':
                             driver_needs_h = False
 
-                    if nh == 'No' or not driver_needs_h:
+                    if nh == 'No' or (nh == 'Optional' and not driver_needs_h):
                         a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
                     elif rot_type == "Helpers" or prev_assignment.empty or prev_assignment.iloc[0].get('helper_code') in ["N/A", "UNASSIGNED", None, ""]:
                         if nh == 'Optional' and surplus_helpers <= 0:
@@ -1234,15 +1234,25 @@ if choice == "1. AI Route Planner":
                         active_vehicles_df = vehicles[~vehicles.get('status', 'Active').str.contains('Under Service|In for Service', case=False, na=False)]
                         for _, v in active_vehicles_df[~active_vehicles_df['number'].isin(used_vehicles)].iterrows():
                             v_num_chk = unify_text(v.get('number', '')).upper()
+                            v_div_chk = unify_text(v.get('division', '')).upper()
+                            route_sec_chk = unify_text(req_sector).upper()
+                            
+                            # Division Penalty Logic
+                            div_score = 0
+                            if v_div_chk and v_div_chk != "ALL":
+                                if v_div_chk == route_sec_chk or v_div_chk in route_sec_chk or route_sec_chk in v_div_chk:
+                                    div_score += 500
+                                else:
+                                    div_score -= 5000  # Penalize wrong division heavily
                             
                             is_area_anchored = v_num_chk in a_anch_vehs
                             is_drv_anchored = v_num_chk in d_anch_vehs
                             
                             if is_area_anchored:
-                                potential_vs.append((v, 2000))
+                                potential_vs.append((v, 2000 + div_score))
                                 continue
                             if is_drv_anchored:
-                                potential_vs.append((v, 1500))
+                                potential_vs.append((v, 1500 + div_score))
                                 continue
                                 
                             v_type = unify_text(v.get('type', 'VAN'))
@@ -1266,10 +1276,10 @@ if choice == "1. AI Route Planner":
                             if v_anchors:
                                 check_list = [unify_text(area_name).upper(), unify_text(req_sector).upper(), unify_text(tvt).upper()]
                                 if any(any(anc in chk or chk in anc for chk in check_list) for anc in v_anchors):
-                                    potential_vs.append((v, 100)) # High Priority
+                                    potential_vs.append((v, 100 + div_score)) # High Priority
                                     continue
                                     
-                            potential_vs.append((v, 0)) # Normal Priority
+                            potential_vs.append((v, 0 + div_score)) # Normal Priority
 
                         potential_vs.sort(key=lambda x: x[1], reverse=True)
 
@@ -1282,8 +1292,13 @@ if choice == "1. AI Route Planner":
                             if not fallback_vs.empty:
                                 type_vs = fallback_vs[fallback_vs['type'].str.contains(tvt, case=False, na=False)]
                                 if not type_vs.empty:
-                                    a_v_num = type_vs.iloc[0]['number']
-                                    a_v_perm = type_vs.iloc[0]['permitted_areas']
+                                    div_vs = type_vs[type_vs['division'].str.upper().str.contains(req_sector.upper(), case=False, na=False)]
+                                    if not div_vs.empty:
+                                        a_v_num = div_vs.iloc[0]['number']
+                                        a_v_perm = div_vs.iloc[0]['permitted_areas']
+                                    else:
+                                        a_v_num = type_vs.iloc[0]['number']
+                                        a_v_perm = type_vs.iloc[0]['permitted_areas']
                                 else:
                                     a_v_num = fallback_vs.iloc[0]['number']
                                     a_v_perm = fallback_vs.iloc[0]['permitted_areas']
