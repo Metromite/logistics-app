@@ -1037,16 +1037,6 @@ if choice == "1. AI Route Planner":
                 if not has_draft:
                     base_df = load_table('active_routes')
                 
-                # Pre-lock manual assignments so AI doesn't steal them or duplicate them
-                if not base_df.empty:
-                    for _, row in base_df.iterrows():
-                        dc = str(row.get('driver_code', '')).strip()
-                        hc = str(row.get('helper_code', '')).strip()
-                        vn = str(row.get('veh_num', '')).strip()
-                        if dc not in ["UNASSIGNED", "N/A", ""]: used_drivers.add(dc)
-                        if hc not in ["UNASSIGNED", "N/A", ""]: used_helpers.add(hc)
-                        if vn not in ["UNASSIGNED", "N/A", ""]: used_vehicles.add(vn)
-                
                 # Strict exclusion of staff on vacation right now
                 avail_d_pool = all_d[~all_d['code'].apply(lambda x: is_on_vacation(x, month_target, vac_cache))]
                 avail_h_pool = all_h[~all_h['code'].apply(lambda x: is_on_vacation(x, month_target, vac_cache))]
@@ -1106,13 +1096,16 @@ if choice == "1. AI Route Planner":
                     prev_d_code = prev_assignment.iloc[0].get('driver_code', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     prev_d_name = prev_assignment.iloc[0].get('driver_name', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     
-                    if rot_type == "Helpers":
-                        a_d_code, a_d_name = prev_d_code, prev_d_name
-                        if a_d_code not in ["UNASSIGNED", "N/A", "", None]:
-                            used_drivers.add(a_d_code)
-                    elif nd == 'No':
+                    should_keep_driver = False
+                    if prev_d_code not in ["UNASSIGNED", "N/A", "", None]:
+                        if has_draft:
+                            should_keep_driver = True
+                        elif rot_type == "Helpers":
+                            should_keep_driver = True
+                            
+                    if nd == 'No':
                         a_d_code, a_d_name = "N/A", "NO DRIVER REQUIRED"
-                    elif prev_d_code not in ["UNASSIGNED", "N/A", "", None]:
+                    elif should_keep_driver:
                         a_d_code, a_d_name = prev_d_code, prev_d_name
                         used_drivers.add(a_d_code)
                         d_row = all_d[all_d['code'] == a_d_code]
@@ -1171,13 +1164,16 @@ if choice == "1. AI Route Planner":
                     prev_h_code = prev_assignment.iloc[0].get('helper_code', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     prev_h_name = prev_assignment.iloc[0].get('helper_name', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     
-                    if rot_type == "Drivers":
-                        a_h_code, a_h_name = prev_h_code, prev_h_name
-                        if a_h_code not in ["UNASSIGNED", "N/A", "", None]:
-                            used_helpers.add(a_h_code)
-                    elif nh == 'No' or (nh == 'Optional' and not driver_needs_h):
+                    should_keep_helper = False
+                    if prev_h_code not in ["UNASSIGNED", "N/A", "", None]:
+                        if has_draft:
+                            should_keep_helper = True
+                        elif rot_type == "Drivers":
+                            should_keep_helper = True
+                            
+                    if nh == 'No' or (nh == 'Optional' and not driver_needs_h):
                         a_h_code, a_h_name = "N/A", "NO HELPER REQUIRED"
-                    elif prev_h_code not in ["UNASSIGNED", "N/A", "", None]:
+                    elif should_keep_helper:
                         a_h_code, a_h_name = prev_h_code, prev_h_name
                         used_helpers.add(a_h_code)
                         h_row = all_h[all_h['code'] == a_h_code]
@@ -1229,12 +1225,16 @@ if choice == "1. AI Route Planner":
                     prev_v_num = prev_assignment.iloc[0].get('veh_num', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     prev_v_perm = prev_assignment.iloc[0].get('veh_perm', 'All') if not prev_assignment.empty else 'All'
                     
-                    if rot_type == "Helpers":
-                        a_v_num, a_v_perm = prev_v_num, prev_v_perm
-                        if a_v_num not in ["UNASSIGNED", "N/A", "", None]: used_vehicles.add(a_v_num)
-                    elif a_d_code == "N/A" and nd == 'No':
+                    should_keep_vehicle = False
+                    if prev_v_num not in ["UNASSIGNED", "N/A", "", None]:
+                        if has_draft:
+                            should_keep_vehicle = True
+                        elif rot_type == "Helpers":
+                            should_keep_vehicle = True
+                            
+                    if a_d_code == "N/A" and nd == 'No':
                         a_v_num, a_v_perm = "N/A", "N/A"
-                    elif prev_v_num not in ["UNASSIGNED", "N/A", "", None]:
+                    elif should_keep_vehicle:
                         a_v_num, a_v_perm = prev_v_num, prev_v_perm
                         used_vehicles.add(a_v_num)
                     elif a_d_code in ["UNASSIGNED", "PENDING_OPTIONAL", ""]:
