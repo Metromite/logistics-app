@@ -48,7 +48,8 @@ def unify_dataframe(df):
     target_cols = [
         'sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type', 
         'area', 'anchor_area', 'anchor_vehicle', 'permitted_areas', 'restriction', 
-        'start_date', 'end_date', 'h_start_date', 'h_end_date', 'replacements', 'warnings',
+        'start_date', 'end_date', 'h_start_date', 'h_end_date', 'replacement_person',
+        'drv_repl_code', 'drv_repl_date', 'hlp_repl_code', 'hlp_repl_date', 'warnings',
         'region', 'needs_driver', 'needs_helper'
     ]
     for col in target_cols:
@@ -148,9 +149,11 @@ def init_sqlite_db():
         "ALTER TABLE drivers ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
         "ALTER TABLE drivers ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
         "ALTER TABLE drivers ADD COLUMN fb_id TEXT DEFAULT ''",
+        "ALTER TABLE drivers ADD COLUMN replacement_person TEXT DEFAULT ''",
         "ALTER TABLE default_drivers ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
         "ALTER TABLE helpers ADD COLUMN health_card TEXT DEFAULT 'No'",
         "ALTER TABLE helpers ADD COLUMN fb_id TEXT DEFAULT ''",
+        "ALTER TABLE helpers ADD COLUMN replacement_person TEXT DEFAULT ''",
         "ALTER TABLE areas ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN needs_driver TEXT DEFAULT 'Yes'",
         "ALTER TABLE areas ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
@@ -166,14 +169,20 @@ def init_sqlite_db():
         "ALTER TABLE vehicles ADD COLUMN division TEXT DEFAULT 'Pharma'",
         "ALTER TABLE vehicles ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN veh_perm TEXT DEFAULT ''",
-        "ALTER TABLE draft_routes ADD COLUMN veh_perm TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN h_start_date TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN h_end_date TEXT DEFAULT ''",
-        "ALTER TABLE active_routes ADD COLUMN replacements TEXT DEFAULT ''",
+        "ALTER TABLE active_routes ADD COLUMN drv_repl_code TEXT DEFAULT ''",
+        "ALTER TABLE active_routes ADD COLUMN drv_repl_date TEXT DEFAULT ''",
+        "ALTER TABLE active_routes ADD COLUMN hlp_repl_code TEXT DEFAULT ''",
+        "ALTER TABLE active_routes ADD COLUMN hlp_repl_date TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN warnings TEXT DEFAULT ''",
+        "ALTER TABLE draft_routes ADD COLUMN veh_perm TEXT DEFAULT ''",
         "ALTER TABLE draft_routes ADD COLUMN h_start_date TEXT DEFAULT ''",
         "ALTER TABLE draft_routes ADD COLUMN h_end_date TEXT DEFAULT ''",
-        "ALTER TABLE draft_routes ADD COLUMN replacements TEXT DEFAULT ''",
+        "ALTER TABLE draft_routes ADD COLUMN drv_repl_code TEXT DEFAULT ''",
+        "ALTER TABLE draft_routes ADD COLUMN drv_repl_date TEXT DEFAULT ''",
+        "ALTER TABLE draft_routes ADD COLUMN hlp_repl_code TEXT DEFAULT ''",
+        "ALTER TABLE draft_routes ADD COLUMN hlp_repl_date TEXT DEFAULT ''",
         "ALTER TABLE draft_routes ADD COLUMN warnings TEXT DEFAULT ''",
         "ALTER TABLE history ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE vacations ADD COLUMN fb_id TEXT DEFAULT ''",
@@ -383,12 +392,8 @@ def generate_excel_with_sn(df_list, sheet_names):
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         for df, sheet in zip(df_list, sheet_names):
             export_df = df.copy()
-            if 'id' in export_df.columns: export_df = export_df.drop(columns=['id'])
-            if 'fb_id' in export_df.columns: export_df = export_df.drop(columns=['fb_id'])
-            if 'sort_order' in export_df.columns: export_df = export_df.drop(columns=['sort_order'])
-            if 'S/N' in export_df.columns: export_df = export_df.drop(columns=['S/N'])
-            if 'vacation_status' in export_df.columns: export_df = export_df.drop(columns=['vacation_status'])
-            if 'Days' in export_df.columns: export_df = export_df.drop(columns=['Days'])
+            for c_drop in ['id', 'fb_id', 'sort_order', 'S/N', 'vacation_status', 'Days']:
+                if c_drop in export_df.columns: export_df = export_df.drop(columns=[c_drop])
             export_df.insert(0, 'S/N', range(1, 1 + len(export_df)))
             export_df.to_excel(writer, sheet_name=sheet, index=False)
     output.seek(0)
@@ -435,7 +440,13 @@ def get_total_exp(code, area, hist_df):
 VEHICLE_OPTIONS = ["", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 NEEDS_OPTIONS = ["Yes", "No", "Optional"]
-ROUTE_COLUMN_ORDER = ["S/N", "Area Code", "AREA", "Sector", "Driver Code", "Drivers Name", "Helper Code", "Helpers Name", "VEH NO", "Permitted Areas", "Division Category", "Replacements", "Warnings", "Save Drv Exp", "Save Hlp Exp"]
+
+ROUTE_COLUMN_ORDER = [
+    "S/N", "Area Code", "AREA", "Sector", 
+    "Driver Code", "Drivers Name", "Drv Repl Code", "Drv Repl Date", 
+    "Helper Code", "Helpers Name", "Hlp Repl Code", "Hlp Repl Date", 
+    "VEH NO", "Permitted Areas", "Division Category", "Warnings"
+]
 
 KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
 KEEP_DRIVERS = ["D085", "D034", "D101", "D038", "D107", "D048", "D104", "D040", "D019", "D064", "D029", "D036", "D011", "D050", "D094", "D109", "D010", "D102", "D027", "D024", "D023", "D026", "D032", "D047", "D061", "D044", "D052", "D099", "D042", "D103", "D037", "D046", "D049", "D089", "D054", "D088", "D098", "D033"]
@@ -507,15 +518,15 @@ if "db_initialized" not in st.session_state:
             
             d_df = load_table('drivers')
             if len(d_df) == 0:
-                d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "", "", "", "", "") for code in KEEP_DRIVERS]
-                d_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": "", "anchor_vehicle": ""} for code in KEEP_DRIVERS]
-                run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data, bypass_queue=bq)
+                d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "", "", "", "", "", "") for code in KEEP_DRIVERS]
+                d_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": "", "anchor_vehicle": "", "replacement_person": ""} for code in KEEP_DRIVERS]
+                run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle, replacement_person) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data, bypass_queue=bq)
             
             h_df = load_table('helpers')
             if len(h_df) == 0:
-                h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "", "No", "") for code in KEEP_HELPERS]
-                h_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "", "health_card": "No", "anchor_area": ""} for code in KEEP_HELPERS]
-                run_query("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area) VALUES (?, ?, ?, ?, ?)", h_seed, table_name="helpers", action="INSERT_MANY", data=h_data, bypass_queue=bq)
+                h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "", "No", "", "") for code in KEEP_HELPERS]
+                h_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "", "health_card": "No", "anchor_area": "", "replacement_person": ""} for code in KEEP_HELPERS]
+                run_query("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area, replacement_person) VALUES (?, ?, ?, ?, ?, ?)", h_seed, table_name="helpers", action="INSERT_MANY", data=h_data, bypass_queue=bq)
 
             v_df = load_table('vehicles')
             if len(v_df) == 0:
@@ -840,7 +851,12 @@ if choice == "1. AI Route Planner":
         else:
             disp_draft['Permitted Areas'] = "All"
             
-        disp_draft = disp_draft.rename(columns={"area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", "sector": "Sector", "div_cat": "Division Category", "replacements": "Replacements", "warnings": "Warnings"})
+        disp_draft = disp_draft.rename(columns={
+            "area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", 
+            "sector": "Sector", "div_cat": "Division Category", "warnings": "Warnings",
+            "drv_repl_code": "Drv Repl Code", "drv_repl_date": "Drv Repl Date",
+            "hlp_repl_code": "Hlp Repl Code", "hlp_repl_date": "Hlp Repl Date"
+        })
         if "driver_name" in disp_draft.columns: disp_draft["Drivers Name"] = disp_draft["driver_name"]
         if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
         if "helper_name" in disp_draft.columns: disp_draft["Helpers Name"] = disp_draft["helper_name"]
@@ -848,16 +864,19 @@ if choice == "1. AI Route Planner":
         
         if "Save Drv Exp" not in disp_draft.columns: disp_draft["Save Drv Exp"] = True
         if "Save Hlp Exp" not in disp_draft.columns: disp_draft["Save Hlp Exp"] = True
-        if "Replacements" not in disp_draft.columns: disp_draft["Replacements"] = ""
         if "Warnings" not in disp_draft.columns: disp_draft["Warnings"] = ""
         
-        disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns]]
+        # Ensure new column variables exist
+        for col in ["Drv Repl Code", "Drv Repl Date", "Hlp Repl Code", "Hlp Repl Date"]:
+            if col not in disp_draft.columns: disp_draft[col] = ""
+        
+        disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns] + ["Save Drv Exp", "Save Hlp Exp"]]
         
         st.caption("ℹ️ Uncheck 'Save Drv Exp' or 'Save Hlp Exp' to prevent logging history for that specific row/person.")
         edited_df = st.data_editor(
             disp_draft, 
             use_container_width=True, hide_index=True, key="route_editor", 
-            column_order=ROUTE_COLUMN_ORDER,
+            column_order=ROUTE_COLUMN_ORDER + ["Save Drv Exp", "Save Hlp Exp"],
             column_config={
                 "Area Code": st.column_config.TextColumn(disabled=True),
                 "Driver Code": st.column_config.SelectboxColumn("CODE", options=drv_codes_opts),
@@ -865,6 +884,10 @@ if choice == "1. AI Route Planner":
                 "Helper Code": st.column_config.SelectboxColumn("CODE", options=hlp_codes_opts),
                 "Helpers Name": st.column_config.SelectboxColumn("Helpers Name", options=hlp_names_opts),
                 "VEH NO": st.column_config.SelectboxColumn("VEH NO", options=v_num_opts),
+                "Drv Repl Code": st.column_config.SelectboxColumn("Drv Repl Code", options=drv_codes_opts),
+                "Hlp Repl Code": st.column_config.SelectboxColumn("Hlp Repl Code", options=hlp_codes_opts),
+                "Drv Repl Date": st.column_config.TextColumn("Drv Repl Date"),
+                "Hlp Repl Date": st.column_config.TextColumn("Hlp Repl Date"),
                 "Save Drv Exp": st.column_config.CheckboxColumn("Save Drv Exp", default=True),
                 "Save Hlp Exp": st.column_config.CheckboxColumn("Save Hlp Exp", default=True)
             }
@@ -912,10 +935,10 @@ if choice == "1. AI Route Planner":
                     if not match.empty: h_name = match.iloc[0]['name']
 
                 a_code_val = r.get('Area Code', '')
-                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, r.get('Replacements', ''), r.get('Warnings', '')))
-                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', ''), "h_start_date":h_p_s, "h_end_date":h_p_e, "replacements":r.get('Replacements', ''), "warnings":r.get('Warnings', '')})
+                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, r.get('Drv Repl Code', ''), r.get('Drv Repl Date', ''), r.get('Hlp Repl Code', ''), r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
+                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', ''), "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":r.get('Drv Repl Code', ''), "drv_repl_date":r.get('Drv Repl Date', ''), "hlp_repl_code":r.get('Hlp Repl Code', ''), "hlp_repl_date":r.get('Hlp Repl Date', ''), "warnings":r.get('Warnings', '')})
                 
-            q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm, h_start_date, h_end_date, replacements, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY", data=new_dicts)
             st.success("Draft Saved Successfully!")
             st.rerun()
@@ -970,11 +993,15 @@ if choice == "1. AI Route Planner":
                     if not match.empty: h_name = match.iloc[0]['name']
 
                 a_code_val = r.get('Area Code', '')
-                replacements_str = str(r.get('Replacements', ''))
+                
+                d_repl_c = str(r.get('Drv Repl Code', '')).strip()
+                d_repl_d = parse_date_safe(r.get('Drv Repl Date', ''))
+                h_repl_c = str(r.get('Hlp Repl Code', '')).strip()
+                h_repl_d = parse_date_safe(r.get('Hlp Repl Date', ''))
                 warnings_str = str(r.get('Warnings', ''))
                 
-                active_data.append((sn_val, a_code_val, r.get('AREA', ''), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, replacements_str, warnings_str))
-                active_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', ''), "h_start_date":h_p_s, "h_end_date":h_p_e, "replacements":replacements_str, "warnings":warnings_str})
+                active_data.append((sn_val, a_code_val, r.get('AREA', ''), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, d_repl_c, d_repl_d, h_repl_c, h_repl_d, warnings_str))
+                active_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', ''), "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":d_repl_d, "hlp_repl_code":h_repl_c, "hlp_repl_date":h_repl_d, "warnings":warnings_str})
                 
                 save_drv = r.get('Save Drv Exp', True)
                 save_hlp = r.get('Save Hlp Exp', True)
@@ -985,27 +1012,21 @@ if choice == "1. AI Route Planner":
                 area_name = r.get('AREA', '')
                 sec_val = unify_text(r.get('Sector', ''))
                 
-                def parse_inline_replacement(r_str, role_prefix):
-                    match = re.search(rf"{role_prefix}:([A-Z0-9]+)\s*\(([\d\-]+)\)", str(r_str))
-                    if match: return str(match.group(1)).strip(), str(match.group(2)).strip()
-                    return None, None
-
                 # Log Driver
                 if save_drv and pd.notna(d_code) and str(d_code).strip() not in ["UNASSIGNED", "N/A", "", "None", "SHORTAGE", "OPTIONAL"]:
-                    repl_c, vac_dt = parse_inline_replacement(replacements_str, "D")
-                    if repl_c and vac_dt:
+                    if d_repl_c and d_repl_d and d_repl_c != "None":
                         try:
-                            vac_dt_obj = datetime.strptime(vac_dt, "%Y-%m-%d")
+                            vac_dt_obj = datetime.strptime(d_repl_d, "%Y-%m-%d")
                             day_before = (vac_dt_obj - timedelta(days=1)).strftime("%Y-%m-%d")
                             # Original Driver
                             hist_data.append(("Driver", str(d_code).strip(), str(d_name).strip(), area_name, sec_val, p_s, day_before))
                             hist_dicts.append({"person_type":"Driver", "person_code":str(d_code).strip(), "person_name":str(d_name).strip(), "area":area_name, "sector":sec_val, "date":p_s, "end_date":day_before})
                             # Replacement Driver
-                            if repl_c != "SHORTAGE":
-                                match_d = all_d[all_d['code'] == repl_c]
-                                r_name = match_d.iloc[0]['name'] if not match_d.empty else repl_c
-                                hist_data.append(("Driver", repl_c, r_name, area_name, sec_val, vac_dt, p_e))
-                                hist_dicts.append({"person_type":"Driver", "person_code":repl_c, "person_name":r_name, "area":area_name, "sector":sec_val, "date":vac_dt, "end_date":p_e})
+                            if d_repl_c not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                                match_d = all_d[all_d['code'] == d_repl_c]
+                                r_name = match_d.iloc[0]['name'] if not match_d.empty else d_repl_c
+                                hist_data.append(("Driver", d_repl_c, r_name, area_name, sec_val, d_repl_d, p_e))
+                                hist_dicts.append({"person_type":"Driver", "person_code":d_repl_c, "person_name":r_name, "area":area_name, "sector":sec_val, "date":d_repl_d, "end_date":p_e})
                         except:
                             hist_data.append(("Driver", str(d_code).strip(), str(d_name).strip(), area_name, sec_val, p_s, p_e))
                             hist_dicts.append({"person_type":"Driver", "person_code":str(d_code).strip(), "person_name":str(d_name).strip(), "area":area_name, "sector":sec_val, "date":p_s, "end_date":p_e})
@@ -1015,20 +1036,19 @@ if choice == "1. AI Route Planner":
 
                 # Log Helper
                 if save_hlp and pd.notna(h_code) and str(h_code).strip() not in ["UNASSIGNED", "N/A", "", "None", "SHORTAGE", "OPTIONAL"]:
-                    repl_c, vac_dt = parse_inline_replacement(replacements_str, "H")
-                    if repl_c and vac_dt:
+                    if h_repl_c and h_repl_d and h_repl_c != "None":
                         try:
-                            vac_dt_obj = datetime.strptime(vac_dt, "%Y-%m-%d")
+                            vac_dt_obj = datetime.strptime(h_repl_d, "%Y-%m-%d")
                             day_before = (vac_dt_obj - timedelta(days=1)).strftime("%Y-%m-%d")
                             # Original Helper
                             hist_data.append(("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, day_before))
                             hist_dicts.append({"person_type":"Helper", "person_code":str(h_code).strip(), "person_name":str(h_name).strip(), "area":area_name, "sector":sec_val, "date":h_p_s, "end_date":day_before})
                             # Replacement Helper
-                            if repl_c != "SHORTAGE":
-                                match_h = all_h[all_h['code'] == repl_c]
-                                r_name = match_h.iloc[0]['name'] if not match_h.empty else repl_c
-                                hist_data.append(("Helper", repl_c, r_name, area_name, sec_val, vac_dt, h_p_e))
-                                hist_dicts.append({"person_type":"Helper", "person_code":repl_c, "person_name":r_name, "area":area_name, "sector":sec_val, "date":vac_dt, "end_date":h_p_e})
+                            if h_repl_c not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                                match_h = all_h[all_h['code'] == h_repl_c]
+                                r_name = match_h.iloc[0]['name'] if not match_h.empty else h_repl_c
+                                hist_data.append(("Helper", h_repl_c, r_name, area_name, sec_val, h_repl_d, h_p_e))
+                                hist_dicts.append({"person_type":"Helper", "person_code":h_repl_c, "person_name":r_name, "area":area_name, "sector":sec_val, "date":h_repl_d, "end_date":h_p_e})
                         except:
                             hist_data.append(("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, h_p_e))
                             hist_dicts.append({"person_type":"Helper", "person_code":str(h_code).strip(), "person_name":str(h_name).strip(), "area":area_name, "sector":sec_val, "date":h_p_s, "end_date":h_p_e})
@@ -1036,7 +1056,7 @@ if choice == "1. AI Route Planner":
                         hist_data.append(("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, h_p_e))
                         hist_dicts.append({"person_type":"Helper", "person_code":str(h_code).strip(), "person_name":str(h_name).strip(), "area":area_name, "sector":sec_val, "date":h_p_s, "end_date":h_p_e})
             
-            q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date, veh_perm, h_start_date, h_end_date, replacements, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_ar, active_data, table_name="active_routes", action="INSERT_MANY", data=active_dicts)
             
             if hist_data:
@@ -1071,12 +1091,21 @@ if choice == "1. AI Route Planner":
         else:
             active_with_sector['Permitted Areas'] = "All"
             
-        disp_active = active_with_sector.rename(columns={"area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", "driver_name": "Drivers Name", "driver_code": "Driver Code", "helper_name": "Helpers Name", "helper_code": "Helper Code", "div_cat": "Division Category", "replacements": "Replacements", "warnings": "Warnings"})
+        disp_active = active_with_sector.rename(columns={
+            "area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", 
+            "driver_name": "Drivers Name", "driver_code": "Driver Code", 
+            "helper_name": "Helpers Name", "helper_code": "Helper Code", 
+            "div_cat": "Division Category", "warnings": "Warnings",
+            "drv_repl_code": "Drv Repl Code", "drv_repl_date": "Drv Repl Date",
+            "hlp_repl_code": "Hlp Repl Code", "hlp_repl_date": "Hlp Repl Date"
+        })
         
-        if "Replacements" not in disp_active.columns: disp_active["Replacements"] = ""
+        for col in ["Drv Repl Code", "Drv Repl Date", "Hlp Repl Code", "Hlp Repl Date"]:
+            if col not in disp_active.columns: disp_active[col] = ""
+            
         if "Warnings" not in disp_active.columns: disp_active["Warnings"] = ""
         
-        display_cols = [c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns and c not in ["Save Drv Exp", "Save Hlp Exp"]]
+        display_cols = [c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]
         disp_active = disp_active[display_cols]
         if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
         
@@ -1155,12 +1184,14 @@ if choice == "1. AI Route Planner":
                 
                 consumer_hc_assigned = 0
                 
+                # ALWAYS base Generation on active_routes so we don't get locked by drafts
                 base_df = load_table('active_routes')
                 has_draft = False
                 
                 avail_d_pool = all_d[~all_d['code'].apply(lambda x: is_on_vacation(x, month_target, vac_cache))]
                 avail_h_pool = all_h[~all_h['code'].apply(lambda x: is_on_vacation(x, month_target, vac_cache))]
                 
+                # Pre-lock manual assignments so AI doesn't steal them or duplicate them
                 if not base_df.empty:
                     for _, row in base_df.iterrows():
                         dc = str(row.get('driver_code', '')).strip()
@@ -1198,6 +1229,33 @@ if choice == "1. AI Route Planner":
                     if anchs:
                         driver_anchors_map[temp_d['code']] = anchs
 
+                # Force MUST areas first
+                areas['strict_score'] = (areas['needs_driver'] == 'Yes').astype(int) * 2 + (areas['needs_helper'] == 'Yes').astype(int)
+                areas = areas.sort_values(by=['strict_score', 'sort_order'], ascending=[False, True])
+                
+                # Fetch returning staff
+                returning_d = []
+                for _, r in all_d.iterrows():
+                    if is_on_vacation(r['code'], month_target, vac_cache):
+                        for s, e in vac_cache.get(r['code'], []):
+                            if s <= month_target.strftime("%Y-%m-%d") <= e:
+                                if e < p_e_gen:
+                                    avail_dt = (datetime.strptime(e, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+                                    returning_d.append({'code': r['code'], 'name': r['name'], 'avail_date': avail_dt})
+                                break
+                returning_d.sort(key=lambda x: x['avail_date'])
+                
+                returning_h = []
+                for _, r in all_h.iterrows():
+                    if is_on_vacation(r['code'], month_target, vac_cache):
+                        for s, e in vac_cache.get(r['code'], []):
+                            if s <= month_target.strftime("%Y-%m-%d") <= e:
+                                if e < p_e_gen:
+                                    avail_dt = (datetime.strptime(e, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+                                    returning_h.append({'code': r['code'], 'name': r['name'], 'avail_date': avail_dt})
+                                break
+                returning_h.sort(key=lambda x: x['avail_date'])
+
                 # --- PASS 1: Strict Assignments ---
                 for _, area in areas.iterrows():
                     area_code = area.get('code', '')
@@ -1223,7 +1281,7 @@ if choice == "1. AI Route Planner":
                             prev_assignment = base_df[base_df['area_name'] == area_name]
                         
                     a_d_code, a_d_name, a_h_code, a_h_name, a_v_num, a_v_perm = "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "UNASSIGNED", "All"
-                    replacements_inline = []
+                    drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date = "", "", "", ""
                     warnings_inline = []
 
                     # 1. ASSIGN DRIVER (Pass 1)
@@ -1231,9 +1289,17 @@ if choice == "1. AI Route Planner":
                     prev_d_code = prev_assignment.iloc[0].get('driver_code', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     prev_d_name = prev_assignment.iloc[0].get('driver_name', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     
+                    is_d_anchored_here = False
+                    if prev_d_code not in ["UNASSIGNED", "N/A", "", None, "SHORTAGE", "OPTIONAL"]:
+                        d_row = all_d[all_d['code'] == prev_d_code]
+                        if not d_row.empty:
+                            d_anchors = [unify_text(a).upper() for a in str(d_row.iloc[0].get('anchor_area', '')).split(',') if a.strip()]
+                            if unify_text(area_name).upper() in d_anchors or unify_text(req_sector).upper() in d_anchors:
+                                is_d_anchored_here = True
+
                     should_keep_driver = False
                     if prev_d_code not in ["UNASSIGNED", "N/A", "", None, "SHORTAGE", "OPTIONAL"]:
-                        if rot_type == "Helpers":
+                        if rot_type == "Helpers" or is_d_anchored_here:
                             should_keep_driver = True
                             
                     if nd == 'No':
@@ -1261,6 +1327,13 @@ if choice == "1. AI Route Planner":
                             if score is not None and score > best_d_score:
                                 best_d_score, best_d, d_reason = score, p, rsn
                                 
+                        if best_d is None:
+                            if not avail_dr.empty:
+                                type_match = avail_dr[avail_dr['veh_type'] == req_veh]
+                                if not type_match.empty: best_d = type_match.iloc[0]
+                                else: best_d = avail_dr.iloc[0]
+                                best_d_score, d_reason = 0, "Fallback Assignment"
+
                         if best_d is not None:
                             a_d_code, a_d_name = best_d['code'], best_d['name']
                             used_drivers.add(a_d_code)
@@ -1271,33 +1344,63 @@ if choice == "1. AI Route Planner":
                             if vac_start:
                                 repl_d, best_r_score, _ = None, -999999, ""
                                 vac_dt_obj = datetime.strptime(vac_start, "%Y-%m-%d")
-                                avail_r = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
-                                avail_r = avail_r[~avail_r['code'].apply(lambda x: is_on_vacation(x, vac_dt_obj, vac_cache))]
                                 
-                                for _, rp in avail_r.iterrows():
-                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, vac_dt_obj.date(), exp_cache, vac_cache, role="Driver")
-                                    if r_score is not None and r_score > best_r_score:
-                                        best_r_score, repl_d = r_score, rp
+                                valid_ret = [rd for rd in returning_d if rd['avail_date'] <= vac_start and rd['code'] not in used_drivers]
+                                if valid_ret:
+                                    repl_d = all_d[all_d['code'] == valid_ret[0]['code']].iloc[0]
+                                    returning_d = [rd for rd in returning_d if rd['code'] != repl_d['code']]
+                                else:
+                                    avail_r = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
+                                    avail_r = avail_r[~avail_r['code'].apply(lambda x: is_on_vacation(x, vac_dt_obj, vac_cache))]
+                                    
+                                    pref_repl = str(best_d.get('replacement_person', '')).strip()
+                                    if pref_repl and pref_repl in avail_r['code'].values:
+                                        repl_d = avail_r[avail_r['code'] == pref_repl].iloc[0]
+                                    else:
+                                        for _, rp in avail_r.iterrows():
+                                            r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, vac_dt_obj.date(), exp_cache, vac_cache, role="Driver")
+                                            if r_score is not None and r_score > best_r_score:
+                                                best_r_score, repl_d = r_score, rp
                                 
                                 if repl_d is not None:
-                                    repl_c, repl_name = repl_d['code'], repl_d['name']
-                                    used_drivers.add(repl_c)
+                                    drv_repl_code, repl_name = repl_d['code'], repl_d['name']
+                                    used_drivers.add(drv_repl_code)
                                 else:
-                                    repl_c, repl_name = "SHORTAGE", "SHORTAGE"
+                                    drv_repl_code, repl_name = "SHORTAGE", "SHORTAGE"
                                 
-                                replacements_inline.append(f"D:{repl_c} ({vac_start})")
+                                drv_repl_date = vac_start
                                 predict_data.append((a_d_code, a_d_name, "Driver", vac_start, "Scheduled Vacation", repl_name, vac_start))
                                 predict_dicts.append({"person_code":a_d_code, "person_name":a_d_name, "role":"Driver", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start})
+                            else:
+                                last_vacs = [end for start, end in vac_cache.get(a_d_code, [])]
+                                days_since = (month_target - datetime.strptime(max(last_vacs), "%Y-%m-%d").date()).days if last_vacs else 999
+                                if days_since > 180 and returning_d:
+                                    rd = returning_d.pop(0)
+                                    drv_repl_code, repl_name = rd['code'], rd['name']
+                                    drv_repl_date = rd['avail_date']
+                                    used_drivers.add(drv_repl_code)
+                                    predict_data.append((a_d_code, a_d_name, "Driver", drv_repl_date, "AI Suggested (Returning Staff Cover)", repl_name, drv_repl_date))
+                                    predict_dicts.append({"person_code":a_d_code, "person_name":a_d_name, "role":"Driver", "suggested_start":drv_repl_date, "reason":"AI Suggested (Returning Staff Cover)", "replacement_person":repl_name, "replacement_date":drv_repl_date})
                         else:
-                            a_d_code, a_d_name = "SHORTAGE", "SHORTAGE"
-                            reason_data.append((p_s_gen, area_name, "Driver", a_d_name, 0.0, "SHORTAGE", timestamp))
-                            reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Driver", "selected_person":a_d_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
+                            if returning_d:
+                                rd = returning_d.pop(0)
+                                a_d_code, a_d_name = "SHORTAGE", "SHORTAGE"
+                                drv_repl_code, repl_name = rd['code'], rd['name']
+                                drv_repl_date = rd['avail_date']
+                                used_drivers.add(drv_repl_code)
+                                warnings_inline.append(f"Shortage until {drv_repl_date}")
+                                reason_data.append((p_s_gen, area_name, "Driver", "SHORTAGE", 0.0, f"Shortage (Covered on {drv_repl_date} by {repl_name})", timestamp))
+                                reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Driver", "selected_person":"SHORTAGE", "score":0.0, "reasons":f"Shortage (Covered on {drv_repl_date} by {repl_name})", "generated_at":timestamp})
+                            else:
+                                a_d_code, a_d_name = "SHORTAGE", "SHORTAGE"
+                                drv_repl_code, drv_repl_date = "", ""
+                                reason_data.append((p_s_gen, area_name, "Driver", a_d_name, 0.0, "SHORTAGE", timestamp))
+                                reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Driver", "selected_person":a_d_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
 
-                    # If Helper & Driver are both technically "New", flag it
                     if rot_type in ["Helpers", "Both"] and a_d_code not in ["N/A", "UNASSIGNED", "OPTIONAL", "SHORTAGE"]:
                         tot_exp = get_total_exp(a_d_code, area_name, history_df_global)
                         if tot_exp < 30:
-                            warnings_inline.append("⚠️ Driver & Helper New")
+                            warnings_inline.append("⚠️ Driver New")
                             a_d_name = f"{a_d_name} ⚠️"
 
                     # 2. ASSIGN HELPER (Pass 1)
@@ -1311,14 +1414,22 @@ if choice == "1. AI Route Planner":
                     prev_h_code = prev_assignment.iloc[0].get('helper_code', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     prev_h_name = prev_assignment.iloc[0].get('helper_name', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
                     
+                    is_h_anchored_here = False
+                    if prev_h_code not in ["UNASSIGNED", "N/A", "", None, "SHORTAGE", "OPTIONAL"]:
+                        h_row = all_h[all_h['code'] == prev_h_code]
+                        if not h_row.empty:
+                            h_anchors = [unify_text(a).upper() for a in str(h_row.iloc[0].get('anchor_area', '')).split(',') if a.strip()]
+                            if unify_text(area_name).upper() in h_anchors or unify_text(req_sector).upper() in h_anchors:
+                                is_h_anchored_here = True
+
                     should_keep_helper = False
                     if prev_h_code not in ["UNASSIGNED", "N/A", "", None, "SHORTAGE", "OPTIONAL"]:
-                        if rot_type == "Drivers":
+                        if rot_type == "Drivers" or is_h_anchored_here:
                             should_keep_helper = True
                             
                     if nh == 'No' or (nh == 'Optional' and not driver_needs_h) or a_d_code in ["N/A"]:
                         a_h_code, a_h_name = "N/A", "N/A"
-                    elif a_d_code == "SHORTAGE":
+                    elif a_d_code == "SHORTAGE" and nd == "Yes":
                         a_h_code, a_h_name = "SHORTAGE", "SHORTAGE"
                     elif should_keep_helper:
                         a_h_code, a_h_name = prev_h_code, prev_h_name
@@ -1342,6 +1453,11 @@ if choice == "1. AI Route Planner":
                             if score is not None and score > best_h_score:
                                 best_h_score, best_h, h_reason = score, p, rsn
                                 
+                        if best_h is None:
+                            if not avail_hl.empty:
+                                best_h = avail_hl.iloc[0]
+                                best_h_score, h_reason = 0, "Fallback Assignment"
+                                
                         if best_h is not None:
                             a_h_code, a_h_name = best_h['code'], best_h['name']
                             used_helpers.add(a_h_code)
@@ -1355,27 +1471,64 @@ if choice == "1. AI Route Planner":
                             if vac_start:
                                 repl_h, best_r_score, _ = None, -999999, ""
                                 vac_dt_obj = datetime.strptime(vac_start, "%Y-%m-%d")
-                                avail_r = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
-                                avail_r = avail_r[~avail_r['code'].apply(lambda x: is_on_vacation(x, vac_dt_obj, vac_cache))]
                                 
-                                for _, rp in avail_r.iterrows():
-                                    r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, vac_dt_obj.date(), exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
-                                    if r_score is not None and r_score > best_r_score:
-                                        best_r_score, repl_h = r_score, rp
+                                valid_ret = [rh for rh in returning_h if rh['avail_date'] <= vac_start and rh['code'] not in used_helpers]
+                                if valid_ret:
+                                    repl_h = all_h[all_h['code'] == valid_ret[0]['code']].iloc[0]
+                                    returning_h = [rh for rh in returning_h if rh['code'] != repl_h['code']]
+                                else:
+                                    avail_r = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
+                                    avail_r = avail_r[~avail_r['code'].apply(lambda x: is_on_vacation(x, vac_dt_obj, vac_cache))]
+                                    
+                                    pref_repl = str(best_h.get('replacement_person', '')).strip()
+                                    if pref_repl and pref_repl in avail_r['code'].values:
+                                        repl_h = avail_r[avail_r['code'] == pref_repl].iloc[0]
+                                    else:
+                                        for _, rp in avail_r.iterrows():
+                                            r_score, _ = calculate_candidate_score(rp, area, req_veh, req_sector, vac_dt_obj.date(), exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
+                                            if r_score is not None and r_score > best_r_score:
+                                                best_r_score, repl_h = r_score, rp
                                 
                                 if repl_h is not None:
-                                    repl_c, repl_name = repl_h['code'], repl_h['name']
-                                    used_helpers.add(repl_c)
+                                    hlp_repl_code, repl_name = repl_h['code'], repl_h['name']
+                                    used_helpers.add(hlp_repl_code)
                                 else:
-                                    repl_c, repl_name = "SHORTAGE", "SHORTAGE"
+                                    hlp_repl_code, repl_name = "SHORTAGE", "SHORTAGE"
                                 
-                                replacements_inline.append(f"H:{repl_c} ({vac_start})")
+                                hlp_repl_date = vac_start
                                 predict_data.append((a_h_code, a_h_name, "Helper", vac_start, "Scheduled Vacation", repl_name, vac_start))
                                 predict_dicts.append({"person_code":a_h_code, "person_name":a_h_name, "role":"Helper", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start})
+                            else:
+                                last_vacs = [end for start, end in vac_cache.get(a_h_code, [])]
+                                days_since = (month_target - datetime.strptime(max(last_vacs), "%Y-%m-%d").date()).days if last_vacs else 999
+                                if days_since > 180 and returning_h:
+                                    rh = returning_h.pop(0)
+                                    hlp_repl_code, repl_name = rh['code'], rh['name']
+                                    hlp_repl_date = rh['avail_date']
+                                    used_helpers.add(hlp_repl_code)
+                                    predict_data.append((a_h_code, a_h_name, "Helper", hlp_repl_date, "AI Suggested (Returning Staff Cover)", repl_name, hlp_repl_date))
+                                    predict_dicts.append({"person_code":a_h_code, "person_name":a_h_name, "role":"Helper", "suggested_start":hlp_repl_date, "reason":"AI Suggested (Returning Staff Cover)", "replacement_person":repl_name, "replacement_date":hlp_repl_date})
                         else:
-                            a_h_code, a_h_name = "SHORTAGE", "SHORTAGE"
-                            reason_data.append((p_s_gen, area_name, "Helper", a_h_name, 0.0, "SHORTAGE", timestamp))
-                            reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":a_h_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
+                            if returning_h:
+                                rh = returning_h.pop(0)
+                                a_h_code, a_h_name = "SHORTAGE", "SHORTAGE"
+                                hlp_repl_code, repl_name = rh['code'], rh['name']
+                                hlp_repl_date = rh['avail_date']
+                                used_helpers.add(hlp_repl_code)
+                                warnings_inline.append(f"Shortage until {hlp_repl_date}")
+                                reason_data.append((p_s_gen, area_name, "Helper", "SHORTAGE", 0.0, f"Shortage (Covered on {hlp_repl_date} by {repl_name})", timestamp))
+                                reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":"SHORTAGE", "score":0.0, "reasons":f"Shortage (Covered on {hlp_repl_date} by {repl_name})", "generated_at":timestamp})
+                            else:
+                                a_h_code, a_h_name = "SHORTAGE", "SHORTAGE"
+                                hlp_repl_code, hlp_repl_date = "", ""
+                                reason_data.append((p_s_gen, area_name, "Helper", a_h_name, 0.0, "SHORTAGE", timestamp))
+                                reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":a_h_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
+
+                    if rot_type in ["Drivers", "Both"] and a_h_code not in ["N/A", "UNASSIGNED", "OPTIONAL", "SHORTAGE"]:
+                        tot_exp = get_total_exp(a_h_code, area_name, history_df_global)
+                        if tot_exp < 30:
+                            warnings_inline.append("⚠️ Helper New")
+                            a_h_name = f"{a_h_name} ⚠️"
 
                     # 3. ASSIGN VEHICLE (Pass 1)
                     prev_v_num = prev_assignment.iloc[0].get('veh_num', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
@@ -1386,7 +1539,7 @@ if choice == "1. AI Route Planner":
                         if rot_type == "Helpers":
                             should_keep_vehicle = True
                             
-                    if a_d_code == "N/A":
+                    if a_d_code == "N/A" and nd == 'No':
                         a_v_num, a_v_perm = "N/A", "N/A"
                     elif a_d_code == "SHORTAGE":
                         a_v_num, a_v_perm = "UNASSIGNED", "All"
@@ -1483,7 +1636,7 @@ if choice == "1. AI Route Planner":
                             fallback_vs_filtered = fallback_vs[fallback_vs['number'].apply(can_use_veh_p1)]
                             
                             if fallback_vs_filtered.empty:
-                                fallback_vs_filtered = fallback_vs if not fallback_vs.empty else active_vehicles_df
+                                fallback_vs_filtered = fallback_vs 
                                 
                             if not fallback_vs_filtered.empty:
                                 type_vs = fallback_vs_filtered[fallback_vs_filtered['type'].str.contains(tvt, case=False, na=False)]
@@ -1499,12 +1652,17 @@ if choice == "1. AI Route Planner":
                                     a_v_num = fallback_vs_filtered.iloc[0]['number']
                                     a_v_perm = fallback_vs_filtered.iloc[0]['permitted_areas']
                                 used_vehicles.add(a_v_num)
+                            else:
+                                a_v_num = "SHORTAGE"
+                                a_v_perm = "All"
 
                     route_plan.append({
                         "Driver Code": a_d_code, "Drivers Name": a_d_name, 
                         "Area Code": area_code, "AREA": area_name, "Sector": req_sector, "Helper Code": a_h_code, "Helpers Name": a_h_name, 
                         "VEH NO": a_v_num, "Permitted Areas": a_v_perm, "Division Category": div_cat,
-                        "Replacements": " | ".join(replacements_inline), "Warnings": " | ".join(warnings_inline)
+                        "Drv Repl Code": drv_repl_code, "Drv Repl Date": drv_repl_date,
+                        "Hlp Repl Code": hlp_repl_code, "Hlp Repl Date": hlp_repl_date,
+                        "Warnings": " | ".join(warnings_inline)
                     })
 
                 # --- PASS 2: Optional Assignments (Surplus Only) ---
@@ -1526,7 +1684,7 @@ if choice == "1. AI Route Planner":
                         avail_dr = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
                         
                         if avail_dr.empty or surplus_drivers <= 0:
-                            rp['Driver Code'], rp['Drivers Name'] = "OPTIONAL", "OPTIONAL"
+                            rp['Driver Code'], rp['Drivers Name'] = "SHORTAGE", "SHORTAGE"
                         else:
                             best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                             for _, p in avail_dr.iterrows():
@@ -1535,7 +1693,7 @@ if choice == "1. AI Route Planner":
                                     best_d_score, best_d, d_reason = score, p, rsn
                                     
                             if best_d is None:
-                                rp['Driver Code'], rp['Drivers Name'] = "OPTIONAL", "OPTIONAL"
+                                rp['Driver Code'], rp['Drivers Name'] = "SHORTAGE", "SHORTAGE"
                             else:
                                 rp['Driver Code'], rp['Drivers Name'] = best_d['code'], best_d['name']
                                 used_drivers.add(best_d['code'])
@@ -1548,23 +1706,31 @@ if choice == "1. AI Route Planner":
                                 if vac_start:
                                     repl_d, best_r_score, _ = None, -999999, ""
                                     vac_dt_obj = datetime.strptime(vac_start, "%Y-%m-%d")
-                                    avail_r = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
-                                    avail_r = avail_r[~avail_r['code'].apply(lambda x: is_on_vacation(x, vac_dt_obj, vac_cache))]
                                     
-                                    for _, rp_d in avail_r.iterrows():
-                                        r_score, _ = calculate_candidate_score(rp_d, area_obj, req_veh, req_sector, vac_dt_obj.date(), exp_cache, vac_cache, role="Driver")
-                                        if r_score is not None and r_score > best_r_score:
-                                            best_r_score, repl_d = r_score, rp_d
-                                            
-                                    if repl_d is not None:
-                                        repl_c, repl_name = repl_d['code'], repl_d['name']
-                                        used_drivers.add(repl_c)
+                                    valid_ret = [rd for rd in returning_d if rd['avail_date'] <= vac_start and rd['code'] not in used_drivers]
+                                    if valid_ret:
+                                        repl_d = all_d[all_d['code'] == valid_ret[0]['code']].iloc[0]
+                                        returning_d = [rd for rd in returning_d if rd['code'] != repl_d['code']]
                                     else:
-                                        repl_c, repl_name = "SHORTAGE", "SHORTAGE"
+                                        avail_r = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
+                                        avail_r = avail_r[~avail_r['code'].apply(lambda x: is_on_vacation(x, vac_dt_obj, vac_cache))]
                                         
-                                    repls = [rp['Replacements']] if rp['Replacements'] else []
-                                    repls.append(f"D:{repl_c} ({vac_start})")
-                                    rp['Replacements'] = " | ".join(repls)
+                                        pref_repl = str(best_d.get('replacement_person', '')).strip()
+                                        if pref_repl and pref_repl in avail_r['code'].values:
+                                            repl_d = avail_r[avail_r['code'] == pref_repl].iloc[0]
+                                        else:
+                                            for _, rp_d in avail_r.iterrows():
+                                                r_score, _ = calculate_candidate_score(rp_d, area_obj, req_veh, req_sector, vac_dt_obj.date(), exp_cache, vac_cache, role="Driver")
+                                                if r_score is not None and r_score > best_r_score:
+                                                    best_r_score, repl_d = r_score, rp_d
+                                                
+                                    if repl_d is not None:
+                                        rp['Drv Repl Code'], repl_name = repl_d['code'], repl_d['name']
+                                        used_drivers.add(rp['Drv Repl Code'])
+                                    else:
+                                        rp['Drv Repl Code'], repl_name = "SHORTAGE", "SHORTAGE"
+                                        
+                                    rp['Drv Repl Date'] = vac_start
                                     
                                     predict_data.append((best_d['code'], best_d['name'], "Driver", vac_start, "Scheduled Vacation", repl_name, vac_start))
                                     predict_dicts.append({"person_code":best_d['code'], "person_name":best_d['name'], "role":"Driver", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start})
@@ -1659,7 +1825,7 @@ if choice == "1. AI Route Planner":
                             fallback_vs_filtered = fallback_vs[fallback_vs['number'].apply(can_use_veh_p2)]
                             
                             if fallback_vs_filtered.empty:
-                                fallback_vs_filtered = fallback_vs if not fallback_vs.empty else active_vehicles_df
+                                fallback_vs_filtered = fallback_vs
                                 
                             if not fallback_vs_filtered.empty:
                                 type_vs = fallback_vs_filtered[fallback_vs_filtered['type'].str.contains(tvt, case=False, na=False)]
@@ -1675,6 +1841,9 @@ if choice == "1. AI Route Planner":
                                     rp['VEH NO'] = fallback_vs_filtered.iloc[0]['number']
                                     rp['Permitted Areas'] = fallback_vs_filtered.iloc[0]['permitted_areas']
                                 used_vehicles.add(rp['VEH NO'])
+                            else:
+                                rp['VEH NO'] = "SHORTAGE"
+                                rp['Permitted Areas'] = "All"
                     
                     # Resolve Optional Helper
                     if rp['Helper Code'] == 'OPTIONAL':
@@ -1691,7 +1860,7 @@ if choice == "1. AI Route Planner":
                         avail_hl = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
                         
                         if avail_hl.empty or surplus_helpers <= 0:
-                            rp['Helper Code'], rp['Helpers Name'] = "OPTIONAL", "OPTIONAL"
+                            rp['Helper Code'], rp['Helpers Name'] = "SHORTAGE", "SHORTAGE"
                         else:
                             best_h, best_h_score, h_reason = None, -999999, "No valid helpers"
                             for _, p in avail_hl.iterrows():
@@ -1700,7 +1869,7 @@ if choice == "1. AI Route Planner":
                                     best_h_score, best_h, h_reason = score, p, rsn
                                     
                             if best_h is None:
-                                rp['Helper Code'], rp['Helpers Name'] = "OPTIONAL", "OPTIONAL"
+                                rp['Helper Code'], rp['Helpers Name'] = "SHORTAGE", "SHORTAGE"
                             else:
                                 rp['Helper Code'], rp['Helpers Name'] = best_h['code'], best_h['name']
                                 used_helpers.add(best_h['code'])
@@ -1716,23 +1885,31 @@ if choice == "1. AI Route Planner":
                                 if vac_start:
                                     repl_h, best_r_score, _ = None, -999999, ""
                                     vac_dt_obj = datetime.strptime(vac_start, "%Y-%m-%d")
-                                    avail_r = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
-                                    avail_r = avail_r[~avail_r['code'].apply(lambda x: is_on_vacation(x, vac_dt_obj, vac_cache))]
                                     
-                                    for _, rp_h in avail_r.iterrows():
-                                        r_score, _ = calculate_candidate_score(rp_h, area_obj, req_veh, req_sector, vac_dt_obj.date(), exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
-                                        if r_score is not None and r_score > best_r_score:
-                                            best_r_score, repl_h = r_score, rp_h
-                                            
-                                    if repl_h is not None:
-                                        repl_c, repl_name = repl_h['code'], repl_h['name']
-                                        used_helpers.add(repl_c)
+                                    valid_ret = [rh for rh in returning_h if rh['avail_date'] <= vac_start and rh['code'] not in used_helpers]
+                                    if valid_ret:
+                                        repl_h = all_h[all_h['code'] == valid_ret[0]['code']].iloc[0]
+                                        returning_h = [rh for rh in returning_h if rh['code'] != repl_h['code']]
                                     else:
-                                        repl_c, repl_name = "SHORTAGE", "SHORTAGE"
+                                        avail_r = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
+                                        avail_r = avail_r[~avail_r['code'].apply(lambda x: is_on_vacation(x, vac_dt_obj, vac_cache))]
                                         
-                                    repls = [rp['Replacements']] if rp['Replacements'] else []
-                                    repls.append(f"H:{repl_c} ({vac_start})")
-                                    rp['Replacements'] = " | ".join(repls)
+                                        pref_repl = str(best_h.get('replacement_person', '')).strip()
+                                        if pref_repl and pref_repl in avail_r['code'].values:
+                                            repl_h = avail_r[avail_r['code'] == pref_repl].iloc[0]
+                                        else:
+                                            for _, rp_h in avail_r.iterrows():
+                                                r_score, _ = calculate_candidate_score(rp_h, area_obj, req_veh, req_sector, vac_dt_obj.date(), exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
+                                                if r_score is not None and r_score > best_r_score:
+                                                    best_r_score, repl_h = r_score, rp_h
+                                                
+                                    if repl_h is not None:
+                                        rp['Hlp Repl Code'], repl_name = repl_h['code'], repl_h['name']
+                                        used_helpers.add(rp['Hlp Repl Code'])
+                                    else:
+                                        rp['Hlp Repl Code'], repl_name = "SHORTAGE", "SHORTAGE"
+                                        
+                                    rp['Hlp Repl Date'] = vac_start
                                     
                                     predict_data.append((best_h['code'], best_h['name'], "Helper", vac_start, "Scheduled Vacation", repl_name, vac_start))
                                     predict_dicts.append({"person_code":best_h['code'], "person_name":best_h['name'], "role":"Helper", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":repl_name, "replacement_date":vac_start})
@@ -1745,9 +1922,9 @@ if choice == "1. AI Route Planner":
                 draft_inserts = []
                 draft_dicts = []
                 for index, r in enumerate(route_plan):
-                    draft_inserts.append((index+1, r['Area Code'], r['AREA'], r['Sector'], r['Driver Code'], r['Drivers Name'], r['Helper Code'], r['Helpers Name'], r['VEH NO'], r['Division Category'], p_s_gen, p_e_gen, r['Permitted Areas'], p_s_gen, p_e_gen, r.get('Replacements', ''), r.get('Warnings', '')))
-                    draft_dicts.append({"order_num":index+1, "area_code":r['Area Code'], "area_name":r['AREA'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Drivers Name'], "helper_code":r['Helper Code'], "helper_name":r['Helpers Name'], "veh_num":r['VEH NO'], "div_cat":r['Division Category'], "start_date":p_s_gen, "end_date":p_e_gen, "veh_perm": r['Permitted Areas'], "h_start_date": p_s_gen, "h_end_date": p_e_gen, "replacements": r.get('Replacements', ''), "warnings": r.get('Warnings', '')})
-                run_query("INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm, h_start_date, h_end_date, replacements, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", draft_inserts, table_name="draft_routes", action="INSERT_MANY", data=draft_dicts)
+                    draft_inserts.append((index+1, r['Area Code'], r['AREA'], r['Sector'], r['Driver Code'], r['Drivers Name'], r['Helper Code'], r['Helpers Name'], r['VEH NO'], r['Division Category'], p_s_gen, p_e_gen, r['Permitted Areas'], p_s_gen, p_e_gen, r.get('Drv Repl Code', ''), r.get('Drv Repl Date', ''), r.get('Hlp Repl Code', ''), r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
+                    draft_dicts.append({"order_num":index+1, "area_code":r['Area Code'], "area_name":r['AREA'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Drivers Name'], "helper_code":r['Helper Code'], "helper_name":r['Helpers Name'], "veh_num":r['VEH NO'], "div_cat":r['Division Category'], "start_date":p_s_gen, "end_date":p_e_gen, "veh_perm": r['Permitted Areas'], "h_start_date": p_s_gen, "h_end_date": p_e_gen, "drv_repl_code": r.get('Drv Repl Code', ''), "drv_repl_date": r.get('Drv Repl Date', ''), "hlp_repl_code": r.get('Hlp Repl Code', ''), "hlp_repl_date": r.get('Hlp Repl Date', ''), "warnings": r.get('Warnings', '')})
+                run_query("INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", draft_inserts, table_name="draft_routes", action="INSERT_MANY", data=draft_dicts)
                 
                 st.session_state.attempt_generate = False
                 st.session_state.force_bypass = False
@@ -1811,8 +1988,8 @@ elif choice == "2. Database Management":
     st.header("🗄️ Manage Database")
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Cloud & File Sync"])
 
-    d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "anchor_vehicle", "vacation_status"]
-    h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "vacation_status"]
+    d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "anchor_vehicle", "replacement_person", "vacation_status"]
+    h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "replacement_person", "vacation_status"]
     a_col_order = ["S/N", "code", "name", "sector", "region", "needs_driver", "needs_helper", "anchor_vehicle", "sort_order"]
     v_col_order = ["S/N", "number", "type", "division", "status", "anchor_area", "permitted_areas"]
 
@@ -1824,6 +2001,8 @@ elif choice == "2. Database Management":
         st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
         disp_df = drivers_df.drop(columns=['restriction'], errors='ignore').copy()
+        
+        if 'replacement_person' not in disp_df.columns: disp_df['replacement_person'] = ""
         
         if not disp_df.empty:
             disp_df['vacation_status'] = disp_df['code'].apply(lambda x: get_vac_status(x, vac_cache, today))
@@ -1842,7 +2021,8 @@ elif choice == "2. Database Management":
                 "vacation_status": st.column_config.TextColumn("Vacation Status", disabled=True),
                 "veh_type": st.column_config.SelectboxColumn("Veh Type", options=get_dynamic_opts(drivers_df, 'veh_type', VEHICLE_OPTIONS)),
                 "sector": st.column_config.SelectboxColumn("Sector", options=get_dynamic_opts(drivers_df, 'sector', SECTOR_OPTIONS)),
-                "needs_helper": st.column_config.SelectboxColumn("Needs Helper", options=NEEDS_OPTIONS)
+                "needs_helper": st.column_config.SelectboxColumn("Needs Helper", options=NEEDS_OPTIONS),
+                "replacement_person": st.column_config.SelectboxColumn("Pref. Replacement", options=drv_codes_opts)
             }, use_container_width=True, height=250, hide_index=True, key="ed_drivers"
         )
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
@@ -1893,12 +2073,14 @@ elif choice == "2. Database Management":
             d_anchor_v_list = d_anchor_v_opts + [x.strip() for x in d_anchor_v_man.split(',') if x.strip()]
             d_anchor_v_str = ", ".join(list(set(d_anchor_v_list)))
             
+            d_repl = st.selectbox("Preferred Replacement", drv_codes_opts, key="add_d_repl")
+            
             if st.button("➕ Add Driver", use_container_width=True):
                 if drivers_df['code'].isin([d_code]).any():
                     st.error(f"Driver Code {d_code} already exists! Cannot duplicate.")
                 else:
-                    if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-                              (d_name, d_code, unify_text(d_type), unify_text(d_sec), d_needs_h, "", d_anchor_str, d_anchor_v_str), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":unify_text(d_type), "sector":unify_text(d_sec), "needs_helper":d_needs_h, "restriction":"", "anchor_area":d_anchor_str, "anchor_vehicle":d_anchor_v_str}):
+                    if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle, replacement_person) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                              (d_name, d_code, unify_text(d_type), unify_text(d_sec), d_needs_h, "", d_anchor_str, d_anchor_v_str, d_repl), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":unify_text(d_type), "sector":unify_text(d_sec), "needs_helper":d_needs_h, "restriction":"", "anchor_area":d_anchor_str, "anchor_vehicle":d_anchor_v_str, "replacement_person":d_repl}):
                         st.success("Driver Added!")
                         st.rerun()
 
@@ -1923,6 +2105,8 @@ elif choice == "2. Database Management":
         helpers_df = load_table('helpers')
         disp_h = helpers_df.drop(columns=['restriction'], errors='ignore').copy()
         
+        if 'replacement_person' not in disp_h.columns: disp_h['replacement_person'] = ""
+        
         if not disp_h.empty:
             disp_h['vacation_status'] = disp_h['code'].apply(lambda x: get_vac_status(x, vac_cache, today))
 
@@ -1937,7 +2121,8 @@ elif choice == "2. Database Management":
                 "id": None, "fb_id": None,
                 "S/N": st.column_config.NumberColumn(disabled=True),
                 "vacation_status": st.column_config.TextColumn("Vacation Status", disabled=True),
-                "health_card": st.column_config.SelectboxColumn("Health Card", options=["Yes", "No", ""])
+                "health_card": st.column_config.SelectboxColumn("Health Card", options=["Yes", "No", ""]),
+                "replacement_person": st.column_config.SelectboxColumn("Pref. Replacement", options=hlp_codes_opts)
             }, use_container_width=True, height=250, hide_index=True, key="ed_helpers"
         )
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
@@ -1972,11 +2157,13 @@ elif choice == "2. Database Management":
             h_anchor_list = h_anchor_opts + [x.strip() for x in h_anchor_man.split(',') if x.strip()]
             h_anchor_str = ", ".join(list(set(h_anchor_list)))
             
+            h_repl = st.selectbox("Preferred Replacement", hlp_codes_opts, key="add_h_repl")
+            
             if st.button("➕ Add Helper", use_container_width=True):
                 if helpers_df['code'].isin([h_code]).any():
                     st.error(f"Helper Code {h_code} already exists! Cannot duplicate.")
                 else:
-                    if run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area) VALUES (?, ?, ?, ?, ?)", (h_name, h_code, h_health, "", h_anchor_str), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"", "anchor_area":h_anchor_str}):
+                    if run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area, replacement_person) VALUES (?, ?, ?, ?, ?, ?)", (h_name, h_code, h_health, "", h_anchor_str, h_repl), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"", "anchor_area":h_anchor_str, "replacement_person":h_repl}):
                         st.success("Helper Added!")
                         st.rerun()
         with c_edit:
