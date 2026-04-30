@@ -627,11 +627,14 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
     if "" in anchors: anchors.remove("")
 
     if anchors:
-        check_list = [unify_text(area['name']).upper(), unify_text(req_sector).upper(), unify_text(req_veh).upper()]
+        check_list = [unify_text(area.get('name', '')).upper(), unify_text(area.get('code', '')).upper(), unify_text(req_sector).upper(), unify_text(req_veh).upper()]
         matched = False
         for anc in anchors:
-            if any(anc in chk or chk in anc for chk in check_list):
-                matched = True
+            for chk in check_list:
+                if chk and (anc == chk or anc in chk):
+                    matched = True
+                    break
+            if matched:
                 break
             
         if matched:
@@ -1000,19 +1003,19 @@ if choice == "1. AI Route Planner":
                 
                 d_code = r.get('Driver Code', '')
                 d_name = r.get('Drivers Name', '')
-                if d_name != orig_row.get('Drivers Name') and d_name not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
+                if d_name != orig_row.get('Drivers Name') and d_name not in ["SHORTAGE", "OPTIONAL", "N/A"]:
                     match = all_d[all_d['name'] == d_name]
                     if not match.empty: d_code = match.iloc[0]['code']
-                elif d_code != orig_row.get('Driver Code') and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
+                elif d_code != orig_row.get('Driver Code') and d_code not in ["SHORTAGE", "OPTIONAL", "N/A"]:
                     match = all_d[all_d['code'] == d_code]
                     if not match.empty: d_name = match.iloc[0]['name']
                     
                 h_code = r.get('Helper Code', '')
                 h_name = r.get('Helpers Name', '')
-                if h_name != orig_row.get('Helpers Name') and h_name not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
+                if h_name != orig_row.get('Helpers Name') and h_name not in ["SHORTAGE", "OPTIONAL", "N/A"]:
                     match = all_h[all_h['name'] == h_name]
                     if not match.empty: h_code = match.iloc[0]['code']
-                elif h_code != orig_row.get('Helper Code') and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
+                elif h_code != orig_row.get('Helper Code') and h_code not in ["SHORTAGE", "OPTIONAL", "N/A"]:
                     match = all_h[all_h['code'] == h_code]
                     if not match.empty: h_name = match.iloc[0]['name']
 
@@ -1141,7 +1144,7 @@ if choice == "1. AI Route Planner":
             
         if "Warnings" not in disp_active.columns: disp_active["Warnings"] = ""
         
-        display_cols = [c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns and c not in ["Save Drv Exp", "Save Hlp Exp"]]
+        display_cols = [c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]
         disp_active = disp_active[display_cols]
         if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
         
@@ -1412,6 +1415,12 @@ if choice == "1. AI Route Planner":
                                 reason_data.append((p_s_gen, area_name, "Driver", a_d_name, 0.0, "SHORTAGE", timestamp))
                                 reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Driver", "selected_person":a_d_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
 
+                    if rot_type in ["Helpers", "Both"] and a_d_code not in ["N/A", "UNASSIGNED", "OPTIONAL", "SHORTAGE"]:
+                        tot_exp = get_total_exp(a_d_code, area_name, history_df_global)
+                        if tot_exp < 30:
+                            warnings_inline.append("⚠️ Driver New")
+                            a_d_name = f"{a_d_name} ⚠️"
+
                     # 2. ASSIGN HELPER (Pass 1)
                     nh = str(area.get('needs_helper', 'Yes')).strip()
                     driver_needs_h = True
@@ -1507,6 +1516,12 @@ if choice == "1. AI Route Planner":
                                 hlp_repl_code, hlp_repl_name, hlp_repl_date = "", "", ""
                                 reason_data.append((p_s_gen, area_name, "Helper", a_h_name, 0.0, "SHORTAGE", timestamp))
                                 reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":a_h_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
+
+                    if rot_type in ["Drivers", "Both"] and a_h_code not in ["N/A", "UNASSIGNED", "OPTIONAL", "SHORTAGE"]:
+                        tot_exp = get_total_exp(a_h_code, area_name, history_df_global)
+                        if tot_exp < 30:
+                            warnings_inline.append("⚠️ Helper New")
+                            a_h_name = f"{a_h_name} ⚠️"
 
                     # 3. ASSIGN VEHICLE (Pass 1)
                     prev_v_num = prev_assignment.iloc[0].get('veh_num', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
@@ -1663,7 +1678,7 @@ if choice == "1. AI Route Planner":
                         avail_dr = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
                         
                         if avail_dr.empty or surplus_drivers <= 0:
-                            rp['Driver Code'], rp['Drivers Name'] = "OPTIONAL", "OPTIONAL"
+                            rp['Driver Code'], rp['Drivers Name'] = "SHORTAGE", "SHORTAGE"
                         else:
                             best_d, best_d_score, d_reason = None, -999999, "No valid drivers"
                             for _, p in avail_dr.iterrows():
@@ -1672,7 +1687,7 @@ if choice == "1. AI Route Planner":
                                     best_d_score, best_d, d_reason = score, p, rsn
                                     
                             if best_d is None:
-                                rp['Driver Code'], rp['Drivers Name'] = "OPTIONAL", "OPTIONAL"
+                                rp['Driver Code'], rp['Drivers Name'] = "SHORTAGE", "SHORTAGE"
                             else:
                                 rp['Driver Code'], rp['Drivers Name'] = best_d['code'], best_d['name']
                                 used_drivers.add(best_d['code'])
@@ -1813,7 +1828,7 @@ if choice == "1. AI Route Planner":
                         avail_hl = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
                         
                         if avail_hl.empty or surplus_helpers <= 0:
-                            rp['Helper Code'], rp['Helpers Name'] = "OPTIONAL", "OPTIONAL"
+                            rp['Helper Code'], rp['Helpers Name'] = "SHORTAGE", "SHORTAGE"
                         else:
                             best_h, best_h_score, h_reason = None, -999999, "No valid helpers"
                             for _, p in avail_hl.iterrows():
@@ -1822,7 +1837,7 @@ if choice == "1. AI Route Planner":
                                     best_h_score, best_h, h_reason = score, p, rsn
                                     
                             if best_h is None:
-                                rp['Helper Code'], rp['Helpers Name'] = "OPTIONAL", "OPTIONAL"
+                                rp['Helper Code'], rp['Helpers Name'] = "SHORTAGE", "SHORTAGE"
                             else:
                                 rp['Helper Code'], rp['Helpers Name'] = best_h['code'], best_h['name']
                                 used_helpers.add(best_h['code'])
@@ -1942,32 +1957,49 @@ if choice == "1. AI Route Planner":
                         if d_exp < 30 and h_exp < 30:
                             warnings_list = rp["Warnings"].split(" | ") if rp["Warnings"] else []
                             
-                            if rot_type in ["Drivers", "Both"]:
-                                if not rp["Drv Repl Code"]:
-                                    avail = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
-                                    best_sug = None
-                                    for _, cand in avail.iterrows():
-                                        if get_total_exp(cand['code'], rp["AREA"], history_df_global) >= 30:
-                                            best_sug = cand
-                                            break
-                                    if best_sug is not None:
-                                        rp["Drv Repl Code"] = best_sug['code']
-                                        rp["Drv Repl Name"] = best_sug['name']
-                                        warnings_list.append(f"Sug D: {best_sug['name']}")
-                                        
-                            if rot_type in ["Helpers", "Both"]:
-                                if not rp["Hlp Repl Code"]:
-                                    avail = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
-                                    best_sug = None
-                                    for _, cand in avail.iterrows():
-                                        if get_total_exp(cand['code'], rp["AREA"], history_df_global) >= 30:
-                                            best_sug = cand
-                                            break
-                                    if best_sug is not None:
-                                        rp["Hlp Repl Code"] = best_sug['code']
-                                        rp["Hlp Repl Name"] = best_sug['name']
-                                        warnings_list.append(f"Sug H: {best_sug['name']}")
-                            
+                            area_match = areas[areas['name'] == rp['AREA']]
+                            if not area_match.empty:
+                                area_obj = area_match.iloc[0]
+                                req_sector = unify_text(area_obj.get('sector', 'Pharma'))
+                                req_veh = "VAN"
+                                if "2-8" in req_sector or "COLD CHAIN" in rp['AREA'].upper(): req_veh = "2-8 VAN"
+                                elif "GOVT" in req_sector.upper() or "GOVT" in rp['AREA'].upper(): req_veh = "BUS"
+                                elif "PICK-UP" in req_sector.upper() or "PICK UP" in rp['AREA'].upper(): req_veh = "PICK-UP"
+                                
+                                if rot_type in ["Drivers", "Both"]:
+                                    if not rp["Drv Repl Code"]:
+                                        avail = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
+                                        best_sug = None
+                                        best_sug_score = -999999
+                                        for _, cand in avail.iterrows():
+                                            if get_total_exp(cand['code'], rp["AREA"], history_df_global) >= 30:
+                                                score_res = calculate_candidate_score(cand, area_obj, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Driver")
+                                                if score_res is not None and score_res[0] is not None and score_res[0] > best_sug_score:
+                                                    best_sug_score = score_res[0]
+                                                    best_sug = cand
+                                        if best_sug is not None:
+                                            rp["Drv Repl Code"] = best_sug['code']
+                                            rp["Drv Repl Name"] = best_sug['name']
+                                            used_drivers.add(best_sug['code'])
+                                            warnings_list.append(f"Sug D: {best_sug['name']}")
+                                            
+                                if rot_type in ["Helpers", "Both"]:
+                                    if not rp["Hlp Repl Code"]:
+                                        avail = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
+                                        best_sug = None
+                                        best_sug_score = -999999
+                                        for _, cand in avail.iterrows():
+                                            if get_total_exp(cand['code'], rp["AREA"], history_df_global) >= 30:
+                                                score_res = calculate_candidate_score(cand, area_obj, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
+                                                if score_res is not None and score_res[0] is not None and score_res[0] > best_sug_score:
+                                                    best_sug_score = score_res[0]
+                                                    best_sug = cand
+                                        if best_sug is not None:
+                                            rp["Hlp Repl Code"] = best_sug['code']
+                                            rp["Hlp Repl Name"] = best_sug['name']
+                                            used_helpers.add(best_sug['code'])
+                                            warnings_list.append(f"Sug H: {best_sug['name']}")
+                                
                             rp["Warnings"] = " | ".join([w for w in warnings_list if w])
 
                 # --- Sorting by original Area Sort Order ---
