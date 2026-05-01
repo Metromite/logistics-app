@@ -443,8 +443,8 @@ NEEDS_OPTIONS = ["Yes", "No", "Optional"]
 
 ROUTE_COLUMN_ORDER = [
     "S/N", "Area Code", "AREA", "Sector", 
-    "Driver Code", "Drivers Name", "Drv Repl Code", "Drv Repl Date", 
-    "Helper Code", "Helpers Name", "Hlp Repl Code", "Hlp Repl Date", 
+    "Driver Code", "Drivers Name", "Drv Repl Name", "Drv Repl Date", 
+    "Helper Code", "Helpers Name", "Hlp Repl Name", "Hlp Repl Date", 
     "VEH NO", "Permitted Areas", "Division Category", "Warnings"
 ]
 
@@ -862,8 +862,7 @@ if choice == "1. AI Route Planner":
         disp_draft = disp_draft.rename(columns={
             "area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", 
             "sector": "Sector", "div_cat": "Division Category", "warnings": "Warnings",
-            "drv_repl_code": "Drv Repl Code", "drv_repl_date": "Drv Repl Date",
-            "hlp_repl_code": "Hlp Repl Code", "hlp_repl_date": "Hlp Repl Date"
+            "drv_repl_date": "Drv Repl Date", "hlp_repl_date": "Hlp Repl Date"
         })
         
         # Repair Names so they strictly match Options and never disappear
@@ -874,13 +873,18 @@ if choice == "1. AI Route Planner":
             disp_draft["Drivers Name"] = disp_draft.apply(lambda r: repair_name(r.get("Driver Code"), r.get("driver_name"), d_map_global), axis=1)
         if "Helper Code" in disp_draft.columns:
             disp_draft["Helpers Name"] = disp_draft.apply(lambda r: repair_name(r.get("Helper Code"), r.get("helper_name"), h_map_global), axis=1)
+
+        if "drv_repl_code" in disp_draft.columns:
+            disp_draft["Drv Repl Name"] = disp_draft.apply(lambda r: repair_name(r.get("drv_repl_code"), r.get("drv_repl_code"), d_map_global), axis=1)
+        if "hlp_repl_code" in disp_draft.columns:
+            disp_draft["Hlp Repl Name"] = disp_draft.apply(lambda r: repair_name(r.get("hlp_repl_code"), r.get("hlp_repl_code"), h_map_global), axis=1)
         
         if "Save Drv Exp" not in disp_draft.columns: disp_draft["Save Drv Exp"] = True
         if "Save Hlp Exp" not in disp_draft.columns: disp_draft["Save Hlp Exp"] = True
         if "Warnings" not in disp_draft.columns: disp_draft["Warnings"] = ""
         
         # Ensure new column variables exist
-        for col in ["Drv Repl Code", "Drv Repl Date", "Hlp Repl Code", "Hlp Repl Date"]:
+        for col in ["Drv Repl Name", "Drv Repl Date", "Hlp Repl Name", "Hlp Repl Date"]:
             if col not in disp_draft.columns: disp_draft[col] = ""
         
         disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns] + ["Save Drv Exp", "Save Hlp Exp"]]
@@ -897,8 +901,8 @@ if choice == "1. AI Route Planner":
                 "Helper Code": st.column_config.SelectboxColumn("CODE", options=hlp_codes_opts),
                 "Helpers Name": st.column_config.SelectboxColumn("Helpers Name", options=hlp_names_opts),
                 "VEH NO": st.column_config.SelectboxColumn("VEH NO", options=v_num_opts),
-                "Drv Repl Code": st.column_config.SelectboxColumn("Drv Repl Code", options=drv_codes_opts),
-                "Hlp Repl Code": st.column_config.SelectboxColumn("Hlp Repl Code", options=hlp_codes_opts),
+                "Drv Repl Name": st.column_config.SelectboxColumn("Drv Repl Name", options=drv_names_opts),
+                "Hlp Repl Name": st.column_config.SelectboxColumn("Hlp Repl Name", options=hlp_names_opts),
                 "Drv Repl Date": st.column_config.TextColumn("Drv Repl Date"),
                 "Hlp Repl Date": st.column_config.TextColumn("Hlp Repl Date"),
                 "Save Drv Exp": st.column_config.CheckboxColumn("Save Drv Exp", default=True),
@@ -947,9 +951,25 @@ if choice == "1. AI Route Planner":
                     match = all_h[all_h['code'] == h_code]
                     if not match.empty: h_name = match.iloc[0]['name']
 
+                d_repl_n = r.get('Drv Repl Name', '')
+                d_repl_c = ""
+                if d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", None]:
+                    match_rd = all_d[all_d['name'] == d_repl_n]
+                    if not match_rd.empty: d_repl_c = match_rd.iloc[0]['code']
+                    else: d_repl_c = d_repl_n
+                else: d_repl_c = d_repl_n if pd.notna(d_repl_n) else ""
+                    
+                h_repl_n = r.get('Hlp Repl Name', '')
+                h_repl_c = ""
+                if h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", None]:
+                    match_rh = all_h[all_h['name'] == h_repl_n]
+                    if not match_rh.empty: h_repl_c = match_rh.iloc[0]['code']
+                    else: h_repl_c = h_repl_n
+                else: h_repl_c = h_repl_n if pd.notna(h_repl_n) else ""
+
                 a_code_val = r.get('Area Code', '')
-                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, r.get('Drv Repl Code', ''), r.get('Drv Repl Date', ''), r.get('Hlp Repl Code', ''), r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
-                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', ''), "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":r.get('Drv Repl Code', ''), "drv_repl_date":r.get('Drv Repl Date', ''), "hlp_repl_code":r.get('Hlp Repl Code', ''), "hlp_repl_date":r.get('Hlp Repl Date', ''), "warnings":r.get('Warnings', '')})
+                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, d_repl_c, r.get('Drv Repl Date', ''), h_repl_c, r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
+                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', ''), "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":r.get('Drv Repl Date', ''), "hlp_repl_code":h_repl_c, "hlp_repl_date":r.get('Hlp Repl Date', ''), "warnings":r.get('Warnings', '')})
                 
             q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY", data=new_dicts)
@@ -1009,9 +1029,25 @@ if choice == "1. AI Route Planner":
 
                 a_code_val = r.get('Area Code', '')
                 
-                d_repl_c = str(r.get('Drv Repl Code', '')).strip()
+                d_repl_n = r.get('Drv Repl Name', '')
+                d_repl_c = ""
+                if d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", None]:
+                    match_rd = all_d[all_d['name'] == d_repl_n]
+                    if not match_rd.empty: d_repl_c = match_rd.iloc[0]['code']
+                    else: d_repl_c = d_repl_n
+                else: d_repl_c = d_repl_n if pd.notna(d_repl_n) else ""
+                    
+                h_repl_n = r.get('Hlp Repl Name', '')
+                h_repl_c = ""
+                if h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", None]:
+                    match_rh = all_h[all_h['name'] == h_repl_n]
+                    if not match_rh.empty: h_repl_c = match_rh.iloc[0]['code']
+                    else: h_repl_c = h_repl_n
+                else: h_repl_c = h_repl_n if pd.notna(h_repl_n) else ""
+
+                d_repl_c = str(d_repl_c).strip()
                 d_repl_d = parse_date_safe(r.get('Drv Repl Date', ''))
-                h_repl_c = str(r.get('Hlp Repl Code', '')).strip()
+                h_repl_c = str(h_repl_c).strip()
                 h_repl_d = parse_date_safe(r.get('Hlp Repl Date', ''))
                 warnings_str = str(r.get('Warnings', ''))
                 
@@ -1111,8 +1147,7 @@ if choice == "1. AI Route Planner":
             "driver_name": "Drivers Name", "driver_code": "Driver Code", 
             "helper_name": "Helpers Name", "helper_code": "Helper Code", 
             "div_cat": "Division Category", "warnings": "Warnings",
-            "drv_repl_code": "Drv Repl Code", "drv_repl_date": "Drv Repl Date",
-            "hlp_repl_code": "Hlp Repl Code", "hlp_repl_date": "Hlp Repl Date"
+            "drv_repl_date": "Drv Repl Date", "hlp_repl_date": "Hlp Repl Date"
         })
         
         # Repair active route names to avoid code/name mismatches 
@@ -1121,7 +1156,12 @@ if choice == "1. AI Route Planner":
         if "Helper Code" in disp_active.columns:
             disp_active["Helpers Name"] = disp_active.apply(lambda r: repair_name(r.get("Helper Code"), r.get("Helpers Name"), h_map_global), axis=1)
         
-        for col in ["Drv Repl Code", "Drv Repl Date", "Hlp Repl Code", "Hlp Repl Date"]:
+        if "drv_repl_code" in disp_active.columns:
+            disp_active["Drv Repl Name"] = disp_active.apply(lambda r: repair_name(r.get("drv_repl_code"), r.get("drv_repl_code"), d_map_global), axis=1)
+        if "hlp_repl_code" in disp_active.columns:
+            disp_active["Hlp Repl Name"] = disp_active.apply(lambda r: repair_name(r.get("hlp_repl_code"), r.get("hlp_repl_code"), h_map_global), axis=1)
+            
+        for col in ["Drv Repl Name", "Drv Repl Date", "Hlp Repl Name", "Hlp Repl Date"]:
             if col not in disp_active.columns: disp_active[col] = ""
             
         if "Warnings" not in disp_active.columns: disp_active["Warnings"] = ""
