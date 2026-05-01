@@ -825,7 +825,6 @@ if choice == "1. AI Route Planner":
     
     vac_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
     avail_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
-    solo_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if (not is_on_vacation(r['code'], today, vac_cache)) and ((r.get('needs_helper', 'Yes') == 'No') or (unify_text(r.get('veh_type', '')) in ['BUS', '2-8 VAN']))] if not all_d.empty else []
     
     vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
     avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
@@ -846,11 +845,15 @@ if choice == "1. AI Route Planner":
     avail_d_count = len(avail_d_names)
     avail_h_count = len(avail_h_names)
 
-    d_shortage = max(0, strict_d_req - avail_d_count)
-    h_shortage = max(0, strict_h_req - avail_h_count)
+    extra_d_count = len(extra_d_names)
+    extra_h_count = len(extra_h_names)
 
-    extra_d_count = max(0, avail_d_count - strict_d_req)
-    extra_h_count = max(0, avail_h_count - strict_h_req)
+    if not active_draft_df.empty:
+        d_shortage = assigned_d.count('SHORTAGE')
+        h_shortage = assigned_h.count('SHORTAGE')
+    else:
+        d_shortage = max(0, strict_d_req - avail_d_count)
+        h_shortage = max(0, strict_h_req - avail_h_count)
 
     col_a, col_e1, col_b, col_e2, col_c = st.columns(5)
     
@@ -866,7 +869,7 @@ if choice == "1. AI Route Planner":
         st.metric("🚛 Extra Drivers (Surplus)", f"{extra_d_count}")
         with st.popover("🔍 View Extra Drivers"):
             st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
-            st.caption("Drivers available but not required for strict routes.")
+            st.caption("Drivers available but not currently assigned to a route.")
             if extra_d_names: st.markdown("<ol>" + "".join([f"<li>{n}</li>" for n in extra_d_names]) + "</ol>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -882,7 +885,7 @@ if choice == "1. AI Route Planner":
         st.metric("👤 Extra Helpers (Surplus)", f"{extra_h_count}")
         with st.popover("🔍 View Extra Helpers"):
             st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
-            st.caption("Helpers available but not required for strict routes.")
+            st.caption("Helpers available but not currently assigned to a route.")
             if extra_h_names: st.markdown("<ol>" + "".join([f"<li>{n}</li>" for n in extra_h_names]) + "</ol>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -957,6 +960,10 @@ if choice == "1. AI Route Planner":
         for col in ["Drv Repl Name", "Drv Repl Date", "Hlp Repl Name", "Hlp Repl Date"]:
             if col not in disp_draft.columns: disp_draft[col] = ""
         
+        # Explicit sort by order num before rendering to match actual plan setup
+        if 'order_num' in disp_draft.columns:
+            disp_draft = disp_draft.sort_values(by='order_num')
+            
         disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns] + ["Save Drv Exp", "Save Hlp Exp"]]
         
         st.caption("ℹ️ Uncheck 'Save Drv Exp' or 'Save Hlp Exp' to prevent logging history for that specific row/person.")
@@ -1230,6 +1237,9 @@ if choice == "1. AI Route Planner":
             
         if "Warnings" not in disp_active.columns: disp_active["Warnings"] = ""
         
+        if 'order_num' in disp_active.columns:
+            disp_active = disp_active.sort_values(by='order_num')
+            
         display_cols = [c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]
         disp_active = disp_active[display_cols]
         if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
