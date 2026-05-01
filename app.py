@@ -518,14 +518,14 @@ if "db_initialized" not in st.session_state:
             
             d_df = load_table('drivers')
             if len(d_df) == 0:
-                d_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "VAN", "", "", "", "", "", "") for code in KEEP_DRIVERS]
-                d_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": "", "anchor_vehicle": "", "replacement_person": ""} for code in KEEP_DRIVERS]
+                d_seed = [("Unknown", code, "VAN", "", "", "", "", "", "") for code in KEEP_DRIVERS]
+                d_data = [{"name": "Unknown", "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": "", "anchor_vehicle": "", "replacement_person": ""} for code in KEEP_DRIVERS]
                 run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle, replacement_person) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data, bypass_queue=bq)
             
             h_df = load_table('helpers')
             if len(h_df) == 0:
-                h_seed = [(RAW_NAME_MAP.get(code, "Unknown"), code, "", "No", "", "") for code in KEEP_HELPERS]
-                h_data = [{"name": RAW_NAME_MAP.get(code, "Unknown"), "code": code, "restriction": "", "health_card": "No", "anchor_area": "", "replacement_person": ""} for code in KEEP_HELPERS]
+                h_seed = [("Unknown", code, "", "No", "", "") for code in KEEP_HELPERS]
+                h_data = [{"name": "Unknown", "code": code, "restriction": "", "health_card": "No", "anchor_area": "", "replacement_person": ""} for code in KEEP_HELPERS]
                 run_query("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area, replacement_person) VALUES (?, ?, ?, ?, ?, ?)", h_seed, table_name="helpers", action="INSERT_MANY", data=h_data, bypass_queue=bq)
 
             v_df = load_table('vehicles')
@@ -728,6 +728,14 @@ all_d = load_table('drivers')
 all_h = load_table('helpers')
 vehicles_global = load_table('vehicles')
 
+d_map_global = dict(zip(all_d['code'].dropna(), all_d['name'].dropna())) if not all_d.empty else {}
+h_map_global = dict(zip(all_h['code'].dropna(), all_h['name'].dropna())) if not all_h.empty else {}
+
+def repair_name(code, name, mapping):
+    if pd.notna(code) and code in mapping: return mapping[code]
+    if pd.notna(name) and str(name).strip() != "": return str(name).strip()
+    return str(code).strip() if pd.notna(code) else ""
+
 drv_codes_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_d['code'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"]
 drv_names_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"]
 hlp_codes_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"]
@@ -857,10 +865,15 @@ if choice == "1. AI Route Planner":
             "drv_repl_code": "Drv Repl Code", "drv_repl_date": "Drv Repl Date",
             "hlp_repl_code": "Hlp Repl Code", "hlp_repl_date": "Hlp Repl Date"
         })
-        if "driver_name" in disp_draft.columns: disp_draft["Drivers Name"] = disp_draft["driver_name"]
+        
+        # Repair Names so they strictly match Options and never disappear
         if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
-        if "helper_name" in disp_draft.columns: disp_draft["Helpers Name"] = disp_draft["helper_name"]
         if "helper_code" in disp_draft.columns: disp_draft["Helper Code"] = disp_draft["helper_code"]
+        
+        if "Driver Code" in disp_draft.columns:
+            disp_draft["Drivers Name"] = disp_draft.apply(lambda r: repair_name(r.get("Driver Code"), r.get("driver_name"), d_map_global), axis=1)
+        if "Helper Code" in disp_draft.columns:
+            disp_draft["Helpers Name"] = disp_draft.apply(lambda r: repair_name(r.get("Helper Code"), r.get("helper_name"), h_map_global), axis=1)
         
         if "Save Drv Exp" not in disp_draft.columns: disp_draft["Save Drv Exp"] = True
         if "Save Hlp Exp" not in disp_draft.columns: disp_draft["Save Hlp Exp"] = True
@@ -945,6 +958,8 @@ if choice == "1. AI Route Planner":
 
         if col_can.button("🗑️ Discard Draft", type="secondary"):
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
+            run_query("DELETE FROM route_plan_reasons", table_name="route_plan_reasons", action="CLEAR_TABLE")
+            run_query("DELETE FROM vacation_predictions", table_name="vacation_predictions", action="CLEAR_TABLE")
             st.rerun()
             
         st.divider()
@@ -1100,6 +1115,12 @@ if choice == "1. AI Route Planner":
             "hlp_repl_code": "Hlp Repl Code", "hlp_repl_date": "Hlp Repl Date"
         })
         
+        # Repair active route names to avoid code/name mismatches 
+        if "Driver Code" in disp_active.columns:
+            disp_active["Drivers Name"] = disp_active.apply(lambda r: repair_name(r.get("Driver Code"), r.get("Drivers Name"), d_map_global), axis=1)
+        if "Helper Code" in disp_active.columns:
+            disp_active["Helpers Name"] = disp_active.apply(lambda r: repair_name(r.get("Helper Code"), r.get("Helpers Name"), h_map_global), axis=1)
+        
         for col in ["Drv Repl Code", "Drv Repl Date", "Hlp Repl Code", "Hlp Repl Date"]:
             if col not in disp_active.columns: disp_active[col] = ""
             
@@ -1119,6 +1140,8 @@ if choice == "1. AI Route Planner":
         
         if col_rm.button("🗑️ Remove Current Plan", type="secondary"):
             run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE")
+            run_query("DELETE FROM route_plan_reasons", table_name="route_plan_reasons", action="CLEAR_TABLE")
+            run_query("DELETE FROM vacation_predictions", table_name="vacation_predictions", action="CLEAR_TABLE")
             st.rerun()
 
     else:
@@ -1401,7 +1424,6 @@ if choice == "1. AI Route Planner":
                         tot_exp = get_total_exp(a_d_code, area_name, history_df_global)
                         if tot_exp < 30:
                             warnings_inline.append("⚠️ Driver New")
-                            a_d_name = f"{a_d_name} ⚠️"
 
                     # 2. ASSIGN HELPER (Pass 1)
                     nh = str(area.get('needs_helper', 'Yes')).strip()
@@ -1528,7 +1550,6 @@ if choice == "1. AI Route Planner":
                         tot_exp = get_total_exp(a_h_code, area_name, history_df_global)
                         if tot_exp < 30:
                             warnings_inline.append("⚠️ Helper New")
-                            a_h_name = f"{a_h_name} ⚠️"
 
                     # 3. ASSIGN VEHICLE (Pass 1)
                     prev_v_num = prev_assignment.iloc[0].get('veh_num', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
