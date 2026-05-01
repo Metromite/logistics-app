@@ -297,6 +297,10 @@ def sync_down_from_cloud(merge=False):
                     conn.commit()
                     
             except Exception as table_e:
+                if "429" in str(table_e) or "Quota" in str(table_e) or "ResourceExhausted" in str(table_e):
+                    FIREBASE_READY = False
+                    st.sidebar.error("⚠️ Firebase Quota Exceeded! App is running offline. Data will sync later.")
+                    break
                 print(f"Error syncing {t}: {table_e}") 
         return True
     except Exception as e:
@@ -501,6 +505,10 @@ SEED_AREAS_IMAGE = [
 
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False, load_default=False):
+        # --- CRITICAL FIX: PREVENT DUMMY OVERWRITE ON WAKE CYCLE ---
+        if FIREBASE_READY and not force:
+            return 
+            
         try:
             bq = not force
             if load_default:
@@ -941,6 +949,7 @@ if choice == "1. AI Route Planner":
                 sn_val = r.get('S/N', index + 1)
                 orig_row = disp_draft.iloc[index] if index < len(disp_draft) else {}
                 
+                # --- SAFE CODE-NAME SYNC & RECOVERY ---
                 d_code = str(r.get('Driver Code', '')).strip()
                 d_name = str(r.get('Drivers Name', '')).strip()
                 if d_name != str(orig_row.get('Drivers Name', '')).strip() and d_name not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
@@ -949,6 +958,9 @@ if choice == "1. AI Route Planner":
                 elif d_code != str(orig_row.get('Driver Code', '')).strip() and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
                     match = all_d[all_d['code'] == d_code]
                     if not match.empty: d_name = match.iloc[0]['name']
+                if not d_name and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    match = all_d[all_d['code'] == d_code]
+                    if not match.empty: d_name = str(match.iloc[0]['name']).strip()
                     
                 h_code = str(r.get('Helper Code', '')).strip()
                 h_name = str(r.get('Helpers Name', '')).strip()
@@ -958,6 +970,9 @@ if choice == "1. AI Route Planner":
                 elif h_code != str(orig_row.get('Helper Code', '')).strip() and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
                     match = all_h[all_h['code'] == h_code]
                     if not match.empty: h_name = match.iloc[0]['name']
+                if not h_name and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    match = all_h[all_h['code'] == h_code]
+                    if not match.empty: h_name = str(match.iloc[0]['name']).strip()
                     
                 dr_code = str(r.get('Drv Repl Code', '')).strip()
                 dr_name = str(r.get('Drv Repl Name', '')).strip()
@@ -967,6 +982,9 @@ if choice == "1. AI Route Planner":
                 elif dr_code != str(orig_row.get('Drv Repl Code', '')).strip() and dr_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
                     match = all_d[all_d['code'] == dr_code]
                     if not match.empty: dr_name = match.iloc[0]['name']
+                if not dr_name and dr_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    match = all_d[all_d['code'] == dr_code]
+                    if not match.empty: dr_name = str(match.iloc[0]['name']).strip()
                     
                 hr_code = str(r.get('Hlp Repl Code', '')).strip()
                 hr_name = str(r.get('Hlp Repl Name', '')).strip()
@@ -976,6 +994,9 @@ if choice == "1. AI Route Planner":
                 elif hr_code != str(orig_row.get('Hlp Repl Code', '')).strip() and hr_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
                     match = all_h[all_h['code'] == hr_code]
                     if not match.empty: hr_name = match.iloc[0]['name']
+                if not hr_name and hr_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    match = all_h[all_h['code'] == hr_code]
+                    if not match.empty: hr_name = str(match.iloc[0]['name']).strip()
 
                 a_code_val = r.get('Area Code', '')
                 insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, dr_code, dr_name, r.get('Drv Repl Date', ''), hr_code, hr_name, r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
@@ -1017,6 +1038,7 @@ if choice == "1. AI Route Planner":
                 sn_val = r.get('S/N', index + 1)
                 orig_row = disp_draft.iloc[index] if index < len(disp_draft) else {}
                 
+                # --- SAFE CODE-NAME SYNC & RECOVERY ---
                 d_code = str(r.get('Driver Code', '')).strip()
                 d_name = str(r.get('Drivers Name', '')).strip()
                 if d_name != str(orig_row.get('Drivers Name', '')).strip() and d_name not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
@@ -1025,6 +1047,9 @@ if choice == "1. AI Route Planner":
                 elif d_code != str(orig_row.get('Driver Code', '')).strip() and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
                     match = all_d[all_d['code'] == d_code]
                     if not match.empty: d_name = match.iloc[0]['name']
+                if not d_name and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    match = all_d[all_d['code'] == d_code]
+                    if not match.empty: d_name = str(match.iloc[0]['name']).strip()
                     
                 h_code = str(r.get('Helper Code', '')).strip()
                 h_name = str(r.get('Helpers Name', '')).strip()
@@ -1034,6 +1059,9 @@ if choice == "1. AI Route Planner":
                 elif h_code != str(orig_row.get('Helper Code', '')).strip() and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
                     match = all_h[all_h['code'] == h_code]
                     if not match.empty: h_name = match.iloc[0]['name']
+                if not h_name and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    match = all_h[all_h['code'] == h_code]
+                    if not match.empty: h_name = str(match.iloc[0]['name']).strip()
 
                 a_code_val = r.get('Area Code', '')
                 
@@ -1045,6 +1073,9 @@ if choice == "1. AI Route Planner":
                 elif dr_code != str(orig_row.get('Drv Repl Code', '')).strip() and dr_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
                     match = all_d[all_d['code'] == dr_code]
                     if not match.empty: dr_name = match.iloc[0]['name']
+                if not dr_name and dr_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    match = all_d[all_d['code'] == dr_code]
+                    if not match.empty: dr_name = str(match.iloc[0]['name']).strip()
                     
                 hr_code = str(r.get('Hlp Repl Code', '')).strip()
                 hr_name = str(r.get('Hlp Repl Name', '')).strip()
@@ -1054,6 +1085,9 @@ if choice == "1. AI Route Planner":
                 elif hr_code != str(orig_row.get('Hlp Repl Code', '')).strip() and hr_code not in ["SHORTAGE", "OPTIONAL", "N/A", ""]:
                     match = all_h[all_h['code'] == hr_code]
                     if not match.empty: hr_name = match.iloc[0]['name']
+                if not hr_name and hr_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    match = all_h[all_h['code'] == hr_code]
+                    if not match.empty: hr_name = str(match.iloc[0]['name']).strip()
 
                 d_repl_d = parse_date_safe(r.get('Drv Repl Date', ''))
                 h_repl_d = parse_date_safe(r.get('Hlp Repl Date', ''))
@@ -1416,11 +1450,10 @@ if choice == "1. AI Route Planner":
                             reason_data.append((p_s_gen, area_name, "Driver", a_d_name, 0.0, "SHORTAGE", timestamp))
                             reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Driver", "selected_person":a_d_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
 
-                    if rot_type in ["Helpers", "Both"] and a_d_code not in ["N/A", "UNASSIGNED", "OPTIONAL", "SHORTAGE"]:
+                    if rot_type in ["Helpers", "Both"] and a_d_code not in ["N/A", "UNASSIGNED", "OPTIONAL", "SHORTAGE", ""]:
                         tot_exp = get_total_exp(a_d_code, area_name, history_df_global)
                         if tot_exp < 30:
                             warnings_inline.append("⚠️ Driver New")
-                            a_d_name = f"{a_d_name} ⚠️"
 
                     # 2. ASSIGN HELPER (Pass 1)
                     nh = str(area.get('needs_helper', 'Yes')).strip()
@@ -1497,11 +1530,10 @@ if choice == "1. AI Route Planner":
                             reason_data.append((p_s_gen, area_name, "Helper", a_h_name, 0.0, "SHORTAGE", timestamp))
                             reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":a_h_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
 
-                    if rot_type in ["Drivers", "Both"] and a_h_code not in ["N/A", "UNASSIGNED", "OPTIONAL", "SHORTAGE"]:
+                    if rot_type in ["Drivers", "Both"] and a_h_code not in ["N/A", "UNASSIGNED", "OPTIONAL", "SHORTAGE", ""]:
                         tot_exp = get_total_exp(a_h_code, area_name, history_df_global)
                         if tot_exp < 30:
                             warnings_inline.append("⚠️ Helper New")
-                            a_h_name = f"{a_h_name} ⚠️"
 
                     # 3. ASSIGN VEHICLE (Pass 1)
                     prev_v_num = prev_assignment.iloc[0].get('veh_num', 'UNASSIGNED') if not prev_assignment.empty else 'UNASSIGNED'
@@ -2073,6 +2105,10 @@ elif choice == "2. Database Management":
     with tab1:
         st.subheader("📋 Full Drivers List")
         drivers_df = load_table('drivers')
+        
+        if drivers_df.empty:
+            st.warning("⚠️ Database is empty! Go to the '📥 Cloud & File Sync' tab and click **'🚑 Safe Recover Data from Cloud'** or upload your Master Database Excel file.")
+            
         disp_df = drivers_df.drop(columns=['restriction'], errors='ignore').copy()
         
         if 'replacement_person' not in disp_df.columns: disp_df['replacement_person'] = ""
@@ -2176,6 +2212,10 @@ elif choice == "2. Database Management":
     with tab2:
         st.subheader("📋 Full Helpers List")
         helpers_df = load_table('helpers')
+        
+        if helpers_df.empty:
+            st.warning("⚠️ Database is empty! Go to the '📥 Cloud & File Sync' tab and click **'🚑 Safe Recover Data from Cloud'** or upload your Master Database Excel file.")
+            
         disp_h = helpers_df.drop(columns=['restriction'], errors='ignore').copy()
         
         if 'replacement_person' not in disp_h.columns: disp_h['replacement_person'] = ""
