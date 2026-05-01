@@ -297,10 +297,42 @@ def sync_down_from_cloud(merge=False):
         st.error(f"Sync failed: {e}")
         return False
 
+# SECURE SLEEP RECOVERY & SHORT-EXPERIENCE SCRUBBER
 c_check = conn.cursor()
 c_check.execute("SELECT COUNT(*) FROM areas")
-if c_check.fetchone()[0] == 0 and FIREBASE_READY:
-    sync_down_from_cloud(merge=False)
+areas_count = c_check.fetchone()[0]
+c_check.execute("SELECT COUNT(*) FROM history")
+history_count = c_check.fetchone()[0]
+
+if (areas_count == 0 or history_count == 0) and FIREBASE_READY:
+    sync_down_from_cloud(merge=True)
+
+if "db_scrubbed" not in st.session_state:
+    st.session_state.db_scrubbed = True
+    try:
+        hist_check = pd.read_sql("SELECT * FROM history", conn)
+        to_del = []
+        for idx, r in hist_check.iterrows():
+            try:
+                s = datetime.strptime(r['date'], "%Y-%m-%d")
+                e = datetime.strptime(r['end_date'], "%Y-%m-%d")
+                if (e - s).days + 1 < 14:
+                    to_del.append((r['id'], r.get('fb_id', '')))
+            except:
+                to_del.append((r['id'], r.get('fb_id', '')))
+        
+        if to_del:
+            c_del = conn.cursor()
+            for hid, fbid in to_del:
+                c_del.execute("DELETE FROM history WHERE id=?", (hid,))
+                if FIREBASE_READY:
+                    doc_id = str(fbid).strip() if str(fbid).strip() and str(fbid).strip() != 'nan' else str(hid)
+                    c_del.execute("INSERT INTO _sync_log (table_name, action, doc_id, payload) VALUES (?, ?, ?, ?)", ("history", "DELETE_DOC", doc_id, ""))
+            conn.commit()
+            if FIREBASE_READY: process_sync_log()
+            st.cache_data.clear()
+    except Exception as e:
+        pass
 
 sync_count = pd.read_sql("SELECT COUNT(*) FROM _sync_log", conn).iloc[0,0]
 if FIREBASE_READY and sync_count == 0:
@@ -435,6 +467,36 @@ def get_total_exp(code, area, hist_df):
             try: total += (datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(s, "%Y-%m-%d")).days + 1
             except: pass
     return total
+
+# --- STRICT OVERLAP & DURATION VALIDATOR ---
+def validate_experience(role, code, area, start_dt, end_dt, history_df, pending_dicts):
+    try:
+        s1 = datetime.strptime(start_dt, "%Y-%m-%d")
+        e1 = datetime.strptime(end_dt, "%Y-%m-%d")
+        if (e1 - s1).days + 1 < 14:
+            return False, "Duration less than 14 days"
+        
+        if not history_df.empty:
+            sub = history_df[(history_df['person_type'] == role) & (history_df['area'] == area)]
+            for _, r in sub.iterrows():
+                try:
+                    s2 = datetime.strptime(r['date'], "%Y-%m-%d")
+                    e2 = datetime.strptime(r['end_date'], "%Y-%m-%d")
+                    if s1 <= e2 and s2 <= e1:
+                        return False, f"Overlap with {r['person_name']} ({s2.strftime('%Y-%m-%d')} to {e2.strftime('%Y-%m-%d')})"
+                except: pass
+        
+        for p in pending_dicts:
+            if p['person_type'] == role and p['area'] == area:
+                try:
+                    s2 = datetime.strptime(p['date'], "%Y-%m-%d")
+                    e2 = datetime.strptime(p['end_date'], "%Y-%m-%d")
+                    if s1 <= e2 and s2 <= e1:
+                        return False, f"Overlap with pending assignment ({p['person_name']})"
+                except: pass
+        return True, "Valid"
+    except Exception as e:
+        return False, "Invalid Date Format"
 
 # --- OPTIONS & HARDCODED TEMPLATES ---
 VEHICLE_OPTIONS = ["", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
@@ -574,28 +636,8 @@ def build_vacation_cache():
                 vac_cache[code].append((s_val, e_val))
     return vac_cache
 
-def is_on_vacation(person_code, target_date, vac_cache):
-    target_str = target_date.strftime("%Y-%m-%d")
-    for start, end in vac_cache.get(person_code, []):
-        if start <= target_str <= end: return True
-    return False
 
-def vacation_within_3_months(person_code, target_date, vac_cache):
-    limit_date = (target_date + timedelta(days=90)).strftime("%Y-%m-%d")
-    target_str = target_date.strftime("%Y-%m-%d")
-    for start, end in vac_cache.get(person_code, []):
-        if target_str < start <= limit_date: return parse_date_safe(start)
-    return None
-
-def months_until_next_vacation(person_code, vac_cache, target_date):
-    target_str = target_date.strftime("%Y-%m-%d")
-    past_vacs = [end for start, end in vac_cache.get(person_code, []) if end < target_str]
-    if not past_vacs: return 0 
-    last_vac = max(past_vacs)
-    days_since = (target_date - datetime.strptime(last_vac, "%Y-%m-%d").date()).days
-    return max(0, 365 - days_since) / 30.0
-
-# --- WEIGHTED AI SCORING ALGORITHM (WITH MULTI-ANCHOR SUBSTRING SEARCH) ---
+# --- WEIGHTED AI SCORING ALGORITHM ---
 NEVER_WORKED_BONUS = 10000
 NEVER_WORKED_SECTOR_BONUS = 8000
 ANCHOR_MATCH_BONUS = 50000 
@@ -743,7 +785,6 @@ hlp_names_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_h['name'].d
 
 v_num_opts = ["UNASSIGNED", "N/A", "SHORTAGE", ""] + vehicles_global['number'].dropna().unique().tolist() if not vehicles_global.empty else ["UNASSIGNED", "N/A", "SHORTAGE", ""]
 
-# DYNAMIC DROPDOWN HELPERS
 def get_dynamic_opts(df, col_name, standard_opts):
     opts = list(set(standard_opts + (df[col_name].dropna().tolist() if not df.empty and col_name in df.columns else [])))
     return sorted([str(x) for x in opts if pd.notna(x) and str(x).strip() != ""]) + [""]
@@ -865,7 +906,6 @@ if choice == "1. AI Route Planner":
             "drv_repl_date": "Drv Repl Date", "hlp_repl_date": "Hlp Repl Date"
         })
         
-        # Repair Names so they strictly match Options and never disappear
         if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
         if "helper_code" in disp_draft.columns: disp_draft["Helper Code"] = disp_draft["helper_code"]
         
@@ -883,7 +923,6 @@ if choice == "1. AI Route Planner":
         if "Save Hlp Exp" not in disp_draft.columns: disp_draft["Save Hlp Exp"] = True
         if "Warnings" not in disp_draft.columns: disp_draft["Warnings"] = ""
         
-        # Ensure new column variables exist
         for col in ["Drv Repl Name", "Drv Repl Date", "Hlp Repl Name", "Hlp Repl Date"]:
             if col not in disp_draft.columns: disp_draft[col] = ""
         
@@ -984,7 +1023,7 @@ if choice == "1. AI Route Planner":
             
         st.divider()
         st.markdown("### 💾 Finalize & Save Experiences")
-        st.caption("Experiences will be calculated intelligently. If someone goes on vacation, their experience is logged up to the vacation date, and the replacement is logged from the replacement date to the end of the rotation.")
+        st.caption("Experiences < 14 days or overlapping other entries will be securely bypassed/ignored automatically.")
         col_app1, col_app2, col_app3 = st.columns(3)
         
         def save_plan_experiences(mode="ALL"):
@@ -1004,7 +1043,17 @@ if choice == "1. AI Route Planner":
             active_dicts = []
             hist_data = []
             hist_dicts = []
-            
+
+            def try_add_exp(ptype, pcode, pname, parea, psec, pstart, pend):
+                val, msg = validate_experience(ptype, pcode, parea, pstart, pend, history_df_global, hist_dicts)
+                if val:
+                    fid = f"H_{pcode}_{parea}_{pstart}".replace(" ", "_").replace("/", "-")
+                    hist_data.append((ptype, pcode, pname, parea, psec, pstart, pend, fid))
+                    hist_dicts.append({
+                        "person_type": ptype, "person_code": pcode, "person_name": pname,
+                        "area": parea, "sector": psec, "date": pstart, "end_date": pend, "fb_id": fid
+                    })
+
             for index, r in edited_df.iterrows():
                 sn_val = r.get('S/N', index + 1)
                 orig_row = disp_draft.iloc[index] if index < len(disp_draft) else {}
@@ -1056,66 +1105,51 @@ if choice == "1. AI Route Planner":
                 
                 save_drv = r.get('Save Drv Exp', True)
                 save_hlp = r.get('Save Hlp Exp', True)
-                
                 if mode == "HELPERS": save_drv = False
                 if mode == "DRIVERS": save_hlp = False
                 
                 area_name = r.get('AREA', '')
                 sec_val = unify_text(r.get('Sector', ''))
                 
-                # Log Driver
                 if save_drv and pd.notna(d_code) and str(d_code).strip() not in ["UNASSIGNED", "N/A", "", "None", "SHORTAGE", "OPTIONAL"]:
                     if d_repl_c and d_repl_d and d_repl_c != "None":
                         try:
                             vac_dt_obj = datetime.strptime(d_repl_d, "%Y-%m-%d")
                             day_before = (vac_dt_obj - timedelta(days=1)).strftime("%Y-%m-%d")
-                            # Original Driver
-                            hist_data.append(("Driver", str(d_code).strip(), str(d_name).strip(), area_name, sec_val, p_s, day_before))
-                            hist_dicts.append({"person_type":"Driver", "person_code":str(d_code).strip(), "person_name":str(d_name).strip(), "area":area_name, "sector":sec_val, "date":p_s, "end_date":day_before})
-                            # Replacement Driver
+                            try_add_exp("Driver", str(d_code).strip(), str(d_name).strip(), area_name, sec_val, p_s, day_before)
                             if d_repl_c not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
                                 match_d = all_d[all_d['code'] == d_repl_c]
                                 r_name = match_d.iloc[0]['name'] if not match_d.empty else d_repl_c
-                                hist_data.append(("Driver", d_repl_c, r_name, area_name, sec_val, d_repl_d, p_e))
-                                hist_dicts.append({"person_type":"Driver", "person_code":d_repl_c, "person_name":r_name, "area":area_name, "sector":sec_val, "date":d_repl_d, "end_date":p_e})
+                                try_add_exp("Driver", d_repl_c, r_name, area_name, sec_val, d_repl_d, p_e)
                         except:
-                            hist_data.append(("Driver", str(d_code).strip(), str(d_name).strip(), area_name, sec_val, p_s, p_e))
-                            hist_dicts.append({"person_type":"Driver", "person_code":str(d_code).strip(), "person_name":str(d_name).strip(), "area":area_name, "sector":sec_val, "date":p_s, "end_date":p_e})
+                            try_add_exp("Driver", str(d_code).strip(), str(d_name).strip(), area_name, sec_val, p_s, p_e)
                     else:
-                        hist_data.append(("Driver", str(d_code).strip(), str(d_name).strip(), area_name, sec_val, p_s, p_e))
-                        hist_dicts.append({"person_type":"Driver", "person_code":str(d_code).strip(), "person_name":str(d_name).strip(), "area":area_name, "sector":sec_val, "date":p_s, "end_date":p_e})
+                        try_add_exp("Driver", str(d_code).strip(), str(d_name).strip(), area_name, sec_val, p_s, p_e)
 
-                # Log Helper
                 if save_hlp and pd.notna(h_code) and str(h_code).strip() not in ["UNASSIGNED", "N/A", "", "None", "SHORTAGE", "OPTIONAL"]:
                     if h_repl_c and h_repl_d and h_repl_c != "None":
                         try:
                             vac_dt_obj = datetime.strptime(h_repl_d, "%Y-%m-%d")
                             day_before = (vac_dt_obj - timedelta(days=1)).strftime("%Y-%m-%d")
-                            # Original Helper
-                            hist_data.append(("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, day_before))
-                            hist_dicts.append({"person_type":"Helper", "person_code":str(h_code).strip(), "person_name":str(h_name).strip(), "area":area_name, "sector":sec_val, "date":h_p_s, "end_date":day_before})
-                            # Replacement Helper
+                            try_add_exp("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, day_before)
                             if h_repl_c not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
                                 match_h = all_h[all_h['code'] == h_repl_c]
                                 r_name = match_h.iloc[0]['name'] if not match_h.empty else h_repl_c
-                                hist_data.append(("Helper", h_repl_c, r_name, area_name, sec_val, h_repl_d, h_p_e))
-                                hist_dicts.append({"person_type":"Helper", "person_code":h_repl_c, "person_name":r_name, "area":area_name, "sector":sec_val, "date":h_repl_d, "end_date":h_p_e})
+                                try_add_exp("Helper", h_repl_c, r_name, area_name, sec_val, h_repl_d, h_p_e)
                         except:
-                            hist_data.append(("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, h_p_e))
-                            hist_dicts.append({"person_type":"Helper", "person_code":str(h_code).strip(), "person_name":str(h_name).strip(), "area":area_name, "sector":sec_val, "date":h_p_s, "end_date":h_p_e})
+                            try_add_exp("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, h_p_e)
                     else:
-                        hist_data.append(("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, h_p_e))
-                        hist_dicts.append({"person_type":"Helper", "person_code":str(h_code).strip(), "person_name":str(h_name).strip(), "area":area_name, "sector":sec_val, "date":h_p_s, "end_date":h_p_e})
+                        try_add_exp("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, h_p_e)
             
             q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_ar, active_data, table_name="active_routes", action="INSERT_MANY", data=active_dicts)
             
             if hist_data:
-                q_hist = "INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                q_hist = "INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date, fb_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 run_query(q_hist, hist_data, table_name="history", action="INSERT_MANY", data=hist_dicts)
             
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
-            st.success(f"Plan Approved! Experiences logged ({mode}).")
+            st.success(f"Plan Approved! Valid experiences logged ({mode}).")
             st.rerun()
 
         if col_app1.button("✅ Confirm Plan & Save ALL Experiences", type="primary"):
@@ -1150,7 +1184,6 @@ if choice == "1. AI Route Planner":
             "drv_repl_date": "Drv Repl Date", "hlp_repl_date": "Hlp Repl Date"
         })
         
-        # Repair active route names to avoid code/name mismatches 
         if "Driver Code" in disp_active.columns:
             disp_active["Drivers Name"] = disp_active.apply(lambda r: repair_name(r.get("Driver Code"), r.get("Drivers Name"), d_map_global), axis=1)
         if "Helper Code" in disp_active.columns:
@@ -1292,9 +1325,7 @@ if choice == "1. AI Route Planner":
                     if anchs:
                         driver_anchors_map[temp_d['code']] = anchs
 
-                # Force MUST areas first
-                areas['strict_score'] = (areas['needs_driver'] == 'Yes').astype(int) * 2 + (areas['needs_helper'] == 'Yes').astype(int)
-                areas = areas.sort_values(by=['strict_score', 'sort_order'], ascending=[False, True])
+                areas = areas.sort_values(by=['sort_order'], ascending=[True])
                 
                 # Fetch returning staff
                 returning_d = []
@@ -2561,8 +2592,13 @@ elif choice == "3. Past Experience Builder":
                     
                 sql_sets = ", ".join([f"{k}=?" for k in update_dict.keys()])
                 params = tuple(list(update_dict.values()) + [row_id])
-                run_query(f"UPDATE history SET {sql_sets} WHERE id=?", params, table_name="history", action="UPDATE", doc_id=fb_id, data=update_dict)
-                changes_saved += 1
+                
+                is_val, rsn = validate_experience(update_dict.get('person_type', ''), update_dict.get('person_code', ''), update_dict.get('area', ''), update_dict.get('date', ''), update_dict.get('end_date', ''), history_df[history_df['id'] != row_id], [])
+                if is_val:
+                    run_query(f"UPDATE history SET {sql_sets} WHERE id=?", params, table_name="history", action="UPDATE", doc_id=fb_id, data=update_dict)
+                    changes_saved += 1
+                else:
+                    st.error(f"Cannot save edit for row {idx+1}: {rsn}")
         if changes_saved > 0:
             st.success(f"Saved {changes_saved} updates locally & queued for cloud sync!")
             st.rerun()
@@ -2591,6 +2627,7 @@ elif choice == "3. Past Experience Builder":
         with st.spinner("Processing file intelligently..."):
             new_records = []
             new_dicts = []
+            skipped = 0
             
             if bulk_file.name.endswith('.xlsx'):
                 df_up = pd.read_excel(bulk_file)
@@ -2620,8 +2657,13 @@ elif choice == "3. Past Experience Builder":
                     
                     if f_val and t_val:
                         ptype = "Helper" if c_val.startswith('H') else "Driver"
-                        new_records.append((ptype, c_val, n_val, a_val, d_val, f_val, t_val))
-                        new_dicts.append({"person_type": ptype, "person_code": c_val, "person_name": n_val, "area": a_val, "sector": d_val, "date": f_val, "end_date": t_val})
+                        is_val, _ = validate_experience(ptype, c_val, a_val, f_val, t_val, history_df_global, new_dicts)
+                        if is_val:
+                            fb_id_val = f"H_{c_val}_{a_val}_{f_val}".replace(" ", "_").replace("/", "-")
+                            new_records.append((ptype, c_val, n_val, a_val, d_val, f_val, t_val, fb_id_val))
+                            new_dicts.append({"person_type": ptype, "person_code": c_val, "person_name": n_val, "area": a_val, "sector": d_val, "date": f_val, "end_date": t_val, "fb_id": fb_id_val})
+                        else:
+                            skipped += 1
                             
             elif bulk_file.name.endswith('.pdf') and PDF_ENABLED:
                 pdf_reader = PyPDF2.PdfReader(bulk_file)
@@ -2649,21 +2691,31 @@ elif choice == "3. Past Experience Builder":
                     if found_area:
                         found_driver = next((d for d in d_list if str(d['name']).lower() in line.lower()), None)
                         if found_driver:
-                            new_records.append(("Driver", found_driver['code'], found_driver['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val))
-                            new_dicts.append({"person_type": "Driver", "person_code": found_driver['code'], "person_name": found_driver['name'], "area": found_area['name'], "sector": found_area.get('sector', 'Pharma'), "date": f_val, "end_date": t_val})
-                        
+                            is_val, _ = validate_experience("Driver", found_driver['code'], found_area['name'], f_val, t_val, history_df_global, new_dicts)
+                            if is_val:
+                                fb_id_val = f"H_{found_driver['code']}_{found_area['name']}_{f_val}".replace(" ", "_").replace("/", "-")
+                                new_records.append(("Driver", found_driver['code'], found_driver['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val, fb_id_val))
+                                new_dicts.append({"person_type": "Driver", "person_code": found_driver['code'], "person_name": found_driver['name'], "area": found_area['name'], "sector": found_area.get('sector', 'Pharma'), "date": f_val, "end_date": t_val, "fb_id": fb_id_val})
+                            else:
+                                skipped += 1
+                                
                         found_helper = next((h for h in h_list if str(h['name']).lower() in line.lower()), None)
                         if found_helper:
-                            new_records.append(("Helper", found_helper['code'], found_helper['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val))
-                            new_dicts.append({"person_type": "Helper", "person_code": found_helper['code'], "person_name": found_helper['name'], "area": found_area['name'], "sector": found_area.get('sector', 'Pharma'), "date": f_val, "end_date": t_val})
+                            is_val, _ = validate_experience("Helper", found_helper['code'], found_area['name'], f_val, t_val, history_df_global, new_dicts)
+                            if is_val:
+                                fb_id_val = f"H_{found_helper['code']}_{found_area['name']}_{f_val}".replace(" ", "_").replace("/", "-")
+                                new_records.append(("Helper", found_helper['code'], found_helper['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val, fb_id_val))
+                                new_dicts.append({"person_type": "Helper", "person_code": found_helper['code'], "person_name": found_helper['name'], "area": found_area['name'], "sector": found_area.get('sector', 'Pharma'), "date": f_val, "end_date": t_val, "fb_id": fb_id_val})
+                            else:
+                                skipped += 1
 
             if new_records:
-                q_hist = "INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                q_hist = "INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date, fb_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 run_query(q_hist, new_records, table_name="history", action="INSERT_MANY", data=new_dicts)
-                st.success(f"Successfully imported {len(new_records)} records while preventing duplicates!")
+                st.success(f"Successfully imported {len(new_records)} valid records! (Skipped {skipped} records <14 days or duplicates).")
                 st.rerun()
             else:
-                st.warning("Could not extract valid records from the file. Ensure it has CODE, AREA, and DATES.")
+                st.warning(f"Could not extract valid records from the file. (Skipped {skipped} invalid/duplicate records). Ensure it has CODE, AREA, and DATES.")
 
     st.divider()
 
@@ -2686,15 +2738,17 @@ elif choice == "3. Past Experience Builder":
                 p_code = p_person.split("] ")[0].replace("[", "")
                 p_name = p_person.split("] ")[1]
                 
-                overlap = history_df[(history_df['person_code']==p_code) & (history_df['area']==p_area) & (history_df['date']==p_start_date.strftime("%Y-%m-%d"))]
+                is_val, rsn = validate_experience(p_type, p_code, p_area, p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d"), history_df_global, [])
+                
                 if p_start_date > p_end_date: 
                     st.error("Start Date cannot be after End Date.")
-                elif not overlap.empty:
-                    st.error("⚠️ This person already has an experience log for this Area on this exact Start Date!")
+                elif not is_val:
+                    st.error(f"⚠️ Cannot add experience: {rsn}")
                 else:
-                    if run_query("INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                              (p_type, p_code, p_name, p_area, unify_text(p_sec), p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d")), 
-                              table_name="history", action="INSERT", data={"person_type":p_type, "person_code":p_code, "person_name":p_name, "area":p_area, "sector":unify_text(p_sec), "date":p_start_date.strftime("%Y-%m-%d"), "end_date":p_end_date.strftime("%Y-%m-%d")}):
+                    fb_id_val = f"H_{p_code}_{p_area}_{p_start_date.strftime('%Y-%m-%d')}".replace(" ", "_").replace("/", "-")
+                    if run_query("INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date, fb_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                              (p_type, p_code, p_name, p_area, unify_text(p_sec), p_start_date.strftime("%Y-%m-%d"), p_end_date.strftime("%Y-%m-%d"), fb_id_val), 
+                              table_name="history", action="INSERT", data={"person_type":p_type, "person_code":p_code, "person_name":p_name, "area":p_area, "sector":unify_text(p_sec), "date":p_start_date.strftime("%Y-%m-%d"), "end_date":p_end_date.strftime("%Y-%m-%d"), "fb_id": fb_id_val}):
                         st.success("Experience Added!")
                         st.rerun()
 
@@ -2837,12 +2891,14 @@ elif choice == "4. Vacation Schedule":
                 pname = str(row.get('person_name', '')).strip()
                 if not pcode or pcode.lower() == 'nan': continue
                 
+                fb_id_val = f"V_{pcode}_{sd}".replace(" ", "_").replace("/", "-")
                 data_dict = {
                     "person_type": ptype,
                     "person_code": pcode,
                     "person_name": pname,
                     "start_date": sd,
-                    "end_date": ed
+                    "end_date": ed,
+                    "fb_id": fb_id_val
                 }
                 
                 cols = ', '.join(data_dict.keys())
