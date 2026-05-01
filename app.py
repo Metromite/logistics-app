@@ -1,14 +1,5 @@
 import streamlit as st
 import json
-
-# --- ANTI-SLEEP PING HANDLER ---
-try:
-    if "ping" in st.query_params:
-        st.write("🟢 App is awake and Firebase quota is protected!")
-        st.stop()
-except:
-    pass
-
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta, date
@@ -19,6 +10,14 @@ import textwrap
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+# --- ANTI-SLEEP PING HANDLER ---
+try:
+    if "ping" in st.query_params:
+        st.write("🟢 App is awake and Firebase quota is protected!")
+        st.stop()
+except:
+    pass
+
 try:
     import PyPDF2
     PDF_ENABLED = True
@@ -28,7 +27,11 @@ except ImportError:
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Logistics AI Planner", layout="wide")
 
-# --- AGGRESSIVE TEXT UNIFICATION ENGINE (NO 'NAN', NO DUPLICATES) ---
+
+# ==========================================
+# 1. CORE FUNCTIONS & ENGINE (LOADED FIRST TO PREVENT NAMEERRORS)
+# ==========================================
+
 def unify_text(val):
     if pd.isna(val) or val is None: return ""
     val = str(val).strip()
@@ -67,7 +70,270 @@ def parse_date_safe(d_str):
         except ValueError: pass
     return d_str
 
-# --- FIREBASE INITIALIZATION & DB ADAPTER ---
+def get_vac_status(code, vac_cache, today_date):
+    today_str = today_date.strftime("%Y-%m-%d")
+    vacs = vac_cache.get(code, [])
+    if not vacs: return "Never"
+    
+    for s, e in vacs:
+        if s <= today_str <= e:
+            days_left = (datetime.strptime(e, "%Y-%m-%d").date() - today_date).days
+            return f"On leave ({days_left} days left)"
+            
+    past_vacs = sorted([e for s, e in vacs if e < today_str], reverse=True)
+    if past_vacs:
+        last_e = past_vacs[0]
+        days_since = (today_date - datetime.strptime(last_e, "%Y-%m-%d").date()).days
+        return f"Back ({days_since} days ago)"
+        
+    future_vacs = sorted([s for s, e in vacs if s > today_str])
+    if future_vacs:
+        next_s = future_vacs[0]
+        days_until = (datetime.strptime(next_s, "%Y-%m-%d").date() - today_date).days
+        return f"Upcoming (in {days_until} days)"
+        
+    return "Never"
+
+def get_total_exp(code, area, hist_df):
+    if hist_df.empty: return 0
+    sub = hist_df[(hist_df['person_code'] == code) & (hist_df['area'] == area)]
+    if sub.empty: return 0
+    total = 0
+    for _, r in sub.iterrows():
+        s = parse_date_safe(r.get('date'))
+        e = parse_date_safe(r.get('end_date'))
+        if s and e:
+            try: total += (datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(s, "%Y-%m-%d")).days + 1
+            except: pass
+    return total
+
+def build_experience_cache():
+    history_df = load_table('history')
+    exp_cache = {}
+    if not history_df.empty:
+        for _, r in history_df.iterrows():
+            code = r['person_code']
+            area = unify_text(r['area'])
+            sector = unify_text(r.get('sector', 'Pharma'))
+            end_date = parse_date_safe(r['end_date'] if pd.notna(r.get('end_date')) and str(r['end_date']).strip() else r['date'])
+            
+            if not end_date: continue
+
+            if code not in exp_cache: exp_cache[code] = {'areas': {}, 'sectors': {}}
+            if area not in exp_cache[code]['areas'] or end_date > exp_cache[code]['areas'][area]:
+                exp_cache[code]['areas'][area] = end_date
+            if sector not in exp_cache[code]['sectors'] or end_date > exp_cache[code]['sectors'][sector]:
+                exp_cache[code]['sectors'][sector] = end_date
+    return exp_cache
+
+def build_vacation_cache():
+    vacs_df = load_table('vacations')
+    vac_cache = {}
+    if not vacs_df.empty and 'person_code' in vacs_df.columns:
+        for _, r in vacs_df.iterrows():
+            code = r['person_code']
+            if code not in vac_cache: vac_cache[code] = []
+            s_val = parse_date_safe(r['start_date'])
+            e_val = parse_date_safe(r['end_date'])
+            if s_val and e_val:
+                vac_cache[code].append((s_val, e_val))
+    return vac_cache
+
+def is_on_vacation(person_code, target_date, vac_cache):
+    target_str = target_date.strftime("%Y-%m-%d")
+    for start, end in vac_cache.get(person_code, []):
+        if start <= target_str <= end: return True
+    return False
+
+def vacation_within_3_months(person_code, target_date, vac_cache):
+    limit_date = (target_date + timedelta(days=90)).strftime("%Y-%m-%d")
+    target_str = target_date.strftime("%Y-%m-%d")
+    for start, end in vac_cache.get(person_code, []):
+        if target_str < start <= limit_date: return parse_date_safe(start)
+    return None
+
+def months_until_next_vacation(person_code, vac_cache, target_date):
+    target_str = target_date.strftime("%Y-%m-%d")
+    past_vacs = [end for start, end in vac_cache.get(person_code, []) if end < target_str]
+    if not past_vacs: return 0 
+    last_vac = max(past_vacs)
+    days_since = (target_date - datetime.strptime(last_vac, "%Y-%m-%d").date()).days
+    return max(0, 365 - days_since) / 30.0
+
+def validate_experience(role, code, area, start_dt, end_dt, history_df, pending_dicts):
+    try:
+        s1 = datetime.strptime(start_dt, "%Y-%m-%d")
+        e1 = datetime.strptime(end_dt, "%Y-%m-%d")
+        if (e1 - s1).days + 1 < 14:
+            return False, "Duration less than 14 days"
+        
+        if not history_df.empty:
+            sub = history_df[(history_df['person_type'] == role) & (history_df['area'] == area)]
+            for _, r in sub.iterrows():
+                try:
+                    s2 = datetime.strptime(r['date'], "%Y-%m-%d")
+                    e2 = datetime.strptime(r['end_date'], "%Y-%m-%d")
+                    if s1 <= e2 and s2 <= e1:
+                        return False, f"Overlap with {r['person_name']} ({s2.strftime('%Y-%m-%d')} to {e2.strftime('%Y-%m-%d')})"
+                except: pass
+        
+        for p in pending_dicts:
+            if p['person_type'] == role and p['area'] == area:
+                try:
+                    s2 = datetime.strptime(p['date'], "%Y-%m-%d")
+                    e2 = datetime.strptime(p['end_date'], "%Y-%m-%d")
+                    if s1 <= e2 and s2 <= e1:
+                        return False, f"Overlap with pending assignment ({p['person_name']})"
+                except: pass
+        return True, "Valid"
+    except Exception as e:
+        return False, "Invalid Date Format"
+
+NEVER_WORKED_BONUS = 10000
+NEVER_WORKED_SECTOR_BONUS = 8000
+ANCHOR_MATCH_BONUS = 50000 
+MONTHS_WEIGHT = 100
+SECTOR_MONTHS_WEIGHT = 50
+RECENT_AREA_PENALTY = -3000
+VACATION_SOON_PENALTY = -1500
+
+def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date, exp_cache, vac_cache, role="Driver", hc_assigned=0):
+    code = candidate['code']
+    score = 0
+    reasons = []
+    target_str = target_date.strftime("%Y-%m-%d")
+
+    if is_on_vacation(code, target_date, vac_cache):
+        return None, "Excluded: On Vacation"
+        
+    if role == "Driver":
+        p_veh = unify_text(candidate.get('veh_type', ''))
+        if p_veh and p_veh not in [req_veh, ""] and not (p_veh == "VAN / PICK-UP" and req_veh in ["VAN", "PICK-UP"]):
+            return None, f"Excluded: Vehicle Mismatch ({p_veh} != {req_veh})"
+
+    anchors = [unify_text(a).upper() for a in str(candidate.get('anchor_area', '')).split(',') if a.strip()]
+    if "NONE" in anchors: anchors.remove("NONE")
+    if "" in anchors: anchors.remove("")
+
+    if anchors:
+        check_list = [unify_text(area['name']).upper(), unify_text(req_sector).upper(), unify_text(req_veh).upper()]
+        matched = False
+        for anc in anchors:
+            if any(anc in chk or chk in anc for chk in check_list):
+                matched = True
+                break
+            
+        if matched:
+            score += ANCHOR_MATCH_BONUS
+            reasons.append(f"Anchor Match (+{ANCHOR_MATCH_BONUS})")
+        else:
+            return None, f"Excluded: Anchored strictly to {', '.join(anchors)}"
+
+    last_worked_area = exp_cache.get(code, {}).get('areas', {}).get(unify_text(area['name']))
+    if not last_worked_area:
+        score += NEVER_WORKED_BONUS
+        reasons.append(f"Never worked Area (+{NEVER_WORKED_BONUS})")
+    else:
+        months_since = (datetime.strptime(target_str, "%Y-%m-%d") - datetime.strptime(last_worked_area, "%Y-%m-%d")).days / 30.0
+        if months_since < 3:
+            score += RECENT_AREA_PENALTY
+            reasons.append(f"Recent Area Visit <3m ({RECENT_AREA_PENALTY})")
+        else:
+            time_score = int(months_since * MONTHS_WEIGHT)
+            score += time_score
+            reasons.append(f"{months_since:.1f}m since area (+{time_score})")
+
+    last_worked_sector = exp_cache.get(code, {}).get('sectors', {}).get(req_sector)
+    if not last_worked_sector:
+        score += NEVER_WORKED_SECTOR_BONUS
+        reasons.append(f"Never worked {req_sector} Sector (+{NEVER_WORKED_SECTOR_BONUS})")
+    else:
+        months_since_sec = (datetime.strptime(target_str, "%Y-%m-%d") - datetime.strptime(last_worked_sector, "%Y-%m-%d")).days / 30.0
+        time_score_sec = int(months_since_sec * SECTOR_MONTHS_WEIGHT)
+        score += time_score_sec
+        reasons.append(f"{months_since_sec:.1f}m since {req_sector} Sector (+{time_score_sec})")
+
+    vac_start = vacation_within_3_months(code, target_date, vac_cache)
+    if vac_start:
+        score += VACATION_SOON_PENALTY
+        reasons.append(f"Vacation soon ({VACATION_SOON_PENALTY})")
+
+    if role == "Helper":
+        if "Consumer" in unify_text(req_sector):
+            if candidate.get('health_card') == 'Yes':
+                if hc_assigned < 3:
+                    score += 5000; reasons.append("Required HC for Consumer (+5000)")
+                else:
+                    score += 500; reasons.append("HC in Consumer (+500)")
+            else:
+                if hc_assigned < 3:
+                    score -= 2000; reasons.append("Non-HC Penalty (-2000)")
+        else:
+            if candidate.get('health_card') == 'Yes':
+                if hc_assigned < 3:
+                    score -= 3000; reasons.append("Reserved HC for Consumer (-3000)")
+                else:
+                    score -= 200; reasons.append("Saved HC (-200)")
+
+    return score, " | ".join(reasons)
+
+def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vac_cache, today_date):
+    errors = []
+    req_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
+    for _, area in areas_df.iterrows():
+        if area.get('needs_driver', 'Yes') == 'No': continue
+        sec = unify_text(area.get('sector', ''))
+        name = unify_text(area.get('name', ''))
+        if "2-8" in sec or "COLD CHAIN" in name.upper(): req_veh["2-8 VAN"] += 1
+        elif "Govt" in sec or "GOVT" in name.upper(): req_veh["BUS"] += 1
+        elif "Pick-Up" in sec or "PICK UP" in name.upper(): req_veh["PICK-UP"] += 1
+        else: req_veh["VAN"] += 1
+            
+    avail_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
+    active_vehicles_df = vehicles_df[~vehicles_df.get('status', 'Active').str.contains('Under Service|In for Service', case=False, na=False)]
+    for _, v in active_vehicles_df.iterrows():
+        vtype = unify_text(v.get('type', 'VAN'))
+        if vtype in avail_veh: avail_veh[vtype] += 1
+        elif vtype == "VAN / PICK-UP":
+            avail_veh["VAN"] += 1
+            avail_veh["PICK-UP"] += 1
+        
+    for vtype, required in req_veh.items():
+        if avail_veh[vtype] < required:
+            errors.append(f"🚗 Missing **{vtype}** Vehicles: Route strictly needs **{required}**, but you only have **{avail_veh[vtype]}** active.")
+
+    strict_d_req = len(areas_df[areas_df['needs_driver'] == 'Yes'])
+    avail_d = len([1 for _, r in drivers_df.iterrows() if not is_on_vacation(r['code'], today_date, vac_cache)])
+    if avail_d < strict_d_req:
+        errors.append(f"🚛 Missing Drivers: Route strictly needs **{strict_d_req}** active drivers, but you only have **{avail_d}**.")
+        
+    return errors
+
+def generate_excel_with_sn(df_list, sheet_names):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        for df, sheet in zip(df_list, sheet_names):
+            export_df = df.copy()
+            for c_drop in ['id', 'fb_id', 'sort_order', 'S/N', 'vacation_status', 'Days']:
+                if c_drop in export_df.columns: export_df = export_df.drop(columns=[c_drop])
+            export_df.insert(0, 'S/N', range(1, 1 + len(export_df)))
+            export_df.to_excel(writer, sheet_name=sheet, index=False)
+    output.seek(0)
+    return output
+
+def repair_name(code, name, mapping):
+    if pd.notna(code) and code in mapping: return mapping[code]
+    if pd.notna(name) and str(name).strip() != "": return str(name).strip()
+    return str(code).strip() if pd.notna(code) else ""
+
+def get_dynamic_opts(df, col_name, standard_opts):
+    opts = list(set(standard_opts + (df[col_name].dropna().tolist() if not df.empty and col_name in df.columns else [])))
+    return sorted([str(x) for x in opts if pd.notna(x) and str(x).strip() != ""]) + [""]
+
+
+# ==========================================
+# 2. FIREBASE & DATABASE INITIALIZATION
+# ==========================================
 FIREBASE_READY = False
 conn = None
 
@@ -104,7 +370,6 @@ if FIREBASE_READY:
     except Exception as ping_error:
         FIREBASE_READY = False
 
-# --- HYBRID SQLITE ---
 def init_sqlite_db():
     local_conn = sqlite3.connect('logistics.db', check_same_thread=False)
     c = local_conn.cursor()
@@ -196,7 +461,6 @@ def init_sqlite_db():
 
 conn = init_sqlite_db()
 
-# --- HIGH-EFFICIENCY DELTA SYNC ENGINE (BURST LIMIT SAFE) ---
 def process_sync_log():
     global FIREBASE_READY
     if not FIREBASE_READY: return
@@ -419,86 +683,10 @@ def run_query(query, params=(), table_name=None, action=None, doc_id=None, data=
         st.error(f"Database Edit Failed: {str(e)}")
         return False
 
-def generate_excel_with_sn(df_list, sheet_names):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        for df, sheet in zip(df_list, sheet_names):
-            export_df = df.copy()
-            for c_drop in ['id', 'fb_id', 'sort_order', 'S/N', 'vacation_status', 'Days']:
-                if c_drop in export_df.columns: export_df = export_df.drop(columns=[c_drop])
-            export_df.insert(0, 'S/N', range(1, 1 + len(export_df)))
-            export_df.to_excel(writer, sheet_name=sheet, index=False)
-    output.seek(0)
-    return output
 
-def get_vac_status(code, vac_cache, today_date):
-    today_str = today_date.strftime("%Y-%m-%d")
-    vacs = vac_cache.get(code, [])
-    if not vacs: return "Never"
-    
-    for s, e in vacs:
-        if s <= today_str <= e:
-            days_left = (datetime.strptime(e, "%Y-%m-%d").date() - today_date).days
-            return f"On leave ({days_left} days left)"
-            
-    past_vacs = sorted([e for s, e in vacs if e < today_str], reverse=True)
-    if past_vacs:
-        last_e = past_vacs[0]
-        days_since = (today_date - datetime.strptime(last_e, "%Y-%m-%d").date()).days
-        return f"Back ({days_since} days ago)"
-        
-    future_vacs = sorted([s for s, e in vacs if s > today_str])
-    if future_vacs:
-        next_s = future_vacs[0]
-        days_until = (datetime.strptime(next_s, "%Y-%m-%d").date() - today_date).days
-        return f"Upcoming (in {days_until} days)"
-        
-    return "Never"
-
-def get_total_exp(code, area, hist_df):
-    if hist_df.empty: return 0
-    sub = hist_df[(hist_df['person_code'] == code) & (hist_df['area'] == area)]
-    if sub.empty: return 0
-    total = 0
-    for _, r in sub.iterrows():
-        s = parse_date_safe(r.get('date'))
-        e = parse_date_safe(r.get('end_date'))
-        if s and e:
-            try: total += (datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(s, "%Y-%m-%d")).days + 1
-            except: pass
-    return total
-
-# --- STRICT OVERLAP & DURATION VALIDATOR ---
-def validate_experience(role, code, area, start_dt, end_dt, history_df, pending_dicts):
-    try:
-        s1 = datetime.strptime(start_dt, "%Y-%m-%d")
-        e1 = datetime.strptime(end_dt, "%Y-%m-%d")
-        if (e1 - s1).days + 1 < 14:
-            return False, "Duration less than 14 days"
-        
-        if not history_df.empty:
-            sub = history_df[(history_df['person_type'] == role) & (history_df['area'] == area)]
-            for _, r in sub.iterrows():
-                try:
-                    s2 = datetime.strptime(r['date'], "%Y-%m-%d")
-                    e2 = datetime.strptime(r['end_date'], "%Y-%m-%d")
-                    if s1 <= e2 and s2 <= e1:
-                        return False, f"Overlap with {r['person_name']} ({s2.strftime('%Y-%m-%d')} to {e2.strftime('%Y-%m-%d')})"
-                except: pass
-        
-        for p in pending_dicts:
-            if p['person_type'] == role and p['area'] == area:
-                try:
-                    s2 = datetime.strptime(p['date'], "%Y-%m-%d")
-                    e2 = datetime.strptime(p['end_date'], "%Y-%m-%d")
-                    if s1 <= e2 and s2 <= e1:
-                        return False, f"Overlap with pending assignment ({p['person_name']})"
-                except: pass
-        return True, "Valid"
-    except Exception as e:
-        return False, "Invalid Date Format"
-
-# --- OPTIONS & HARDCODED TEMPLATES ---
+# ==========================================
+# 3. GLOBAL VARIABLES & CONSTANTS
+# ==========================================
 VEHICLE_OPTIONS = ["", "VAN", "PICK-UP", "VAN / PICK-UP", "BUS", "2-8 VAN"]
 SECTOR_OPTIONS = ["", "Pharma", "Consumer", "Bulk / Pick-Up", "2-8", "Govt / Urgent", "Substitute", "Fleet", "Bus"]
 NEEDS_OPTIONS = ["Yes", "No", "Optional"]
@@ -603,7 +791,6 @@ if "db_initialized" not in st.session_state:
     execute_global_init()
     st.session_state.db_initialized = True
 
-# --- GLOBAL SHARED VARIABLES ---
 areas_df_global = load_table('areas')
 history_df_global = load_table('history')
 area_list_global = [""] + (areas_df_global['name'].drop_duplicates().tolist() if not areas_df_global.empty else [])
@@ -617,11 +804,6 @@ vehicles_global = load_table('vehicles')
 d_map_global = dict(zip(all_d['code'].dropna(), all_d['name'].dropna())) if not all_d.empty else {}
 h_map_global = dict(zip(all_h['code'].dropna(), all_h['name'].dropna())) if not all_h.empty else {}
 
-def repair_name(code, name, mapping):
-    if pd.notna(code) and code in mapping: return mapping[code]
-    if pd.notna(name) and str(name).strip() != "": return str(name).strip()
-    return str(code).strip() if pd.notna(code) else ""
-
 drv_codes_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_d['code'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"]
 drv_names_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_d['name'].dropna().unique().tolist() if not all_d.empty else ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"]
 hlp_codes_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_h['code'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"]
@@ -629,17 +811,12 @@ hlp_names_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_h['name'].d
 
 v_num_opts = ["UNASSIGNED", "N/A", "SHORTAGE", ""] + vehicles_global['number'].dropna().unique().tolist() if not vehicles_global.empty else ["UNASSIGNED", "N/A", "SHORTAGE", ""]
 
-def get_dynamic_opts(df, col_name, standard_opts):
-    opts = list(set(standard_opts + (df[col_name].dropna().tolist() if not df.empty and col_name in df.columns else [])))
-    return sorted([str(x) for x in opts if pd.notna(x) and str(x).strip() != ""]) + [""]
-
-# --- APP ROUTING ---
+# ==========================================
+# 4. APP ROUTING & UI LAYOUT
+# ==========================================
 menu = ["1. AI Route Planner", "2. Database Management", "3. Past Experience Builder", "4. Vacation Schedule"]
 choice = st.sidebar.radio("Navigate", menu)
 
-# ==========================================
-# SCREEN 1: AI ROUTE PLANNER
-# ==========================================
 if choice == "1. AI Route Planner":
     
     st.subheader("📊 Today's Availability Dashboard")
@@ -648,6 +825,7 @@ if choice == "1. AI Route Planner":
     
     vac_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
     avail_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_d.empty else []
+    solo_d_names = [f"[{r['code']}] {r['name']}" for _, r in all_d.iterrows() if (not is_on_vacation(r['code'], today, vac_cache)) and ((r.get('needs_helper', 'Yes') == 'No') or (unify_text(r.get('veh_type', '')) in ['BUS', '2-8 VAN']))] if not all_d.empty else []
     
     vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
     avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
@@ -661,6 +839,7 @@ if choice == "1. AI Route Planner":
     extra_d_names = [n for n in avail_d_names if n.split("]")[0][1:] not in assigned_d]
     extra_h_names = [n for n in avail_h_names if n.split("]")[0][1:] not in assigned_h]
 
+    # STRCIT SHORTAGE MATH: Only count areas that definitively say "Yes"
     strict_d_req = len(areas_df_global[areas_df_global['needs_driver'] == 'Yes'])
     strict_h_req = len(areas_df_global[areas_df_global['needs_helper'] == 'Yes'])
 
