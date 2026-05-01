@@ -636,6 +636,26 @@ def build_vacation_cache():
                 vac_cache[code].append((s_val, e_val))
     return vac_cache
 
+def is_on_vacation(person_code, target_date, vac_cache):
+    target_str = target_date.strftime("%Y-%m-%d")
+    for start, end in vac_cache.get(person_code, []):
+        if start <= target_str <= end: return True
+    return False
+
+def vacation_within_3_months(person_code, target_date, vac_cache):
+    limit_date = (target_date + timedelta(days=90)).strftime("%Y-%m-%d")
+    target_str = target_date.strftime("%Y-%m-%d")
+    for start, end in vac_cache.get(person_code, []):
+        if target_str < start <= limit_date: return parse_date_safe(start)
+    return None
+
+def months_until_next_vacation(person_code, vac_cache, target_date):
+    target_str = target_date.strftime("%Y-%m-%d")
+    past_vacs = [end for start, end in vac_cache.get(person_code, []) if end < target_str]
+    if not past_vacs: return 0 
+    last_vac = max(past_vacs)
+    days_since = (target_date - datetime.strptime(last_vac, "%Y-%m-%d").date()).days
+    return max(0, 365 - days_since) / 30.0
 
 # --- WEIGHTED AI SCORING ALGORITHM ---
 NEVER_WORKED_BONUS = 10000
@@ -906,6 +926,7 @@ if choice == "1. AI Route Planner":
             "drv_repl_date": "Drv Repl Date", "hlp_repl_date": "Hlp Repl Date"
         })
         
+        # Repair Names so they strictly match Options and never disappear
         if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
         if "helper_code" in disp_draft.columns: disp_draft["Helper Code"] = disp_draft["helper_code"]
         
