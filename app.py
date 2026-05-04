@@ -837,6 +837,7 @@ if choice == "1. AI Route Planner":
     vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
     avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
 
+    # EXACT MANDATORY MATH
     mandatory_d_areas = areas_df_global[areas_df_global['needs_driver'] == 'Yes']['name'].apply(unify_text).tolist()
     mandatory_h_areas = areas_df_global[areas_df_global['needs_helper'] == 'Yes']['name'].apply(unify_text).tolist()
 
@@ -1471,6 +1472,8 @@ if choice == "1. AI Route Planner":
                     p_v_num = reserved_vehicles.get(area_name, 'UNASSIGNED')
 
                     d_code, d_name = "UNASSIGNED", "UNASSIGNED"
+                    warnings_inline = []
+
                     if nd == 'No':
                         d_code, d_name = "N/A", "N/A"
                     elif nd == 'Optional':
