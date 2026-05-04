@@ -277,6 +277,38 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
 
     return score, " | ".join(reasons)
 
+def check_route_requirements(areas_df, drivers_df, helpers_df, vehicles_df, vac_cache, today_date):
+    errors = []
+    req_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
+    for _, area in areas_df.iterrows():
+        if area.get('needs_driver', 'Yes') == 'No': continue
+        sec = unify_text(area.get('sector', ''))
+        name = unify_text(area.get('name', ''))
+        if "2-8" in sec or "COLD CHAIN" in name.upper(): req_veh["2-8 VAN"] += 1
+        elif "Govt" in sec or "GOVT" in name.upper(): req_veh["BUS"] += 1
+        elif "Pick-Up" in sec or "PICK UP" in name.upper(): req_veh["PICK-UP"] += 1
+        else: req_veh["VAN"] += 1
+            
+    avail_veh = {"VAN": 0, "PICK-UP": 0, "BUS": 0, "2-8 VAN": 0}
+    active_vehicles_df = vehicles_df[~vehicles_df.get('status', 'Active').str.contains('Under Service|In for Service', case=False, na=False)]
+    for _, v in active_vehicles_df.iterrows():
+        vtype = unify_text(v.get('type', 'VAN'))
+        if vtype in avail_veh: avail_veh[vtype] += 1
+        elif vtype == "VAN / PICK-UP":
+            avail_veh["VAN"] += 1
+            avail_veh["PICK-UP"] += 1
+        
+    for vtype, required in req_veh.items():
+        if avail_veh[vtype] < required:
+            errors.append(f"🚗 Missing **{vtype}** Vehicles: Route strictly needs **{required}**, but you only have **{avail_veh[vtype]}** active.")
+
+    strict_d_req = len(areas_df[areas_df['needs_driver'] == 'Yes'])
+    avail_d = len([1 for _, r in drivers_df.iterrows() if not is_on_vacation(r['code'], today_date, vac_cache)])
+    if avail_d < strict_d_req:
+        errors.append(f"🚛 Missing Drivers: Route strictly needs **{strict_d_req}** active drivers, but you only have **{avail_d}**.")
+        
+    return errors
+
 def generate_excel_with_sn(df_list, sheet_names):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -798,7 +830,7 @@ if choice == "1. AI Route Planner":
     vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
     avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
 
-    # TRUE MATHEMATICAL DASHBOARD
+    # STRICT SHORTAGE MATH: Only count areas that definitively say "Yes"
     strict_d_req = len(areas_df_global[areas_df_global['needs_driver'] == 'Yes'])
     strict_h_req = len(areas_df_global[areas_df_global['needs_helper'] == 'Yes'])
 
@@ -1277,7 +1309,7 @@ if choice == "1. AI Route Planner":
                         
                 driver_anchors_map = {}
                 for _, temp_d in all_d.iterrows():
-                    anchs = [v.strip().upper() for v in str(temp_d.get('anchor_vehicle', '')).split(',') if v.strip()]
+                    anchs = [v.strip().upper() for v in str(temp_d.get('anchor_area', '')).split(',') if v.strip()]
                     if "NONE" in anchs: anchs.remove("NONE")
                     if "" in anchs: anchs.remove("")
                     if anchs:
@@ -1312,6 +1344,20 @@ if choice == "1. AI Route Planner":
                 def get_best_candidate(pool_df, used_set, area_row, r_veh, r_sec, role, hc_assigned=0):
                     avail = pool_df[~pool_df['code'].isin(used_set)]
                     if avail.empty: return None, 0, "No available staff"
+                    
+                    # Exclude people who are anchored strictly somewhere else
+                    def is_valid_anchor(cand):
+                        anc_str = str(cand.get('anchor_area', ''))
+                        if not anc_str.strip(): return True
+                        anc_list = [a.strip().upper() for a in anc_str.split(',') if a.strip()]
+                        if "NONE" in anc_list: anc_list.remove("NONE")
+                        if not anc_list: return True
+                        check_list = [unify_text(area_row['name']).upper(), unify_text(r_sec).upper(), unify_text(r_veh).upper()]
+                        return any(any(anc in chk or chk in anc for chk in check_list) for anc in anc_list)
+
+                    avail = avail[avail.apply(is_valid_anchor, axis=1)]
+                    if avail.empty: return None, 0, "No valid unanchored staff available"
+
                     best_cand = None
                     best_score = -999999
                     best_rsn = ""
@@ -1356,7 +1402,7 @@ if choice == "1. AI Route Planner":
                     if nd == 'No':
                         d_code, d_name = "N/A", "N/A"
                     elif nd == 'Optional':
-                        d_code, d_name = "OPTIONAL", "OPTIONAL"
+                        d_code, d_name = "PENDING_OPTIONAL", "PENDING_OPTIONAL"
                     else: # Yes
                         if rot_type == "Helpers" and p_d_code in avail_d_pool['code'].values and p_d_code not in used_drivers:
                             d_code = p_d_code
@@ -1380,7 +1426,7 @@ if choice == "1. AI Route Planner":
                                     d_code, d_name = "SHORTAGE", "SHORTAGE"
 
                     # Check helper override based on new driver
-                    if d_code not in ["N/A", "SHORTAGE", "OPTIONAL", "UNASSIGNED"]:
+                    if d_code not in ["N/A", "SHORTAGE", "PENDING_OPTIONAL", "UNASSIGNED"]:
                         d_row_chk = all_d[all_d['code'] == d_code]
                         if not d_row_chk.empty and str(d_row_chk.iloc[0].get('needs_helper')).strip() == 'No':
                             nh = 'No'
@@ -1389,7 +1435,7 @@ if choice == "1. AI Route Planner":
                     if nh == 'No' or d_code == 'N/A':
                         h_code, h_name = "N/A", "N/A"
                     elif nh == 'Optional':
-                        h_code, h_name = "OPTIONAL", "OPTIONAL"
+                        h_code, h_name = "PENDING_OPTIONAL", "PENDING_OPTIONAL"
                     else: # Yes
                         if d_code == "SHORTAGE":
                             h_code, h_name = "SHORTAGE", "SHORTAGE"
@@ -1425,7 +1471,7 @@ if choice == "1. AI Route Planner":
                         match_v = active_v_pool[active_v_pool['number'] == p_v_num]
                         v_perm = match_v.iloc[0]['permitted_areas'] if not match_v.empty else "All"
                         used_vehicles.add(v_num)
-                    else:
+                    elif d_code not in ["PENDING_OPTIONAL", "UNASSIGNED", ""]:
                         avail_v = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
                         type_match = avail_v[avail_v['type'].str.contains(req_veh.replace("2-8 VAN", "VAN"), case=False, na=False)]
                         if not type_match.empty:
@@ -1448,19 +1494,18 @@ if choice == "1. AI Route Planner":
 
                 # --- PASS 2: Assign Extras to 'Optional' Slots ---
                 for rp in temp_plan:
+                    area_obj = areas[areas['name'] == rp['AREA']].iloc[0]
+                    
                     if rp['Needs Driver'] == 'Optional':
-                        if rp['Driver Code'] == 'OPTIONAL':
-                            if rot_type == "Helpers" and rp['Prev D'] in avail_d_pool['code'].values and rp['Prev D'] not in used_drivers:
-                                rp['Driver Code'] = rp['Prev D']
-                                rp['Drivers Name'] = prev_assignments[rp['AREA']].get('driver_name', rp['Prev D'])
-                                used_drivers.add(rp['Driver Code'])
+                        if rp['Driver Code'] == 'PENDING_OPTIONAL':
+                            best_d, d_scr, d_rsn = get_best_candidate(avail_d_pool, used_drivers, area_obj, rp['Req Veh'], rp['Sector'], "Driver")
+                            if best_d is not None:
+                                rp['Driver Code'], rp['Drivers Name'] = best_d['code'], best_d['name']
+                                used_drivers.add(best_d['code'])
+                                reason_data.append((p_s_gen, rp['AREA'], "Driver", rp['Drivers Name'], d_scr, "Surplus Optional Fill: " + d_rsn, timestamp))
+                                reason_dicts.append({"plan_date":p_s_gen, "area":rp['AREA'], "role":"Driver", "selected_person":rp['Drivers Name'], "score":d_scr, "reasons":"Surplus Optional Fill: " + d_rsn, "generated_at":timestamp})
                             else:
-                                best_d, d_scr, d_rsn = get_best_candidate(avail_d_pool, used_drivers, areas[areas['name']==rp['AREA']].iloc[0], rp['Req Veh'], rp['Sector'], "Driver")
-                                if best_d is not None:
-                                    rp['Driver Code'], rp['Drivers Name'] = best_d['code'], best_d['name']
-                                    used_drivers.add(best_d['code'])
-                                    reason_data.append((p_s_gen, rp['AREA'], "Driver", rp['Drivers Name'], d_scr, "Surplus Optional Fill: " + d_rsn, timestamp))
-                                    reason_dicts.append({"plan_date":p_s_gen, "area":rp['AREA'], "role":"Driver", "selected_person":rp['Drivers Name'], "score":d_scr, "reasons":"Surplus Optional Fill: " + d_rsn, "generated_at":timestamp})
+                                rp['Driver Code'], rp['Drivers Name'] = "OPTIONAL", "OPTIONAL"
 
                         if rp['Driver Code'] not in ["N/A", "OPTIONAL", "SHORTAGE"] and rp['VEH NO'] in ["UNASSIGNED", ""]:
                             avail_v = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
@@ -1469,25 +1514,23 @@ if choice == "1. AI Route Planner":
                                 rp['Permitted Areas'] = avail_v.iloc[0]['permitted_areas']
                                 used_vehicles.add(rp['VEH NO'])
 
-                    if rp['Driver Code'] not in ["N/A", "SHORTAGE", "OPTIONAL", "UNASSIGNED"]:
+                    if rp['Driver Code'] not in ["N/A", "SHORTAGE", "OPTIONAL", "UNASSIGNED", "PENDING_OPTIONAL"]:
                         d_row = all_d[all_d['code'] == rp['Driver Code']]
                         if not d_row.empty and str(d_row.iloc[0].get('needs_helper')).strip() == 'No':
                             rp['Needs Helper'] = 'No'
+                            rp['Helper Code'] = 'N/A'
+                            rp['Helpers Name'] = 'N/A'
 
                     if rp['Needs Helper'] == 'Optional':
-                        if rp['Helper Code'] == 'OPTIONAL':
-                            if rot_type == "Drivers" and rp['Prev H'] in avail_h_pool['code'].values and rp['Prev H'] not in used_helpers:
-                                rp['Helper Code'] = rp['Prev H']
-                                rp['Helpers Name'] = prev_assignments[rp['AREA']].get('helper_name', rp['Prev H'])
-                                used_helpers.add(rp['Helper Code'])
+                        if rp['Helper Code'] == 'PENDING_OPTIONAL':
+                            best_h, h_scr, h_rsn = get_best_candidate(avail_h_pool, used_helpers, area_obj, rp['Req Veh'], rp['Sector'], "Helper", consumer_hc_assigned)
+                            if best_h is not None:
+                                rp['Helper Code'], rp['Helpers Name'] = best_h['code'], best_h['name']
+                                used_helpers.add(best_h['code'])
+                                reason_data.append((p_s_gen, rp['AREA'], "Helper", rp['Helpers Name'], h_scr, "Surplus Optional Fill: " + h_rsn, timestamp))
+                                reason_dicts.append({"plan_date":p_s_gen, "area":rp['AREA'], "role":"Helper", "selected_person":rp['Helpers Name'], "score":h_scr, "reasons":"Surplus Optional Fill: " + h_rsn, "generated_at":timestamp})
                             else:
-                                best_h, h_scr, h_rsn = get_best_candidate(avail_h_pool, used_helpers, areas[areas['name']==rp['AREA']].iloc[0], rp['Req Veh'], rp['Sector'], "Helper", consumer_hc_assigned)
-                                if best_h is not None:
-                                    rp['Helper Code'], rp['Helpers Name'] = best_h['code'], best_h['name']
-                                    used_helpers.add(best_h['code'])
-                                    reason_data.append((p_s_gen, rp['AREA'], "Helper", rp['Helpers Name'], h_scr, "Surplus Optional Fill: " + h_rsn, timestamp))
-                                    reason_dicts.append({"plan_date":p_s_gen, "area":rp['AREA'], "role":"Helper", "selected_person":rp['Helpers Name'], "score":h_scr, "reasons":"Surplus Optional Fill: " + h_rsn, "generated_at":timestamp})
-
+                                rp['Helper Code'], rp['Helpers Name'] = "OPTIONAL", "OPTIONAL"
 
                 # --- PASS 3: Vacation Replacements & Finalization ---
                 route_plan = []
@@ -1496,11 +1539,18 @@ if choice == "1. AI Route Planner":
                     h_repl_c, h_repl_n, h_repl_dt = "", "", ""
                     warnings = []
 
-                    if rp['Driver Code'] not in ["N/A", "OPTIONAL", "SHORTAGE", "UNASSIGNED"]:
+                    if rp['Driver Code'] not in ["N/A", "OPTIONAL", "SHORTAGE", "UNASSIGNED", "PENDING_OPTIONAL"]:
                         vac_start = vacation_within_3_months(rp['Driver Code'], month_target, vac_cache)
                         if vac_start:
                             d_repl_dt = vac_start
                             assigned_d_row = all_d[all_d['code'] == rp['Driver Code']].iloc[0]
+                            
+                            is_anchored = False
+                            d_anchors = [unify_text(a).upper() for a in str(assigned_d_row.get('anchor_area', '')).split(',') if a.strip()]
+                            if "NONE" in d_anchors: d_anchors.remove("NONE")
+                            if "" in d_anchors: d_anchors.remove("")
+                            if d_anchors: is_anchored = True
+
                             pref_repl = str(assigned_d_row.get('replacement_person', '')).strip()
                             repl_d = None
                             
@@ -1509,7 +1559,7 @@ if choice == "1. AI Route Planner":
                                 if not pref_match.empty and pref_repl not in used_drivers and not is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
                                     repl_d = pref_match.iloc[0]
                             
-                            if repl_d is None:
+                            if repl_d is None and not is_anchored:
                                 valid_ret = [rd for rd in returning_d if rd['avail_date'] <= vac_start and rd['code'] not in used_drivers]
                                 if valid_ret:
                                     repl_d = all_d[all_d['code'] == valid_ret[0]['code']].iloc[0]
@@ -1530,11 +1580,18 @@ if choice == "1. AI Route Planner":
                         tot_exp = get_total_exp(rp['Driver Code'], rp['AREA'], history_df_global)
                         if tot_exp < 30: warnings.append("⚠️ Driver New")
 
-                    if rp['Helper Code'] not in ["N/A", "OPTIONAL", "SHORTAGE", "UNASSIGNED"]:
+                    if rp['Helper Code'] not in ["N/A", "OPTIONAL", "SHORTAGE", "UNASSIGNED", "PENDING_OPTIONAL"]:
                         vac_start = vacation_within_3_months(rp['Helper Code'], month_target, vac_cache)
                         if vac_start:
                             h_repl_dt = vac_start
                             assigned_h_row = all_h[all_h['code'] == rp['Helper Code']].iloc[0]
+
+                            is_anchored = False
+                            h_anchors = [unify_text(a).upper() for a in str(assigned_h_row.get('anchor_area', '')).split(',') if a.strip()]
+                            if "NONE" in h_anchors: h_anchors.remove("NONE")
+                            if "" in h_anchors: h_anchors.remove("")
+                            if h_anchors: is_anchored = True
+
                             pref_repl = str(assigned_h_row.get('replacement_person', '')).strip()
                             repl_h = None
                             
@@ -1543,7 +1600,7 @@ if choice == "1. AI Route Planner":
                                 if not pref_match.empty and pref_repl not in used_helpers and not is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
                                     repl_h = pref_match.iloc[0]
                             
-                            if repl_h is None:
+                            if repl_h is None and not is_anchored:
                                 valid_ret = [rh for rh in returning_h if rh['avail_date'] <= vac_start and rh['code'] not in used_helpers]
                                 if valid_ret:
                                     repl_h = all_h[all_h['code'] == valid_ret[0]['code']].iloc[0]
