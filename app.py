@@ -830,18 +830,35 @@ if choice == "1. AI Route Planner":
     vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
     avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
 
-    # STRICT SHORTAGE MATH: Only count areas that definitively say "Yes"
-    strict_d_req = len(areas_df_global[areas_df_global['needs_driver'] == 'Yes'])
-    strict_h_req = len(areas_df_global[areas_df_global['needs_helper'] == 'Yes'])
+    # EXACT MANDATORY MATH
+    mandatory_d_areas = areas_df_global[areas_df_global['needs_driver'] == 'Yes']['name'].apply(unify_text).tolist()
+    mandatory_h_areas = areas_df_global[areas_df_global['needs_helper'] == 'Yes']['name'].apply(unify_text).tolist()
+
+    draft_routes = load_table('draft_routes')
+    active_routes = load_table('active_routes')
+    active_draft_df = draft_routes if not draft_routes.empty else active_routes
+
+    if not active_draft_df.empty:
+        assigned_d = active_draft_df[active_draft_df['area_name'].apply(unify_text).isin(mandatory_d_areas)]['driver_code'].dropna().tolist()
+        assigned_h = active_draft_df[active_draft_df['area_name'].apply(unify_text).isin(mandatory_h_areas)]['helper_code'].dropna().tolist()
+    else:
+        assigned_d = []
+        assigned_h = []
+        
+    extra_d_names = [n for n in avail_d_names if n.split("]")[0][1:] not in assigned_d]
+    extra_h_names = [n for n in avail_h_names if n.split("]")[0][1:] not in assigned_h]
+
+    strict_d_req = len(mandatory_d_areas)
+    strict_h_req = len(mandatory_h_areas)
 
     avail_d_count = len(avail_d_names)
     avail_h_count = len(avail_h_names)
 
-    d_shortage = max(0, strict_d_req - avail_d_count)
-    h_shortage = max(0, strict_h_req - avail_h_count)
-
     extra_d_count = max(0, avail_d_count - strict_d_req)
     extra_h_count = max(0, avail_h_count - strict_h_req)
+
+    d_shortage = max(0, strict_d_req - avail_d_count)
+    h_shortage = max(0, strict_h_req - avail_h_count)
 
     col_a, col_e1, col_b, col_e2, col_c = st.columns(5)
     
@@ -855,7 +872,9 @@ if choice == "1. AI Route Planner":
 
     with col_e1:
         st.metric("🚛 Extra Drivers (Surplus)", f"{extra_d_count}")
-        st.caption("Available beyond mandatory 'Yes' routes.")
+        with st.popover("🔍 View Extra Drivers"):
+            st.caption("Drivers available beyond mandatory 'Yes' routes.")
+            st.selectbox("Surplus Drivers", extra_d_names if extra_d_names else ["None"])
 
     with col_b:
         st.metric("👤 Total Helpers Available", f"{avail_h_count} / {len(all_h)}")
@@ -867,7 +886,9 @@ if choice == "1. AI Route Planner":
             
     with col_e2:
         st.metric("👤 Extra Helpers (Surplus)", f"{extra_h_count}")
-        st.caption("Available beyond mandatory 'Yes' routes.")
+        with st.popover("🔍 View Extra Helpers"):
+            st.caption("Helpers available beyond mandatory 'Yes' routes.")
+            st.selectbox("Surplus Helpers", extra_h_names if extra_h_names else ["None"])
 
     with col_c:
         if h_shortage > 0 or d_shortage > 0:
@@ -882,9 +903,6 @@ if choice == "1. AI Route Planner":
     st.divider()
 
     # --- ROUTE PLANS ---
-    draft_routes = load_table('draft_routes')
-    active_routes = load_table('active_routes')
-    
     if not draft_routes.empty:
         st.warning("✨ **DRAFT MODE**: This plan is NOT saved to History yet! You can manually edit any cell below, toggle what you want to save, and then Confirm to log experiences.")
         
@@ -1342,7 +1360,7 @@ if choice == "1. AI Route Planner":
                 returning_h.sort(key=lambda x: x['avail_date'])
 
                 def get_best_candidate(pool_df, used_set, area_row, r_veh, r_sec, role, hc_assigned=0):
-                    avail = pool_df[~pool_df['code'].isin(used_set)]
+                    avail = pool_df[~pool_df['code'].isin(used_set)].copy()
                     if avail.empty: return None, 0, "No available staff"
                     
                     # Exclude people who are anchored strictly somewhere else
@@ -1484,6 +1502,7 @@ if choice == "1. AI Route Planner":
                             used_vehicles.add(v_num)
 
                     temp_plan.append({
+                        "area_obj": area,
                         "Area Code": area_code, "AREA": area_name, "Sector": req_sector,
                         "Needs Driver": nd, "Needs Helper": nh, "Req Veh": req_veh,
                         "Driver Code": d_code, "Drivers Name": d_name,
@@ -1494,7 +1513,7 @@ if choice == "1. AI Route Planner":
 
                 # --- PASS 2: Assign Extras to 'Optional' Slots ---
                 for rp in temp_plan:
-                    area_obj = areas[areas['name'] == rp['AREA']].iloc[0]
+                    area_obj = rp['area_obj']
                     
                     if rp['Needs Driver'] == 'Optional':
                         if rp['Driver Code'] == 'PENDING_OPTIONAL':
