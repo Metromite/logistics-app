@@ -837,7 +837,6 @@ if choice == "1. AI Route Planner":
     vac_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
     avail_h_names = [f"[{r['code']}] {r['name']}" for _, r in all_h.iterrows() if not is_on_vacation(r['code'], today, vac_cache)] if not all_h.empty else []
 
-    # EXACT MANDATORY MATH
     mandatory_d_areas = areas_df_global[areas_df_global['needs_driver'] == 'Yes']['name'].apply(unify_text).tolist()
     mandatory_h_areas = areas_df_global[areas_df_global['needs_helper'] == 'Yes']['name'].apply(unify_text).tolist()
 
@@ -846,46 +845,56 @@ if choice == "1. AI Route Planner":
     active_draft_df = draft_routes if not draft_routes.empty else active_routes
 
     if not active_draft_df.empty:
-        assigned_d = active_draft_df['driver_code'].dropna().tolist()
+        curr_d_short = active_draft_df['driver_code'].tolist().count('SHORTAGE')
+        fut_d_short = active_draft_df['drv_repl_code'].tolist().count('SHORTAGE') if 'drv_repl_code' in active_draft_df.columns else 0
+        
+        curr_h_short = active_draft_df['helper_code'].tolist().count('SHORTAGE')
+        fut_h_short = active_draft_df['hlp_repl_code'].tolist().count('SHORTAGE') if 'hlp_repl_code' in active_draft_df.columns else 0
+        
+        assigned_d_primary = [x for x in active_draft_df['driver_code'].dropna().tolist() if x not in ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL", "PENDING_OPTIONAL", ""]]
+        assigned_h_primary = [x for x in active_draft_df['helper_code'].dropna().tolist() if x not in ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL", "PENDING_OPTIONAL", ""]]
+        
+        d_repl_map = {}
         if 'drv_repl_code' in active_draft_df.columns:
-            assigned_d.extend(active_draft_df['drv_repl_code'].dropna().tolist())
-            
-        assigned_h = active_draft_df['helper_code'].dropna().tolist()
+            for _, r in active_draft_df.iterrows():
+                c = str(r.get('drv_repl_code')).strip()
+                if c and c not in ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL", "PENDING_OPTIONAL", "None"]:
+                    d_repl_map[c] = str(r.get('drv_repl_date', ''))
+                    
+        h_repl_map = {}
         if 'hlp_repl_code' in active_draft_df.columns:
-            assigned_h.extend(active_draft_df['hlp_repl_code'].dropna().tolist())
+            for _, r in active_draft_df.iterrows():
+                c = str(r.get('hlp_repl_code')).strip()
+                if c and c not in ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL", "PENDING_OPTIONAL", "None"]:
+                    h_repl_map[c] = str(r.get('hlp_repl_date', ''))
     else:
-        assigned_d = []
-        assigned_h = []
-        
-    assigned_d = [x for x in assigned_d if x not in ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL", "PENDING_OPTIONAL", ""]]
-    assigned_h = [x for x in assigned_h if x not in ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL", "PENDING_OPTIONAL", ""]]
+        curr_d_short = max(0, len(mandatory_d_areas) - len(avail_d_names))
+        fut_d_short = 0
+        curr_h_short = max(0, len(mandatory_h_areas) - len(avail_h_names))
+        fut_h_short = 0
+        assigned_d_primary = []
+        assigned_h_primary = []
+        d_repl_map = {}
+        h_repl_map = {}
 
-    extra_d_names = [n for n in avail_d_names if n.split("]")[0][1:] not in assigned_d]
-    extra_h_names = [n for n in avail_h_names if n.split("]")[0][1:] not in assigned_h]
-
-    strict_d_req = len(mandatory_d_areas)
-    strict_h_req = len(mandatory_h_areas)
-
-    avail_d_count = len(avail_d_names)
-    avail_h_count = len(avail_h_names)
-
-    extra_d_count = len(extra_d_names)
-    extra_h_count = len(extra_h_names)
-
-    if not active_draft_df.empty:
-        d_shortage = active_draft_df['driver_code'].tolist().count('SHORTAGE')
-        if 'drv_repl_code' in active_draft_df.columns: d_shortage += active_draft_df['drv_repl_code'].tolist().count('SHORTAGE')
-        
-        h_shortage = active_draft_df['helper_code'].tolist().count('SHORTAGE')
-        if 'hlp_repl_code' in active_draft_df.columns: h_shortage += active_draft_df['hlp_repl_code'].tolist().count('SHORTAGE')
-    else:
-        d_shortage = max(0, strict_d_req - avail_d_count)
-        h_shortage = max(0, strict_h_req - avail_h_count)
+    extra_d_names = []
+    for n in avail_d_names:
+        code = n.split("]")[0][1:]
+        if code not in assigned_d_primary:
+            if code in d_repl_map: extra_d_names.append(f"{n} (Repl on {d_repl_map[code]})")
+            else: extra_d_names.append(n)
+            
+    extra_h_names = []
+    for n in avail_h_names:
+        code = n.split("]")[0][1:]
+        if code not in assigned_h_primary:
+            if code in h_repl_map: extra_h_names.append(f"{n} (Repl on {h_repl_map[code]})")
+            else: extra_h_names.append(n)
 
     col_a, col_e1, col_b, col_e2, col_c = st.columns(5)
     
     with col_a:
-        st.metric("🚛 Total Drivers Available", f"{avail_d_count} / {len(all_d)}")
+        st.metric("🚛 Total Drivers Available", f"{len(avail_d_names)} / {len(all_d)}")
         with st.popover("🔍 View Drivers"):
             st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
             if avail_d_names: st.markdown("**✅ Available:**<ol>" + "".join([f"<li>{n}</li>" for n in avail_d_names]) + "</ol>", unsafe_allow_html=True)
@@ -893,13 +902,13 @@ if choice == "1. AI Route Planner":
             st.markdown('</div>', unsafe_allow_html=True)
 
     with col_e1:
-        st.metric("🚛 Extra Drivers (Surplus)", f"{extra_d_count}")
+        st.metric("🚛 Extra Drivers (Surplus)", f"{len(extra_d_names)}")
         with st.popover("🔍 View Extra Drivers"):
-            st.caption("Drivers strictly unassigned everywhere.")
+            st.caption("Drivers currently free. Some may be scheduled as future replacements.")
             st.selectbox("Surplus Drivers", extra_d_names if extra_d_names else ["None"])
 
     with col_b:
-        st.metric("👤 Total Helpers Available", f"{avail_h_count} / {len(all_h)}")
+        st.metric("👤 Total Helpers Available", f"{len(avail_h_names)} / {len(all_h)}")
         with st.popover("🔍 View Helpers"):
             st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
             if avail_h_names: st.markdown("**✅ Available:**<ol>" + "".join([f"<li>{n}</li>" for n in avail_h_names]) + "</ol>", unsafe_allow_html=True)
@@ -907,18 +916,23 @@ if choice == "1. AI Route Planner":
             st.markdown('</div>', unsafe_allow_html=True)
             
     with col_e2:
-        st.metric("👤 Extra Helpers (Surplus)", f"{extra_h_count}")
+        st.metric("👤 Extra Helpers (Surplus)", f"{len(extra_h_names)}")
         with st.popover("🔍 View Extra Helpers"):
-            st.caption("Helpers strictly unassigned everywhere.")
+            st.caption("Helpers currently free. Some may be scheduled as future replacements.")
             st.selectbox("Surplus Helpers", extra_h_names if extra_h_names else ["None"])
 
     with col_c:
-        if h_shortage > 0 or d_shortage > 0:
-            st.metric("⚠️ Staff Shortage", f"D:-{d_shortage} | H:-{h_shortage}", delta_color="inverse")
+        total_d_short = curr_d_short + fut_d_short
+        total_h_short = curr_h_short + fut_h_short
+        
+        if total_d_short > 0 or total_h_short > 0:
+            st.metric("⚠️ Staff Shortage", f"D:-{curr_d_short} | H:-{curr_h_short}", delta_color="inverse")
             with st.popover("🚨 View Shortage Details"):
-                st.error(f"**Shortage Detected!**")
-                st.write(f"Strict Driver Routes: **{strict_d_req}** | Available: **{avail_d_count}**")
-                st.write(f"Strict Helper Routes: **{strict_h_req}** | Available: **{avail_h_count}**")
+                st.error("**Shortage Detected!**")
+                st.write(f"**Current Driver Shortage:** {curr_d_short}")
+                st.write(f"**Future Driver Shortage (Replacements):** {fut_d_short}")
+                st.write(f"**Current Helper Shortage:** {curr_h_short}")
+                st.write(f"**Future Helper Shortage (Replacements):** {fut_h_short}")
         else: 
             st.metric("✅ Route Status", "Sufficient Staff", delta_color="normal")
 
@@ -1359,7 +1373,7 @@ if choice == "1. AI Route Planner":
                         
                 driver_anchors_map = {}
                 for _, temp_d in all_d.iterrows():
-                    anchs = [v.strip().upper() for v in str(temp_d.get('anchor_vehicle', '')).split(',') if v.strip()]
+                    anchs = [v.strip().upper() for v in str(temp_d.get('anchor_area', '')).split(',') if v.strip()]
                     if "NONE" in anchs: anchs.remove("NONE")
                     if "" in anchs: anchs.remove("")
                     if anchs:
@@ -1396,8 +1410,7 @@ if choice == "1. AI Route Planner":
                     if avail.empty: return None, 0, "No available staff"
                     
                     def is_valid_anchor(cand):
-                        if str(cand.get('no_rotation', 'No')).strip().upper() == 'YES':
-                            return False
+                        if str(cand.get('no_rotation', 'No')).strip().upper() == 'YES': return False
                         anc_str = str(cand.get('anchor_area', ''))
                         if not anc_str.strip(): return True
                         anc_list = [a.strip().upper() for a in anc_str.split(',') if a.strip()]
@@ -1715,7 +1728,7 @@ if choice == "1. AI Route Planner":
                         "Driver Code": d_code, "Drivers Name": d_name,
                         "Helper Code": h_code, "Helpers Name": h_name,
                         "VEH NO": v_num, "Permitted Areas": v_perm, "Division Category": div_cat,
-                        "Prev D": p_d_code, "Prev H": p_h_code
+                        "Warnings": warnings_inline
                     })
 
                 # --- PASS 2: Assign Extras to 'Optional' Slots ---
@@ -1734,7 +1747,6 @@ if choice == "1. AI Route Planner":
                                 rp['Driver Code'], rp['Drivers Name'] = "OPTIONAL", "OPTIONAL"
 
                         if rp['Driver Code'] not in ["N/A", "OPTIONAL", "SHORTAGE"] and rp['VEH NO'] in ["UNASSIGNED", ""]:
-                            # Attempt to find a vehicle for the filled optional driver
                             a_d_code = rp['Driver Code']
                             d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                             tvt = rp['Req Veh'] if rp['Req Veh'] != "VAN" else unify_text(d_type)
@@ -1789,7 +1801,7 @@ if choice == "1. AI Route Planner":
                 for idx, rp in enumerate(temp_plan):
                     d_repl_c, d_repl_n, d_repl_dt = "", "", ""
                     h_repl_c, h_repl_n, h_repl_dt = "", "", ""
-                    warnings = []
+                    warnings = rp.get('Warnings', [])
 
                     if rp['Driver Code'] not in ["N/A", "OPTIONAL", "SHORTAGE", "UNASSIGNED", "PENDING_OPTIONAL"]:
                         vac_start = vacation_within_3_months(rp['Driver Code'], month_target, vac_cache)
@@ -1797,12 +1809,6 @@ if choice == "1. AI Route Planner":
                             d_repl_dt = vac_start
                             assigned_d_row = all_d[all_d['code'] == rp['Driver Code']].iloc[0]
                             
-                            is_anchored = False
-                            d_anchors = [unify_text(a).upper() for a in str(assigned_d_row.get('anchor_area', '')).split(',') if a.strip()]
-                            if "NONE" in d_anchors: d_anchors.remove("NONE")
-                            if "" in d_anchors: d_anchors.remove("")
-                            if d_anchors: is_anchored = True
-
                             pref_repl = str(assigned_d_row.get('replacement_person', '')).strip()
                             repl_d = None
                             
@@ -1811,7 +1817,7 @@ if choice == "1. AI Route Planner":
                                 if not pref_match.empty and pref_repl not in used_drivers and not is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
                                     repl_d = pref_match.iloc[0]
                             
-                            if repl_d is None and not is_anchored:
+                            if repl_d is None:
                                 valid_ret = [rd for rd in returning_d if rd['avail_date'] <= vac_start and rd['code'] not in used_drivers and is_free_for_replacement(rd['code'], all_d)]
                                 if valid_ret:
                                     repl_d = all_d[all_d['code'] == valid_ret[0]['code']].iloc[0]
@@ -1839,12 +1845,6 @@ if choice == "1. AI Route Planner":
                             h_repl_dt = vac_start
                             assigned_h_row = all_h[all_h['code'] == rp['Helper Code']].iloc[0]
 
-                            is_anchored = False
-                            h_anchors = [unify_text(a).upper() for a in str(assigned_h_row.get('anchor_area', '')).split(',') if a.strip()]
-                            if "NONE" in h_anchors: h_anchors.remove("NONE")
-                            if "" in h_anchors: h_anchors.remove("")
-                            if h_anchors: is_anchored = True
-
                             pref_repl = str(assigned_h_row.get('replacement_person', '')).strip()
                             repl_h = None
                             
@@ -1853,7 +1853,7 @@ if choice == "1. AI Route Planner":
                                 if not pref_match.empty and pref_repl not in used_helpers and not is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
                                     repl_h = pref_match.iloc[0]
                             
-                            if repl_h is None and not is_anchored:
+                            if repl_h is None:
                                 valid_ret = [rh for rh in returning_h if rh['avail_date'] <= vac_start and rh['code'] not in used_helpers and is_free_for_replacement(rh['code'], all_h)]
                                 if valid_ret:
                                     repl_h = all_h[all_h['code'] == valid_ret[0]['code']].iloc[0]
