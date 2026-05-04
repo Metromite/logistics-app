@@ -50,7 +50,7 @@ def unify_dataframe(df):
     df = df.fillna("") 
     target_cols = [
         'sector', 'division', 'type', 'veh_type', 'div_cat', 'person_type', 
-        'area', 'anchor_area', 'anchor_vehicle', 'permitted_areas', 'restriction', 
+        'area', 'anchor_area', 'anchor_vehicle', 'restriction', 
         'start_date', 'end_date', 'h_start_date', 'h_end_date', 'replacement_person',
         'drv_repl_code', 'drv_repl_date', 'hlp_repl_code', 'hlp_repl_date', 'warnings',
         'region', 'needs_driver', 'needs_helper', 'no_rotation'
@@ -400,7 +400,7 @@ def init_sqlite_db():
     c.execute('''CREATE TABLE IF NOT EXISTS default_drivers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, veh_type TEXT, sector TEXT, restriction TEXT, anchor_area TEXT, needs_helper TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS default_helpers (id INTEGER PRIMARY KEY, name TEXT, code TEXT UNIQUE, restriction TEXT, anchor_area TEXT, health_card TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS default_areas (id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT, sector TEXT, needs_helper TEXT, sort_order INTEGER, region TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS default_vehicles (id INTEGER PRIMARY KEY, number TEXT UNIQUE, type TEXT, anchor_area TEXT, status TEXT, permitted_areas TEXT, division TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS default_vehicles (id INTEGER PRIMARY KEY, number TEXT UNIQUE, type TEXT, anchor_area TEXT, status TEXT, division TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, person_type TEXT, person_code TEXT, person_name TEXT, area TEXT, date TEXT, end_date TEXT, sector TEXT)''')
     c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_history ON history(person_code, area, sector, date)''')
@@ -434,10 +434,8 @@ def init_sqlite_db():
         "ALTER TABLE default_areas ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
         "ALTER TABLE vehicles ADD COLUMN anchor_area TEXT DEFAULT ''",
         "ALTER TABLE vehicles ADD COLUMN status TEXT DEFAULT 'Active'",
-        "ALTER TABLE vehicles ADD COLUMN permitted_areas TEXT DEFAULT 'All'",
         "ALTER TABLE vehicles ADD COLUMN division TEXT DEFAULT 'Pharma'",
         "ALTER TABLE vehicles ADD COLUMN fb_id TEXT DEFAULT ''",
-        "ALTER TABLE active_routes ADD COLUMN veh_perm TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN h_start_date TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN h_end_date TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN drv_repl_code TEXT DEFAULT ''",
@@ -445,7 +443,6 @@ def init_sqlite_db():
         "ALTER TABLE active_routes ADD COLUMN hlp_repl_code TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN hlp_repl_date TEXT DEFAULT ''",
         "ALTER TABLE active_routes ADD COLUMN warnings TEXT DEFAULT ''",
-        "ALTER TABLE draft_routes ADD COLUMN veh_perm TEXT DEFAULT ''",
         "ALTER TABLE draft_routes ADD COLUMN h_start_date TEXT DEFAULT ''",
         "ALTER TABLE draft_routes ADD COLUMN h_end_date TEXT DEFAULT ''",
         "ALTER TABLE draft_routes ADD COLUMN drv_repl_code TEXT DEFAULT ''",
@@ -639,17 +636,14 @@ def load_table(table_name):
     if table_name == 'vehicles':
         if 'anchor_area' not in df.columns: df['anchor_area'] = ''
         if 'status' not in df.columns: df['status'] = 'Active'
-        if 'permitted_areas' not in df.columns: df['permitted_areas'] = 'All'
         if 'division' not in df.columns: df['division'] = 'Pharma'
-    if table_name == 'active_routes' and 'start_date' not in df.columns: df['start_date'] = ''
-    if table_name == 'draft_routes':
+    if table_name in ['active_routes', 'draft_routes']:
         if 'start_date' not in df.columns: df['start_date'] = ''
         if 'end_date' not in df.columns: df['end_date'] = ''
+        if 'order_num' in df.columns: 
+            df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
+            df = df.sort_values(by='order_num')
     if table_name == 'vacations' and 'person_code' not in df.columns: df['person_code'] = 'UNKNOWN'
-    
-    if table_name in ['active_routes', 'draft_routes'] and 'order_num' in df.columns: 
-        df['order_num'] = pd.to_numeric(df['order_num'], errors='coerce').fillna(99)
-        df = df.sort_values(by='order_num')
     
     if table_name in ['drivers', 'helpers']: df = df.drop_duplicates(subset=['code'], keep='first')
     if table_name == 'vehicles': df = df.drop_duplicates(subset=['number'], keep='first')
@@ -702,7 +696,7 @@ ROUTE_COLUMN_ORDER = [
     "S/N", "Area Code", "AREA", "Sector", 
     "Driver Code", "Drivers Name", "Drv Repl Name", "Drv Repl Date", 
     "Helper Code", "Helpers Name", "Hlp Repl Name", "Hlp Repl Date", 
-    "VEH NO", "Permitted Areas", "Division Category", "Warnings"
+    "VEH NO", "Division Category", "Warnings"
 ]
 
 KEEP_HELPERS = ["H116", "H131", "H121", "H119", "H046", "H070", "H129", "H113", "H132", "H118", "H115", "H122", "H114", "H066", "H011", "H005", "H023", "H050", "H062", "H051", "H104", "H130", "H034", "H013", "H109", "H024", "H026", "H049", "H099", "H082", "H017", "H126"]
@@ -750,6 +744,54 @@ SEED_AREAS_IMAGE = [
     ("CON-SUB", "SUBTITUTE / URGENT ORDERS", "Substitute", "No", 39, "Dubai")
 ]
 
+SEED_VEHICLES = [
+    ("49641", "VAN", "All", "Consumer"),
+    ("74850", "VAN", "All", "Consumer"),
+    ("74856", "VAN", "All", "Consumer"),
+    ("74854", "VAN", "All", "Consumer"),
+    ("31221", "VAN", "All", "Consumer"),
+    ("31238", "VAN", "All", "Consumer"),
+    ("76483", "VAN", "All", "Consumer"),
+    ("51745", "VAN", "All", "Consumer"),
+    ("74844", "VAN", "All", "Consumer"),
+    ("27743", "VAN", "All", "Consumer"),
+    ("49635", "VAN", "All", "Pharma"),
+    ("27891", "VAN", "All", "Pharma"),
+    ("31229", "VAN", "All", "Pharma"),
+    ("54082", "VAN", "All", "Pharma"),
+    ("31230", "VAN", "All", "Pharma"),
+    ("54093", "VAN", "All", "Pharma"),
+    ("11130", "VAN", "All", "Pharma"),
+    ("54095", "VAN", "All", "Pharma"),
+    ("80261", "VAN", "All", "Pharma"),
+    ("74843", "VAN", "All", "Pharma"),
+    ("80262", "VAN", "All", "Pharma"),
+    ("49645", "VAN", "All", "Pharma"),
+    ("80263", "VAN", "All", "Pharma"),
+    ("31237", "VAN", "All", "Pharma"),
+    ("49640", "VAN", "All", "Pharma"),
+    ("49639", "VAN", "All", "Pharma"),
+    ("74845", "VAN", "All", "Pharma"),
+    ("44723", "VAN", "All", "Pharma"),
+    ("31222", "VAN", "All", "Pharma"),
+    ("76479", "VAN", "All", "Pharma"),
+    ("49636", "VAN", "All", "Pharma"),
+    ("44558", "VAN", "All", "Pharma"),
+    ("76481", "VAN", "All", "Pharma"),
+    ("21019", "2-8 VAN", "All", "Pharma"),
+    ("96515", "2-8 VAN", "All", "Pharma"),
+    ("96530", "2-8 VAN", "All", "Pharma"),
+    ("5336", "BUS", "All", "Pharma"),
+    ("25121", "BUS", "All", "Pharma"),
+    ("25261", "BUS", "All", "Pharma"),
+    ("65147", "PICK-UP", "All", "Pharma"),
+    ("73516", "PICK-UP", "All", "Pharma"),
+    ("74311", "PICK-UP", "All", "Pharma"),
+    ("65377", "PICK-UP", "All", "Consumer"),
+    ("74320", "PICK-UP", "All", "Pharma"),
+    ("65146", "PICK-UP", "All", "Pharma")
+]
+
 if "db_initialized" not in st.session_state:
     def execute_global_init(force=False, load_default=False):
         try:
@@ -787,9 +829,9 @@ if "db_initialized" not in st.session_state:
 
             v_df = load_table('vehicles')
             if len(v_df) == 0:
-                v_seed = [(v_num, unify_text(v_type), permitted, unify_text(division), "", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
-                v_data = [{"number": v_num, "type": unify_text(v_type), "permitted_areas": permitted, "division": unify_text(division), "anchor_area": "", "status": "Active"} for v_num, v_type, permitted, division in SEED_VEHICLES]
-                run_query("INSERT OR IGNORE INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", v_seed, table_name="vehicles", action="INSERT_MANY", data=v_data, bypass_queue=bq)
+                v_seed = [(v_num, unify_text(v_type), unify_text(division), "", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
+                v_data = [{"number": v_num, "type": unify_text(v_type), "division": unify_text(division), "anchor_area": "", "status": "Active"} for v_num, v_type, permitted, division in SEED_VEHICLES]
+                run_query("INSERT OR IGNORE INTO vehicles (number, type, division, anchor_area, status) VALUES (?, ?, ?, ?, ?)", v_seed, table_name="vehicles", action="INSERT_MANY", data=v_data, bypass_queue=bq)
             
             st.cache_data.clear()
         except Exception as e:
@@ -892,10 +934,16 @@ if choice == "1. AI Route Planner":
             if code in h_repl_map: extra_h_names.append(f"{n} (Repl on {h_repl_map[code]})")
             else: extra_h_names.append(n)
 
+    avail_d_count = len(avail_d_names)
+    avail_h_count = len(avail_h_names)
+
+    extra_d_count = len(extra_d_names)
+    extra_h_count = len(extra_h_names)
+
     col_a, col_e1, col_b, col_e2, col_c = st.columns(5)
     
     with col_a:
-        st.metric("🚛 Total Drivers Available", f"{len(avail_d_names)} / {len(all_d)}")
+        st.metric("🚛 Total Drivers Available", f"{avail_d_count} / {len(all_d)}")
         with st.popover("🔍 View Drivers"):
             st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
             if avail_d_names: st.markdown("**✅ Available:**<ol>" + "".join([f"<li>{n}</li>" for n in avail_d_names]) + "</ol>", unsafe_allow_html=True)
@@ -903,13 +951,13 @@ if choice == "1. AI Route Planner":
             st.markdown('</div>', unsafe_allow_html=True)
 
     with col_e1:
-        st.metric("🚛 Extra Drivers (Surplus)", f"{len(extra_d_names)}")
+        st.metric("🚛 Extra Drivers (Surplus)", f"{extra_d_count}")
         with st.popover("🔍 View Extra Drivers"):
             st.caption("Drivers currently free. Some may be scheduled as future replacements.")
             st.selectbox("Surplus Drivers", extra_d_names if extra_d_names else ["None"])
 
     with col_b:
-        st.metric("👤 Total Helpers Available", f"{len(avail_h_names)} / {len(all_h)}")
+        st.metric("👤 Total Helpers Available", f"{avail_h_count} / {len(all_h)}")
         with st.popover("🔍 View Helpers"):
             st.markdown('<div style="max-height: 250px; overflow-y: auto;">', unsafe_allow_html=True)
             if avail_h_names: st.markdown("**✅ Available:**<ol>" + "".join([f"<li>{n}</li>" for n in avail_h_names]) + "</ol>", unsafe_allow_html=True)
@@ -917,7 +965,7 @@ if choice == "1. AI Route Planner":
             st.markdown('</div>', unsafe_allow_html=True)
             
     with col_e2:
-        st.metric("👤 Extra Helpers (Surplus)", f"{len(extra_h_names)}")
+        st.metric("👤 Extra Helpers (Surplus)", f"{extra_h_count}")
         with st.popover("🔍 View Extra Helpers"):
             st.caption("Helpers currently free. Some may be scheduled as future replacements.")
             st.selectbox("Surplus Helpers", extra_h_names if extra_h_names else ["None"])
@@ -965,10 +1013,7 @@ if choice == "1. AI Route Planner":
         if 'S/N' not in disp_draft.columns:
             disp_draft.insert(0, 'S/N', disp_draft.get('order_num', range(1, 1 + len(disp_draft))))
             
-        if 'veh_perm' in disp_draft.columns:
-            disp_draft = disp_draft.rename(columns={"veh_perm": "Permitted Areas"})
-        else:
-            disp_draft['Permitted Areas'] = "All"
+        disp_draft['Permitted Areas'] = "All"
             
         disp_draft = disp_draft.rename(columns={
             "area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", 
@@ -976,7 +1021,6 @@ if choice == "1. AI Route Planner":
             "drv_repl_date": "Drv Repl Date", "hlp_repl_date": "Hlp Repl Date"
         })
         
-        # Repair Names so they strictly match Options and never disappear
         if "driver_code" in disp_draft.columns: disp_draft["Driver Code"] = disp_draft["driver_code"]
         if "helper_code" in disp_draft.columns: disp_draft["Helper Code"] = disp_draft["helper_code"]
         
@@ -994,20 +1038,20 @@ if choice == "1. AI Route Planner":
         if "Save Hlp Exp" not in disp_draft.columns: disp_draft["Save Hlp Exp"] = True
         if "Warnings" not in disp_draft.columns: disp_draft["Warnings"] = ""
         
-        # Ensure new column variables exist
         for col in ["Drv Repl Name", "Drv Repl Date", "Hlp Repl Name", "Hlp Repl Date"]:
             if col not in disp_draft.columns: disp_draft[col] = ""
         
         if 'order_num' in disp_draft.columns:
             disp_draft = disp_draft.sort_values(by='order_num')
             
-        disp_draft = disp_draft[[c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns] + ["Save Drv Exp", "Save Hlp Exp"]]
+        final_disp_cols = [c for c in ROUTE_COLUMN_ORDER if c in disp_draft.columns and c != "Permitted Areas"] + ["Save Drv Exp", "Save Hlp Exp"]
+        disp_draft = disp_draft[final_disp_cols]
         
         st.caption("ℹ️ Uncheck 'Save Drv Exp' or 'Save Hlp Exp' to prevent logging history for that specific row/person.")
         edited_df = st.data_editor(
             disp_draft, 
             use_container_width=True, hide_index=True, key="route_editor", 
-            column_order=ROUTE_COLUMN_ORDER + ["Save Drv Exp", "Save Hlp Exp"],
+            column_order=final_disp_cols,
             column_config={
                 "Area Code": st.column_config.TextColumn(disabled=True),
                 "Driver Code": st.column_config.SelectboxColumn("CODE", options=drv_codes_opts),
@@ -1075,10 +1119,10 @@ if choice == "1. AI Route Planner":
                 else: h_repl_c = h_repl_n if pd.notna(h_repl_n) else ""
 
                 a_code_val = r.get('Area Code', '')
-                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, d_repl_c, r.get('Drv Repl Date', ''), h_repl_c, r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
-                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', ''), "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":r.get('Drv Repl Date', ''), "hlp_repl_code":h_repl_c, "hlp_repl_date":r.get('Hlp Repl Date', ''), "warnings":r.get('Warnings', '')})
+                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, h_p_s, h_p_e, d_repl_c, r.get('Drv Repl Date', ''), h_repl_c, r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
+                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":r.get('Drv Repl Date', ''), "hlp_repl_code":h_repl_c, "hlp_repl_date":r.get('Hlp Repl Date', ''), "warnings":r.get('Warnings', '')})
                 
-            q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY", data=new_dicts)
             st.success("Draft Saved Successfully!")
             st.rerun()
@@ -1161,8 +1205,8 @@ if choice == "1. AI Route Planner":
                 h_repl_d = parse_date_safe(r.get('Hlp Repl Date', ''))
                 warnings_str = str(r.get('Warnings', ''))
                 
-                active_data.append((sn_val, a_code_val, r.get('AREA', ''), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), p_s, p_e, r.get('Permitted Areas', ''), h_p_s, h_p_e, d_repl_c, d_repl_d, h_repl_c, h_repl_d, warnings_str))
-                active_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e, "veh_perm":r.get('Permitted Areas', ''), "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":d_repl_d, "hlp_repl_code":h_repl_c, "hlp_repl_date":h_repl_d, "warnings":warnings_str})
+                active_data.append((sn_val, a_code_val, r.get('AREA', ''), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), p_s, p_e, h_p_s, h_p_e, d_repl_c, d_repl_d, h_repl_c, h_repl_d, warnings_str))
+                active_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e, "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":d_repl_d, "hlp_repl_code":h_repl_c, "hlp_repl_date":h_repl_d, "warnings":warnings_str})
                 
                 save_drv = r.get('Save Drv Exp', True)
                 save_hlp = r.get('Save Hlp Exp', True)
@@ -1202,7 +1246,7 @@ if choice == "1. AI Route Planner":
                     else:
                         try_add_exp("Helper", str(h_code).strip(), str(h_name).strip(), area_name, sec_val, h_p_s, h_p_e)
             
-            q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            q_ar = "INSERT INTO active_routes (order_num, area_code, area_name, driver_code, driver_name, helper_code, helper_name, veh_num, start_date, end_date, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_ar, active_data, table_name="active_routes", action="INSERT_MANY", data=active_dicts)
             
             if hist_data:
@@ -1232,11 +1276,6 @@ if choice == "1. AI Route Planner":
             sector_map = dict(zip(areas['name'], areas['sector']))
             active_with_sector['Sector'] = active_with_sector['area_name'].map(sector_map).fillna("Pharma")
             
-        if 'veh_perm' in active_with_sector.columns:
-            active_with_sector = active_with_sector.rename(columns={"veh_perm": "Permitted Areas"})
-        else:
-            active_with_sector['Permitted Areas'] = "All"
-            
         disp_active = active_with_sector.rename(columns={
             "area_code": "Area Code", "area_name": "AREA", "veh_num": "VEH NO", 
             "driver_name": "Drivers Name", "driver_code": "Driver Code", 
@@ -1263,7 +1302,7 @@ if choice == "1. AI Route Planner":
         if 'order_num' in disp_active.columns:
             disp_active = disp_active.sort_values(by='order_num')
             
-        display_cols = [c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns]
+        display_cols = [c for c in ROUTE_COLUMN_ORDER if c in disp_active.columns and c != "Permitted Areas"]
         disp_active = disp_active[display_cols]
         if 'S/N' not in disp_active.columns: disp_active.insert(0, 'S/N', range(1, 1 + len(disp_active)))
         
@@ -1284,7 +1323,7 @@ if choice == "1. AI Route Planner":
     else:
         st.subheader("📋 Route Plan Dashboard")
         st.info("No Active or Draft routes exist. Generate an AI route below.")
-        display_cols = [c for c in ROUTE_COLUMN_ORDER if c not in ["Save Drv Exp", "Save Hlp Exp"]]
+        display_cols = [c for c in ROUTE_COLUMN_ORDER if c not in ["Save Drv Exp", "Save Hlp Exp", "Permitted Areas"]]
         empty_df = pd.DataFrame(columns=display_cols)
         st.dataframe(empty_df, use_container_width=True, hide_index=True, column_config={"Area Code": st.column_config.TextColumn(disabled=True), "Driver Code": "CODE", "Helper Code": "CODE"})
 
@@ -1612,23 +1651,21 @@ if choice == "1. AI Route Planner":
                                     reason_data.append((p_s_gen, area_name, "Helper", h_name, 0.0, "SHORTAGE", timestamp))
                                     reason_dicts.append({"plan_date":p_s_gen, "area":area_name, "role":"Helper", "selected_person":h_name, "score":0.0, "reasons":"SHORTAGE", "generated_at":timestamp})
 
-                    v_num, v_perm = "UNASSIGNED", "All"
+                    v_num = "UNASSIGNED"
                     should_keep_vehicle = False
                     if p_v_num not in ["UNASSIGNED"]:
                         if rot_type == "Helpers":
                             should_keep_vehicle = True
 
                     if d_code == "N/A" and nd == 'No':
-                        v_num, v_perm = "N/A", "N/A"
+                        v_num = "N/A"
                     elif d_code == "SHORTAGE":
-                        v_num, v_perm = "UNASSIGNED", "All"
+                        v_num = "UNASSIGNED"
                     elif should_keep_vehicle and p_v_num not in used_vehicles:
                         v_num = p_v_num
-                        match_v = active_v_pool[active_v_pool['number'] == p_v_num]
-                        v_perm = match_v.iloc[0]['permitted_areas'] if not match_v.empty else "All"
                         used_vehicles.add(v_num)
                     elif d_code in ["UNASSIGNED", "OPTIONAL", "PENDING_OPTIONAL", ""]:
-                        v_num, v_perm = "UNASSIGNED", "All"
+                        v_num = "UNASSIGNED"
                     else:
                         d_type = all_d[all_d['code'] == d_code]['veh_type'].values[0] if not all_d[all_d['code'] == d_code].empty else "VAN"
                         tvt = req_veh if req_veh != "VAN" else unify_text(d_type)
@@ -1666,12 +1703,6 @@ if choice == "1. AI Route Planner":
                                 else:
                                     continue 
                             
-                            v_perm_str = unify_text(v.get('permitted_areas', 'All'))
-                            v_perm_chk = v_perm_str.upper()
-                            a_reg = unify_text(area.get('region', 'Dubai')).upper()
-                            if v_perm_chk != "ALL" and a_reg not in v_perm_chk and v_perm_chk not in a_reg:
-                                continue 
-                            
                             v_type = unify_text(v.get('type', 'VAN')).upper()
                             type_match = False
                             if v_type == tvt.upper(): type_match = True
@@ -1690,15 +1721,14 @@ if choice == "1. AI Route Planner":
                                 if not any(any(anc in chk or chk in anc for chk in check_list) for anc in v_anchors):
                                     continue
                                     
-                            if is_area_anchored: potential_vs.append((v, 2000 + div_score))
-                            elif is_drv_anchored: potential_vs.append((v, 1500 + div_score))
+                            if is_area_anchored: potential_vs.append((v, 5000 + div_score))
+                            elif is_drv_anchored: potential_vs.append((v, 2000 + div_score))
                             else: potential_vs.append((v, 100 + div_score)) 
 
                         potential_vs.sort(key=lambda x: x[1], reverse=True)
 
                         if potential_vs:
                             v_num = potential_vs[0][0]['number']
-                            v_perm = potential_vs[0][0]['permitted_areas']
                             used_vehicles.add(v_num)
                         else:
                             fallback_vs = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
@@ -1718,11 +1748,9 @@ if choice == "1. AI Route Planner":
                             
                             if not fallback_vs.empty:
                                 v_num = fallback_vs.iloc[0]['number']
-                                v_perm = fallback_vs.iloc[0]['permitted_areas']
                                 used_vehicles.add(v_num)
                             else:
                                 v_num = "UNASSIGNED"
-                                v_perm = "All"
 
                     temp_plan.append({
                         "area_obj": area,
@@ -1730,7 +1758,7 @@ if choice == "1. AI Route Planner":
                         "Needs Driver": nd, "Needs Helper": nh, "Req Veh": req_veh,
                         "Driver Code": d_code, "Drivers Name": d_name,
                         "Helper Code": h_code, "Helpers Name": h_name,
-                        "VEH NO": v_num, "Permitted Areas": v_perm, "Division Category": div_cat,
+                        "VEH NO": v_num, "Division Category": div_cat,
                         "Warnings": warnings_inline
                     })
 
@@ -1750,6 +1778,7 @@ if choice == "1. AI Route Planner":
                                 rp['Driver Code'], rp['Drivers Name'] = "OPTIONAL", "OPTIONAL"
 
                         if rp['Driver Code'] not in ["N/A", "OPTIONAL", "SHORTAGE"] and rp['VEH NO'] in ["UNASSIGNED", ""]:
+                            # Attempt to find a vehicle for the filled optional driver
                             a_d_code = rp['Driver Code']
                             d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                             tvt = rp['Req Veh'] if rp['Req Veh'] != "VAN" else unify_text(d_type)
@@ -1777,7 +1806,6 @@ if choice == "1. AI Route Planner":
                             
                             if not fallback_vs.empty:
                                 rp['VEH NO'] = fallback_vs.iloc[0]['number']
-                                rp['Permitted Areas'] = fallback_vs.iloc[0]['permitted_areas']
                                 used_vehicles.add(rp['VEH NO'])
 
                     if rp['Driver Code'] not in ["N/A", "SHORTAGE", "OPTIONAL", "UNASSIGNED", "PENDING_OPTIONAL"]:
@@ -1883,7 +1911,7 @@ if choice == "1. AI Route Planner":
                         "Area Code": rp['Area Code'], "AREA": rp['AREA'], "Sector": rp['Sector'], 
                         "Driver Code": rp['Driver Code'], "Drivers Name": rp['Drivers Name'], 
                         "Helper Code": rp['Helper Code'], "Helpers Name": rp['Helpers Name'], 
-                        "VEH NO": rp['VEH NO'], "Permitted Areas": rp['Permitted Areas'], "Division Category": rp['Division Category'],
+                        "VEH NO": rp['VEH NO'], "Division Category": rp['Division Category'],
                         "Drv Repl Code": d_repl_c, "Drv Repl Name": d_repl_n, "Drv Repl Date": d_repl_dt,
                         "Hlp Repl Code": h_repl_c, "Hlp Repl Name": h_repl_n, "Hlp Repl Date": h_repl_dt,
                         "Warnings": " | ".join(warnings)
@@ -1896,9 +1924,9 @@ if choice == "1. AI Route Planner":
                 draft_inserts = []
                 draft_dicts = []
                 for r in route_plan:
-                    draft_inserts.append((r['order_num'], r['Area Code'], r['AREA'], r['Sector'], r['Driver Code'], r['Drivers Name'], r['Helper Code'], r['Helpers Name'], r['VEH NO'], r['Division Category'], p_s_gen, p_e_gen, r['Permitted Areas'], p_s_gen, p_e_gen, r.get('Drv Repl Code', ''), r.get('Drv Repl Date', ''), r.get('Hlp Repl Code', ''), r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
-                    draft_dicts.append({"order_num":r['order_num'], "area_code":r['Area Code'], "area_name":r['AREA'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Drivers Name'], "helper_code":r['Helper Code'], "helper_name":r['Helpers Name'], "veh_num":r['VEH NO'], "div_cat":r['Division Category'], "start_date":p_s_gen, "end_date":p_e_gen, "veh_perm": r['Permitted Areas'], "h_start_date": p_s_gen, "h_end_date": p_e_gen, "drv_repl_code": r.get('Drv Repl Code', ''), "drv_repl_date": r.get('Drv Repl Date', ''), "hlp_repl_code": r.get('Hlp Repl Code', ''), "hlp_repl_date": r.get('Hlp Repl Date', ''), "warnings": r.get('Warnings', '')})
-                run_query("INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", draft_inserts, table_name="draft_routes", action="INSERT_MANY", data=draft_dicts)
+                    draft_inserts.append((r['order_num'], r['Area Code'], r['AREA'], r['Sector'], r['Driver Code'], r['Drivers Name'], r['Helper Code'], r['Helpers Name'], r['VEH NO'], r['Division Category'], p_s_gen, p_e_gen, p_s_gen, p_e_gen, r.get('Drv Repl Code', ''), r.get('Drv Repl Date', ''), r.get('Hlp Repl Code', ''), r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
+                    draft_dicts.append({"order_num":r['order_num'], "area_code":r['Area Code'], "area_name":r['AREA'], "sector":r['Sector'], "driver_code":r['Driver Code'], "driver_name":r['Drivers Name'], "helper_code":r['Helper Code'], "helper_name":r['Helpers Name'], "veh_num":r['VEH NO'], "div_cat":r['Division Category'], "start_date":p_s_gen, "end_date":p_e_gen, "h_start_date": p_s_gen, "h_end_date": p_e_gen, "drv_repl_code": r.get('Drv Repl Code', ''), "drv_repl_date": r.get('Drv Repl Date', ''), "hlp_repl_code": r.get('Hlp Repl Code', ''), "hlp_repl_date": r.get('Hlp Repl Date', ''), "warnings": r.get('Warnings', '')})
+                run_query("INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", draft_inserts, table_name="draft_routes", action="INSERT_MANY", data=draft_dicts)
                 
                 st.session_state.attempt_generate = False
                 st.session_state.force_bypass = False
@@ -1965,7 +1993,7 @@ elif choice == "2. Database Management":
     d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "anchor_vehicle", "replacement_person", "no_rotation", "vacation_status"]
     h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "replacement_person", "no_rotation", "vacation_status"]
     a_col_order = ["S/N", "code", "name", "sector", "region", "needs_driver", "needs_helper", "anchor_vehicle", "sort_order"]
-    v_col_order = ["S/N", "number", "type", "division", "status", "anchor_area", "permitted_areas"]
+    v_col_order = ["S/N", "number", "type", "division", "status", "anchor_area"]
 
     today = date.today()
     vac_cache = build_vacation_cache()
@@ -2304,10 +2332,9 @@ elif choice == "2. Database Management":
             v_div = v_div_man.strip() if v_div_man.strip() else v_div_sel
 
             c5, c6 = st.columns(2)
-            v_perm = c5.text_input("Permitted Areas", value="All", key="add_v_perm")
-            v_stat = c6.selectbox("Status", ["Active", "Under Service", "In for Service"], key="add_v_stat")
+            v_stat = c5.selectbox("Status", ["Active", "Under Service", "In for Service"], key="add_v_stat")
             
-            v_anchor_opts = st.multiselect("Anchor Area(s)", multi_anchor_opts, key="add_v_anc")
+            v_anchor_opts = c6.multiselect("Anchor Area(s)", multi_anchor_opts, key="add_v_anc")
             v_anchor_man = st.text_input("Or manual Anchor Areas (comma-separated)", key="add_v_anc_m")
             v_anchor_list = v_anchor_opts + [x.strip() for x in v_anchor_man.split(',') if x.strip()]
             v_anchor_str = ", ".join(list(set(v_anchor_list)))
@@ -2316,7 +2343,7 @@ elif choice == "2. Database Management":
                 if v_df['number'].isin([v_num]).any():
                     st.error(f"Vehicle Number {v_num} already exists! Cannot duplicate.")
                 else:
-                    if run_query("INSERT INTO vehicles (number, type, permitted_areas, division, anchor_area, status) VALUES (?, ?, ?, ?, ?, ?)", (v_num, unify_text(v_type), v_perm, unify_text(v_div), v_anchor_str, v_stat), table_name="vehicles", action="INSERT", data={"number":v_num, "type":unify_text(v_type), "permitted_areas":v_perm, "division":unify_text(v_div), "anchor_area":v_anchor_str, "status":v_stat}):
+                    if run_query("INSERT INTO vehicles (number, type, division, anchor_area, status) VALUES (?, ?, ?, ?, ?)", (v_num, unify_text(v_type), unify_text(v_div), v_anchor_str, v_stat), table_name="vehicles", action="INSERT", data={"number":v_num, "type":unify_text(v_type), "division":unify_text(v_div), "anchor_area":v_anchor_str, "status":v_stat}):
                         st.success("Vehicle Added!")
                         st.rerun()
         with c_edit:
