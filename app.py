@@ -776,12 +776,6 @@ if "db_initialized" not in st.session_state:
                 h_seed = [("Unknown", code, "", "No", "", "", "No") for code in KEEP_HELPERS]
                 h_data = [{"name": "Unknown", "code": code, "restriction": "", "health_card": "No", "anchor_area": "", "replacement_person": "", "no_rotation": "No"} for code in KEEP_HELPERS]
                 run_query("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area, replacement_person, no_rotation) VALUES (?, ?, ?, ?, ?, ?, ?)", h_seed, table_name="helpers", action="INSERT_MANY", data=h_data, bypass_queue=bq)
-
-            v_df = load_table('vehicles')
-            if len(v_df) == 0:
-                v_seed = [(v_num, unify_text(v_type), unify_text(division), "", "Active") for v_num, v_type, permitted, division in SEED_VEHICLES]
-                v_data = [{"number": v_num, "type": unify_text(v_type), "division": unify_text(division), "anchor_area": "", "status": "Active"} for v_num, v_type, permitted, division in SEED_VEHICLES]
-                run_query("INSERT OR IGNORE INTO vehicles (number, type, division, anchor_area, status) VALUES (?, ?, ?, ?, ?)", v_seed, table_name="vehicles", action="INSERT_MANY", data=v_data, bypass_queue=bq)
             
             st.cache_data.clear()
         except Exception as e:
@@ -807,19 +801,6 @@ hlp_codes_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_h['code'].d
 hlp_names_opts = ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"] + all_h['name'].dropna().unique().tolist() if not all_h.empty else ["UNASSIGNED", "N/A", "SHORTAGE", "OPTIONAL"]
 
 v_num_opts = ["UNASSIGNED", "N/A", "SHORTAGE", ""] + vehicles_global['number'].dropna().unique().tolist() if not vehicles_global.empty else ["UNASSIGNED", "N/A", "SHORTAGE", ""]
-
-def get_dynamic_opts(df, col_name, standard_opts):
-    opts = list(set(standard_opts + (df[col_name].dropna().tolist() if not df.empty and col_name in df.columns else [])))
-    return sorted([str(x) for x in opts if pd.notna(x) and str(x).strip() != ""]) + [""]
-
-def get_anchor_opts(df, col_name, standard_opts):
-    base_opts = set(standard_opts)
-    if not df.empty and col_name in df.columns:
-        for val in df[col_name].dropna():
-            for part in str(val).split(','):
-                part = part.strip()
-                if part: base_opts.add(part)
-    return sorted(list(base_opts)) + [""]
 
 
 # ==========================================
@@ -1386,6 +1367,14 @@ if choice == "1. AI Route Planner":
                     if anchs:
                         driver_anchors_map[temp_d['code']] = anchs
 
+                veh_anchors_map = {}
+                for _, temp_v in active_v_pool.iterrows():
+                    anchs = [a.strip().upper() for a in str(temp_v.get('anchor_area', '')).split(',') if a.strip()]
+                    if "NONE" in anchs: anchs.remove("NONE")
+                    if "" in anchs: anchs.remove("")
+                    if anchs:
+                        veh_anchors_map[unify_text(temp_v['number']).upper()] = anchs
+
                 # ENSURE SORT ORDER IS STRICTLY MAINTAINED
                 areas = areas.sort_values(by=['sort_order', 'id'], ascending=[True, True])
                 
@@ -1653,6 +1642,10 @@ if choice == "1. AI Route Planner":
                             vn = unify_text(v_n).upper()
                             if any((a != area_name and vn in lst) for a, lst in area_anchors_map.items()): return False
                             if any((d != d_code and vn in lst) for d, lst in driver_anchors_map.items()): return False
+                            v_anchs = veh_anchors_map.get(vn, [])
+                            if v_anchs:
+                                matched_here = any(anc in unify_text(area_name).upper() or anc in unify_text(req_sector).upper() for anc in v_anchs)
+                                if not matched_here: return False
                             return True
                             
                         potential_vs = []
@@ -1677,7 +1670,14 @@ if choice == "1. AI Route Planner":
                             elif tvt.upper() in ["VAN", "PICK-UP"] and v_type == "VAN / PICK-UP": type_match = True
                             if not type_match: continue
                             
-                            is_area_anchored = v_num_chk in a_anch_vehs
+                            v_anchs = veh_anchors_map.get(v_num_chk, [])
+                            is_veh_anchored_to_here = False
+                            for anc in v_anchs:
+                                if anc in unify_text(area_name).upper() or anc in unify_text(req_sector).upper():
+                                    is_veh_anchored_to_here = True
+                                    break
+
+                            is_area_anchored = v_num_chk in a_anch_vehs or is_veh_anchored_to_here
                             is_drv_anchored = v_num_chk in d_anch_vehs
                             
                             if is_area_anchored: potential_vs.append((v, 2000 + div_score))
@@ -1696,7 +1696,7 @@ if choice == "1. AI Route Planner":
                                 d_val = str(d_val).upper()
                                 rs = unify_text(req_sector).upper()
                                 return d_val == "ALL" or d_val == "" or d_val == rs or d_val in rs or rs in d_val
-                            fallback_vs = fallback_vs[fallback_vs['division'].apply(safe_div_match)]
+                            
                             def safe_type_match(t_val):
                                 t_val = str(t_val).upper()
                                 target = tvt.upper()
@@ -1705,7 +1705,11 @@ if choice == "1. AI Route Planner":
                                 return False
                             fallback_vs = fallback_vs[fallback_vs['type'].apply(safe_type_match)]
                             
-                            if not fallback_vs.empty:
+                            div_matched_vs = fallback_vs[fallback_vs['division'].apply(safe_div_match)]
+                            if not div_matched_vs.empty:
+                                v_num = div_matched_vs.iloc[0]['number']
+                                used_vehicles.add(v_num)
+                            elif not fallback_vs.empty:
                                 v_num = fallback_vs.iloc[0]['number']
                                 used_vehicles.add(v_num)
                             else:
@@ -1745,6 +1749,10 @@ if choice == "1. AI Route Planner":
                                 vn = unify_text(v_n).upper()
                                 if any((a != rp['AREA'] and vn in lst) for a, lst in area_anchors_map.items()): return False
                                 if any((d != a_d_code and vn in lst) for d, lst in driver_anchors_map.items()): return False
+                                v_anchs = veh_anchors_map.get(vn, [])
+                                if v_anchs:
+                                    matched_here = any(anc in unify_text(rp['AREA']).upper() or anc in unify_text(rp['Sector']).upper() for anc in v_anchs)
+                                    if not matched_here: return False
                                 return True
                                 
                             fallback_vs = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
@@ -1753,7 +1761,7 @@ if choice == "1. AI Route Planner":
                                 d_val = str(d_val).upper()
                                 rs = unify_text(rp['Sector']).upper()
                                 return d_val == "ALL" or d_val == "" or d_val == rs or d_val in rs or rs in d_val
-                            fallback_vs = fallback_vs[fallback_vs['division'].apply(safe_div_match)]
+                            
                             def safe_type_match(t_val):
                                 t_val = str(t_val).upper()
                                 target = tvt.upper()
@@ -1762,7 +1770,11 @@ if choice == "1. AI Route Planner":
                                 return False
                             fallback_vs = fallback_vs[fallback_vs['type'].apply(safe_type_match)]
                             
-                            if not fallback_vs.empty:
+                            div_matched_vs = fallback_vs[fallback_vs['division'].apply(safe_div_match)]
+                            if not div_matched_vs.empty:
+                                rp['VEH NO'] = div_matched_vs.iloc[0]['number']
+                                used_vehicles.add(rp['VEH NO'])
+                            elif not fallback_vs.empty:
                                 rp['VEH NO'] = fallback_vs.iloc[0]['number']
                                 used_vehicles.add(rp['VEH NO'])
 
@@ -1946,6 +1958,15 @@ if choice == "1. AI Route Planner":
 # ==========================================
 elif choice == "2. Database Management":
     st.header("🗄️ Manage Database")
+    
+    # Generate multi_anchor_opts directly to prevent NameErrors in table configurations
+    areas_for_opts = load_table('areas')
+    multi_anchor_opts = ["NONE"]
+    if not areas_for_opts.empty:
+        multi_anchor_opts.extend(areas_for_opts['name'].dropna().unique().tolist())
+        multi_anchor_opts.extend(areas_for_opts['sector'].dropna().unique().tolist())
+    multi_anchor_opts = sorted(list(set([str(x).strip() for x in multi_anchor_opts if str(x).strip()])))
+    
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Cloud & File Sync"])
 
     d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "anchor_vehicle", "replacement_person", "no_rotation", "vacation_status"]
