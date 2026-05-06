@@ -1521,29 +1521,47 @@ if choice == "1. AI Route Planner":
                             best_d = all_d[all_d['code'] == p_d_code].iloc[0]
                             best_d_score, d_reason = 0, "Kept from Draft / Manual"
                         else:
-                            best_d_score, d_reason = -999999, "No valid drivers"
-                            protected_drivers = set(used_drivers)
-                            if rot_type == "Helpers":
-                                protected_drivers.update(reserved_drivers.values())
-                            else:
-                                for r_code in reserved_drivers.values():
-                                    if r_code not in used_drivers:
-                                        match = all_d[all_d['code'] == r_code]
-                                        if not match.empty and match.iloc[0].get('anchor_area', ''):
-                                            protected_drivers.add(r_code)
-                            
-                            avail_dr = avail_d_pool[~avail_d_pool['code'].isin(protected_drivers)]
-                            
-                            for _, p in avail_dr.iterrows():
-                                score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Driver")
-                                if score is not None and score > best_d_score:
-                                    best_d_score, best_d, d_reason = score, p, rsn
-                                    
-                            if best_d is None and not avail_dr.empty:
-                                type_match = avail_dr[avail_dr['veh_type'] == req_veh]
-                                if not type_match.empty: best_d = type_match.iloc[0]
-                                else: best_d = avail_dr.iloc[0]
-                                best_d_score, d_reason = 0, "Fallback Assignment"
+                            # --- PREFERRED REPLACEMENT LOGIC ---
+                            if p_d_code not in ["UNASSIGNED", "N/A", "SHORTAGE"]:
+                                orig_d_row = all_d[all_d['code'] == p_d_code]
+                                if not orig_d_row.empty:
+                                    rp_code = str(orig_d_row.iloc[0].get('replacement_person', '')).strip()
+                                    if rp_code and rp_code in avail_d_pool['code'].values and rp_code not in used_drivers:
+                                        rp_row = avail_d_pool[avail_d_pool['code'] == rp_code].iloc[0]
+                                        rp_anchors = [unify_text(a).upper() for a in str(rp_row.get('anchor_area', '')).split(',') if a.strip()]
+                                        rp_rot = str(rp_row.get('rotation', 'Yes')).strip().upper()
+                                        is_locked_elsewhere = False
+                                        if rp_rot == 'NO' and rp_anchors:
+                                            if not (unify_text(area_name).upper() in rp_anchors or unify_text(req_sector).upper() in rp_anchors or unify_text(area_code).upper() in rp_anchors):
+                                                is_locked_elsewhere = True
+                                        if not is_locked_elsewhere:
+                                            best_d = rp_row
+                                            best_d_score, d_reason = 50000, f"Preferred Replacement for {p_d_code}"
+
+                            if best_d is None:
+                                best_d_score, d_reason = -999999, "No valid drivers"
+                                protected_drivers = set(used_drivers)
+                                if rot_type == "Helpers":
+                                    protected_drivers.update(reserved_drivers.values())
+                                else:
+                                    for r_code in reserved_drivers.values():
+                                        if r_code not in used_drivers:
+                                            match = all_d[all_d['code'] == r_code]
+                                            if not match.empty and match.iloc[0].get('anchor_area', ''):
+                                                protected_drivers.add(r_code)
+                                
+                                avail_dr = avail_d_pool[~avail_d_pool['code'].isin(protected_drivers)]
+                                
+                                for _, p in avail_dr.iterrows():
+                                    score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Driver")
+                                    if score is not None and score > best_d_score:
+                                        best_d_score, best_d, d_reason = score, p, rsn
+                                        
+                                if best_d is None and not avail_dr.empty:
+                                    type_match = avail_dr[avail_dr['veh_type'] == req_veh]
+                                    if not type_match.empty: best_d = type_match.iloc[0]
+                                    else: best_d = avail_dr.iloc[0]
+                                    best_d_score, d_reason = 0, "Fallback Assignment"
 
                         if best_d is not None:
                             d_code, d_name = best_d['code'], best_d['name']
@@ -1605,26 +1623,44 @@ if choice == "1. AI Route Planner":
                                 best_h = all_h[all_h['code'] == p_h_code].iloc[0]
                                 best_h_score, h_reason = 0, "Kept from Draft / Manual"
                             else:
-                                best_h_score, h_reason = -999999, "No valid helpers"
-                                protected_helpers = set(used_helpers)
-                                if rot_type == "Drivers":
-                                    protected_helpers.update(reserved_helpers.values())
-                                else:
-                                    for r_code in reserved_helpers.values():
-                                        if r_code not in used_helpers:
-                                            match = all_h[all_h['code'] == r_code]
-                                            if not match.empty and match.iloc[0].get('anchor_area', ''):
-                                                protected_helpers.add(r_code)
-                                
-                                avail_hl = avail_h_pool[~avail_h_pool['code'].isin(protected_helpers)]
-                                for _, p in avail_hl.iterrows():
-                                    score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
-                                    if score is not None and score > best_h_score:
-                                        best_h_score, best_h, h_reason = score, p, rsn
-                                        
-                                if best_h is None and not avail_hl.empty:
-                                    best_h = avail_hl.iloc[0]
-                                    best_h_score, h_reason = 0, "Fallback Assignment"
+                                # --- PREFERRED REPLACEMENT LOGIC ---
+                                if p_h_code not in ["UNASSIGNED", "N/A", "SHORTAGE"]:
+                                    orig_h_row = all_h[all_h['code'] == p_h_code]
+                                    if not orig_h_row.empty:
+                                        rp_code = str(orig_h_row.iloc[0].get('replacement_person', '')).strip()
+                                        if rp_code and rp_code in avail_h_pool['code'].values and rp_code not in used_helpers:
+                                            rp_row = avail_h_pool[avail_h_pool['code'] == rp_code].iloc[0]
+                                            rp_anchors = [unify_text(a).upper() for a in str(rp_row.get('anchor_area', '')).split(',') if a.strip()]
+                                            rp_rot = str(rp_row.get('rotation', 'Yes')).strip().upper()
+                                            is_locked_elsewhere = False
+                                            if rp_rot == 'NO' and rp_anchors:
+                                                if not (unify_text(area_name).upper() in rp_anchors or unify_text(req_sector).upper() in rp_anchors or unify_text(area_code).upper() in rp_anchors):
+                                                    is_locked_elsewhere = True
+                                            if not is_locked_elsewhere:
+                                                best_h = rp_row
+                                                best_h_score, h_reason = 50000, f"Preferred Replacement for {p_h_code}"
+
+                                if best_h is None:
+                                    best_h_score, h_reason = -999999, "No valid helpers"
+                                    protected_helpers = set(used_helpers)
+                                    if rot_type == "Drivers":
+                                        protected_helpers.update(reserved_helpers.values())
+                                    else:
+                                        for r_code in reserved_helpers.values():
+                                            if r_code not in used_helpers:
+                                                match = all_h[all_h['code'] == r_code]
+                                                if not match.empty and match.iloc[0].get('anchor_area', ''):
+                                                    protected_helpers.add(r_code)
+                                    
+                                    avail_hl = avail_h_pool[~avail_h_pool['code'].isin(protected_helpers)]
+                                    for _, p in avail_hl.iterrows():
+                                        score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
+                                        if score is not None and score > best_h_score:
+                                            best_h_score, best_h, h_reason = score, p, rsn
+                                            
+                                    if best_h is None and not avail_hl.empty:
+                                        best_h = avail_hl.iloc[0]
+                                        best_h_score, h_reason = 0, "Fallback Assignment"
 
                             if best_h is not None:
                                 h_code, h_name = best_h['code'], best_h['name']
