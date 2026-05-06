@@ -1350,6 +1350,9 @@ if choice == "1. AI Route Planner":
                 reserved_helpers = {}
                 reserved_vehicles = {}
                 
+                reserved_for_repl_d = {}
+                reserved_for_repl_h = {}
+                
                 if not base_df.empty:
                     for _, row in base_df.iterrows():
                         a_name = unify_text(row.get('area_name', ''))
@@ -1357,8 +1360,24 @@ if choice == "1. AI Route Planner":
                         hc = str(row.get('helper_code', '')).strip()
                         vn = str(row.get('veh_num', '')).strip()
                         
-                        if dc not in ["UNASSIGNED", "N/A", "", "SHORTAGE", "OPTIONAL"]: reserved_drivers[a_name] = dc
-                        if hc not in ["UNASSIGNED", "N/A", "", "SHORTAGE", "OPTIONAL"]: reserved_helpers[a_name] = hc
+                        if dc not in ["UNASSIGNED", "N/A", "", "SHORTAGE", "OPTIONAL"]: 
+                            reserved_drivers[a_name] = dc
+                            if is_on_vacation(dc, month_target, vac_cache):
+                                orig_d_row = all_d[all_d['code'] == dc]
+                                if not orig_d_row.empty:
+                                    rp_code = str(orig_d_row.iloc[0].get('replacement_person', '')).strip()
+                                    if rp_code and rp_code not in ["", "None", "N/A"]:
+                                        reserved_for_repl_d[rp_code] = a_name
+                                        
+                        if hc not in ["UNASSIGNED", "N/A", "", "SHORTAGE", "OPTIONAL"]: 
+                            reserved_helpers[a_name] = hc
+                            if is_on_vacation(hc, month_target, vac_cache):
+                                orig_h_row = all_h[all_h['code'] == hc]
+                                if not orig_h_row.empty:
+                                    rp_code = str(orig_h_row.iloc[0].get('replacement_person', '')).strip()
+                                    if rp_code and rp_code not in ["", "None", "N/A"]:
+                                        reserved_for_repl_h[rp_code] = a_name
+                                        
                         if vn not in ["UNASSIGNED", "N/A", ""]: reserved_vehicles[a_name] = vn
 
                 area_anchors_map = {}
@@ -1521,7 +1540,6 @@ if choice == "1. AI Route Planner":
                             best_d = all_d[all_d['code'] == p_d_code].iloc[0]
                             best_d_score, d_reason = 0, "Kept from Draft / Manual"
                         else:
-                            # --- PREFERRED REPLACEMENT LOGIC ---
                             if p_d_code not in ["UNASSIGNED", "N/A", "SHORTAGE"]:
                                 orig_d_row = all_d[all_d['code'] == p_d_code]
                                 if not orig_d_row.empty:
@@ -1550,6 +1568,10 @@ if choice == "1. AI Route Planner":
                                             if not match.empty and match.iloc[0].get('anchor_area', ''):
                                                 protected_drivers.add(r_code)
                                 
+                                for rp_code, target_area in reserved_for_repl_d.items():
+                                    if area_name != target_area:
+                                        protected_drivers.add(rp_code)
+                                        
                                 avail_dr = avail_d_pool[~avail_d_pool['code'].isin(protected_drivers)]
                                 
                                 for _, p in avail_dr.iterrows():
@@ -1623,7 +1645,6 @@ if choice == "1. AI Route Planner":
                                 best_h = all_h[all_h['code'] == p_h_code].iloc[0]
                                 best_h_score, h_reason = 0, "Kept from Draft / Manual"
                             else:
-                                # --- PREFERRED REPLACEMENT LOGIC ---
                                 if p_h_code not in ["UNASSIGNED", "N/A", "SHORTAGE"]:
                                     orig_h_row = all_h[all_h['code'] == p_h_code]
                                     if not orig_h_row.empty:
@@ -1652,6 +1673,10 @@ if choice == "1. AI Route Planner":
                                                 if not match.empty and match.iloc[0].get('anchor_area', ''):
                                                     protected_helpers.add(r_code)
                                     
+                                    for rp_code, target_area in reserved_for_repl_h.items():
+                                        if area_name != target_area:
+                                            protected_helpers.add(rp_code)
+                                            
                                     avail_hl = avail_h_pool[~avail_h_pool['code'].isin(protected_helpers)]
                                     for _, p in avail_hl.iterrows():
                                         score, rsn = calculate_candidate_score(p, area, req_veh, req_sector, month_target, exp_cache, vac_cache, role="Helper", hc_assigned=consumer_hc_assigned)
