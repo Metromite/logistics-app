@@ -208,7 +208,8 @@ def calculate_candidate_score(candidate, area, req_veh, req_sector, target_date,
     if "" in anchors: anchors.remove("")
 
     if anchors:
-        check_list = [unify_text(area['name']).upper(), unify_text(req_sector).upper(), unify_text(req_veh).upper()]
+        a_code = unify_text(area.get('code', ''))
+        check_list = [unify_text(area['name']).upper(), unify_text(req_sector).upper(), unify_text(req_veh).upper(), a_code.upper()]
         matched = False
         for anc in anchors:
             if any(anc in chk or chk in anc for chk in check_list):
@@ -1410,12 +1411,12 @@ if choice == "1. AI Route Planner":
                                 break
                 returning_h.sort(key=lambda x: x['avail_date'])
 
-                def get_strictly_anchored(pool_df, used_set, a_name, r_sec):
+                def get_strictly_anchored(pool_df, used_set, a_name, r_sec, a_code):
                     for _, p in pool_df.iterrows():
                         if p['code'] in used_set: continue
                         if str(p.get('rotation', 'Yes')).strip().upper() == 'NO':
                             anchors = [unify_text(a).upper() for a in str(p.get('anchor_area', '')).split(',') if a.strip()]
-                            if unify_text(a_name).upper() in anchors or unify_text(r_sec).upper() in anchors:
+                            if unify_text(a_name).upper() in anchors or unify_text(r_sec).upper() in anchors or unify_text(a_code).upper() in anchors:
                                 return p['code']
                     return None
 
@@ -1431,7 +1432,7 @@ if choice == "1. AI Route Planner":
                         anc_list = [a.strip().upper() for a in anc_str.split(',') if a.strip()]
                         if "NONE" in anc_list: anc_list.remove("NONE")
                         if not anc_list: return True
-                        check_list = [unify_text(area_row['name']).upper(), unify_text(r_sec).upper(), unify_text(r_veh).upper()]
+                        check_list = [unify_text(area_row['name']).upper(), unify_text(r_sec).upper(), unify_text(r_veh).upper(), unify_text(area_row.get('code', '')).upper()]
                         return any(any(anc in chk or chk in anc for chk in check_list) for anc in anc_list)
 
                     avail = avail[avail.apply(is_valid_anchor, axis=1)]
@@ -1493,7 +1494,7 @@ if choice == "1. AI Route Planner":
                     elif nd == 'Optional':
                         d_code, d_name = "PENDING_OPTIONAL", "PENDING_OPTIONAL"
                     else: # Yes
-                        strict_d = get_strictly_anchored(avail_d_pool, used_drivers, area_name, req_sector)
+                        strict_d = get_strictly_anchored(avail_d_pool, used_drivers, area_name, req_sector, area_code)
                         if not strict_d and p_d_code in avail_d_pool['code'].values and p_d_code not in used_drivers:
                             d_row_chk = avail_d_pool[avail_d_pool['code'] == p_d_code]
                             if not d_row_chk.empty and str(d_row_chk.iloc[0].get('rotation', 'Yes')).strip().upper() == 'NO':
@@ -1504,7 +1505,7 @@ if choice == "1. AI Route Planner":
                             d_row = all_d[all_d['code'] == p_d_code]
                             if not d_row.empty:
                                 d_anchors = [unify_text(a).upper() for a in str(d_row.iloc[0].get('anchor_area', '')).split(',') if a.strip()]
-                                if unify_text(area_name).upper() in d_anchors or unify_text(req_sector).upper() in d_anchors:
+                                if unify_text(area_name).upper() in d_anchors or unify_text(req_sector).upper() in d_anchors or unify_text(area_code).upper() in d_anchors:
                                     is_d_anchored_here = True
 
                         should_keep_driver = False
@@ -1577,7 +1578,7 @@ if choice == "1. AI Route Planner":
                         if d_code == "SHORTAGE":
                             h_code, h_name = "SHORTAGE", "SHORTAGE"
                         else:
-                            strict_h = get_strictly_anchored(avail_h_pool, used_helpers, area_name, req_sector)
+                            strict_h = get_strictly_anchored(avail_h_pool, used_helpers, area_name, req_sector, area_code)
                             if not strict_h and p_h_code in avail_h_pool['code'].values and p_h_code not in used_helpers:
                                 h_row_chk = avail_h_pool[avail_h_pool['code'] == p_h_code]
                                 if not h_row_chk.empty and str(h_row_chk.iloc[0].get('rotation', 'Yes')).strip().upper() == 'NO':
@@ -1588,7 +1589,7 @@ if choice == "1. AI Route Planner":
                                 h_row = all_h[all_h['code'] == p_h_code]
                                 if not h_row.empty:
                                     h_anchors = [unify_text(a).upper() for a in str(h_row.iloc[0].get('anchor_area', '')).split(',') if a.strip()]
-                                    if unify_text(area_name).upper() in h_anchors or unify_text(req_sector).upper() in h_anchors:
+                                    if unify_text(area_name).upper() in h_anchors or unify_text(req_sector).upper() in h_anchors or unify_text(area_code).upper() in h_anchors:
                                         is_h_anchored_here = True
 
                             should_keep_helper = False
@@ -1704,7 +1705,8 @@ if choice == "1. AI Route Planner":
                                 matched_here = any(
                                     anc in unify_text(area_name).upper() or 
                                     anc in route_sec_chk or 
-                                    anc in unify_text(area.get('region', '')).upper()
+                                    anc in unify_text(area.get('region', '')).upper() or
+                                    anc in unify_text(area_code).upper()
                                     for anc in v_anchs
                                 )
                                 if matched_here:
@@ -1729,7 +1731,41 @@ if choice == "1. AI Route Planner":
                             v_num = potential_vs[0][0]['number']
                             used_vehicles.add(v_num)
                         else:
-                            v_num = "UNASSIGNED"
+                            fallback_vs = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
+                            
+                            def can_use_veh_p1(v_n):
+                                vn = unify_text(v_n).upper()
+                                if any((a != area_name and vn in lst) for a, lst in area_anchors_map.items()): return False
+                                if any((d != d_code and vn in lst) for d, lst in driver_anchors_map.items()): return False
+                                v_anchs_chk = veh_anchors_map.get(vn, [])
+                                if v_anchs_chk:
+                                    matched_here_chk = any(anc in unify_text(area_name).upper() or anc in unify_text(req_sector).upper() or anc in unify_text(area_code).upper() for anc in v_anchs_chk)
+                                    if not matched_here_chk: return False
+                                return True
+                                
+                            fallback_vs = fallback_vs[fallback_vs['number'].apply(can_use_veh_p1)]
+                            def safe_div_match(d_val):
+                                d_val = str(d_val).upper()
+                                rs = unify_text(req_sector).upper()
+                                return d_val == "ALL" or d_val == "" or d_val == rs or d_val in rs or rs in d_val
+                            
+                            def safe_type_match_fallback(t_val):
+                                t_val = str(t_val).upper()
+                                target = tvt.upper()
+                                if t_val == target: return True
+                                if target in ["VAN", "PICK-UP"] and t_val == "VAN / PICK-UP": return True
+                                return False
+                            fallback_vs = fallback_vs[fallback_vs['type'].apply(safe_type_match_fallback)]
+                            
+                            div_matched_vs = fallback_vs[fallback_vs['division'].apply(safe_div_match)]
+                            if not div_matched_vs.empty:
+                                v_num = div_matched_vs.iloc[0]['number']
+                                used_vehicles.add(v_num)
+                            elif not fallback_vs.empty:
+                                v_num = fallback_vs.iloc[0]['number']
+                                used_vehicles.add(v_num)
+                            else:
+                                v_num = "UNASSIGNED"
 
                     temp_plan.append({
                         "area_obj": area,
@@ -1793,7 +1829,8 @@ if choice == "1. AI Route Planner":
                                     matched_here = any(
                                         anc in unify_text(rp['AREA']).upper() or 
                                         anc in route_sec_chk or 
-                                        anc in unify_text(area_obj.get('region', '')).upper()
+                                        anc in unify_text(area_obj.get('region', '')).upper() or
+                                        anc in unify_text(rp['Area Code']).upper()
                                         for anc in v_anchs
                                     )
                                     if matched_here: score += 2000
@@ -2000,6 +2037,7 @@ elif choice == "2. Database Management":
     if not areas_for_opts.empty:
         multi_anchor_opts.extend(areas_for_opts['name'].dropna().unique().tolist())
         multi_anchor_opts.extend(areas_for_opts['sector'].dropna().unique().tolist())
+        multi_anchor_opts.extend(areas_for_opts['code'].dropna().unique().tolist())
     multi_anchor_opts = sorted(list(set([str(x).strip() for x in multi_anchor_opts if str(x).strip()])))
     
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Cloud & File Sync"])
