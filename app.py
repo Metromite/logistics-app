@@ -1630,90 +1630,70 @@ if choice == "1. AI Route Planner":
                         drv_row = all_d[all_d['code'] == d_code]
                         d_anch_veh_str = drv_row.iloc[0].get('anchor_vehicle', '') if not drv_row.empty else ""
                         d_anch_vehs = [v.strip().upper() for v in str(d_anch_veh_str).split(',') if v.strip()]
-                        if "NONE" in d_anch_vehs: d_anch_vehs.remove("NONE")
-                        if "" in d_anch_vehs: d_anch_vehs.remove("")
+                        d_anch_vehs = [x for x in d_anch_vehs if x not in ["NONE", ""]]
                         
                         a_anch_veh_str = area.get('anchor_vehicle', '')
                         a_anch_vehs = [v.strip().upper() for v in str(a_anch_veh_str).split(',') if v.strip()]
-                        if "NONE" in a_anch_vehs: a_anch_vehs.remove("NONE")
-                        if "" in a_anch_vehs: a_anch_vehs.remove("")
+                        a_anch_vehs = [x for x in a_anch_vehs if x not in ["NONE", ""]]
                         
-                        def can_use_veh_p1(v_n):
-                            vn = unify_text(v_n).upper()
-                            if any((a != area_name and vn in lst) for a, lst in area_anchors_map.items()): return False
-                            if any((d != d_code and vn in lst) for d, lst in driver_anchors_map.items()): return False
-                            v_anchs = veh_anchors_map.get(vn, [])
-                            if v_anchs:
-                                matched_here = any(anc in unify_text(area_name).upper() or anc in unify_text(req_sector).upper() for anc in v_anchs)
-                                if not matched_here: return False
-                            return True
-                            
+                        def safe_type_match(t_val, target):
+                            t_val = str(t_val).upper()
+                            target = str(target).upper()
+                            if t_val == target: return True
+                            if target in ["VAN", "PICK-UP"] and t_val == "VAN / PICK-UP": return True
+                            if target == "VAN / PICK-UP" and t_val in ["VAN", "PICK-UP", "VAN / PICK-UP"]: return True
+                            return False
+
                         potential_vs = []
                         avail_vs = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
                         for _, v in avail_vs.iterrows():
                             v_num_chk = unify_text(v.get('number', '')).upper()
-                            if not can_use_veh_p1(v_num_chk): continue
+                            v_type = unify_text(v.get('type', 'VAN')).upper()
+                            
+                            if not safe_type_match(v_type, tvt): 
+                                continue
                             
                             v_div_chk = unify_text(v.get('division', '')).upper()
                             route_sec_chk = unify_text(req_sector).upper()
                             
-                            div_score = 0
+                            score = 0
                             if v_div_chk and v_div_chk != "ALL":
                                 if v_div_chk == route_sec_chk or v_div_chk in route_sec_chk or route_sec_chk in v_div_chk:
-                                    div_score += 500
+                                    score += 500
                                 else:
-                                    continue 
-                            
-                            v_type = unify_text(v.get('type', 'VAN')).upper()
-                            type_match = False
-                            if v_type == tvt.upper(): type_match = True
-                            elif tvt.upper() in ["VAN", "PICK-UP"] and v_type == "VAN / PICK-UP": type_match = True
-                            if not type_match: continue
+                                    score -= 800
                             
                             v_anchs = veh_anchors_map.get(v_num_chk, [])
-                            is_veh_anchored_to_here = False
-                            for anc in v_anchs:
-                                if anc in unify_text(area_name).upper() or anc in unify_text(req_sector).upper():
-                                    is_veh_anchored_to_here = True
-                                    break
+                            if v_anchs:
+                                matched_here = any(
+                                    anc in unify_text(area_name).upper() or 
+                                    anc in route_sec_chk or 
+                                    anc in unify_text(area.get('region', '')).upper()
+                                    for anc in v_anchs
+                                )
+                                if matched_here:
+                                    score += 2000
+                                else:
+                                    score -= 2000 
 
-                            is_area_anchored = v_num_chk in a_anch_vehs or is_veh_anchored_to_here
-                            is_drv_anchored = v_num_chk in d_anch_vehs
-                            
-                            if is_area_anchored: potential_vs.append((v, 2000 + div_score))
-                            elif is_drv_anchored: potential_vs.append((v, 1500 + div_score))
-                            else: potential_vs.append((v, 100 + div_score)) 
+                            if v_num_chk in a_anch_vehs:
+                                score += 2000
+                            elif v_num_chk in d_anch_vehs:
+                                score += 1500
+
+                            claimed_by_other_area = any((unify_text(a).upper() != unify_text(area_name).upper() and v_num_chk in lst) for a, lst in area_anchors_map.items())
+                            if claimed_by_other_area: 
+                                score -= 1000
+
+                            potential_vs.append((v, score))
 
                         potential_vs.sort(key=lambda x: x[1], reverse=True)
-
+                        
                         if potential_vs:
                             v_num = potential_vs[0][0]['number']
                             used_vehicles.add(v_num)
                         else:
-                            fallback_vs = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
-                            fallback_vs = fallback_vs[fallback_vs['number'].apply(can_use_veh_p1)]
-                            def safe_div_match(d_val):
-                                d_val = str(d_val).upper()
-                                rs = unify_text(req_sector).upper()
-                                return d_val == "ALL" or d_val == "" or d_val == rs or d_val in rs or rs in d_val
-                            
-                            def safe_type_match(t_val):
-                                t_val = str(t_val).upper()
-                                target = tvt.upper()
-                                if t_val == target: return True
-                                if target in ["VAN", "PICK-UP"] and t_val == "VAN / PICK-UP": return True
-                                return False
-                            fallback_vs = fallback_vs[fallback_vs['type'].apply(safe_type_match)]
-                            
-                            div_matched_vs = fallback_vs[fallback_vs['division'].apply(safe_div_match)]
-                            if not div_matched_vs.empty:
-                                v_num = div_matched_vs.iloc[0]['number']
-                                used_vehicles.add(v_num)
-                            elif not fallback_vs.empty:
-                                v_num = fallback_vs.iloc[0]['number']
-                                used_vehicles.add(v_num)
-                            else:
-                                v_num = "UNASSIGNED"
+                            v_num = "UNASSIGNED"
 
                     temp_plan.append({
                         "area_obj": area,
@@ -1745,37 +1725,56 @@ if choice == "1. AI Route Planner":
                             d_type = all_d[all_d['code'] == a_d_code]['veh_type'].values[0] if not all_d[all_d['code'] == a_d_code].empty else "VAN"
                             tvt = rp['Req Veh'] if rp['Req Veh'] != "VAN" else unify_text(d_type)
                             
-                            def can_use_veh_p2(v_n):
-                                vn = unify_text(v_n).upper()
-                                if any((a != rp['AREA'] and vn in lst) for a, lst in area_anchors_map.items()): return False
-                                if any((d != a_d_code and vn in lst) for d, lst in driver_anchors_map.items()): return False
-                                v_anchs = veh_anchors_map.get(vn, [])
-                                if v_anchs:
-                                    matched_here = any(anc in unify_text(rp['AREA']).upper() or anc in unify_text(rp['Sector']).upper() for anc in v_anchs)
-                                    if not matched_here: return False
-                                return True
+                            drv_row = all_d[all_d['code'] == a_d_code]
+                            d_anch_veh_str = drv_row.iloc[0].get('anchor_vehicle', '') if not drv_row.empty else ""
+                            d_anch_vehs = [v.strip().upper() for v in str(d_anch_veh_str).split(',') if v.strip()]
+                            d_anch_vehs = [x for x in d_anch_vehs if x not in ["NONE", ""]]
+
+                            a_anch_veh_str = area_obj.get('anchor_vehicle', '')
+                            a_anch_vehs = [v.strip().upper() for v in str(a_anch_veh_str).split(',') if v.strip()]
+                            a_anch_vehs = [x for x in a_anch_vehs if x not in ["NONE", ""]]
+                            
+                            potential_vs = []
+                            avail_vs = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
+                            for _, v in avail_vs.iterrows():
+                                v_num_chk = unify_text(v.get('number', '')).upper()
+                                v_type = unify_text(v.get('type', 'VAN')).upper()
                                 
-                            fallback_vs = active_v_pool[~active_v_pool['number'].isin(used_vehicles)]
-                            fallback_vs = fallback_vs[fallback_vs['number'].apply(can_use_veh_p2)]
-                            def safe_div_match(d_val):
-                                d_val = str(d_val).upper()
-                                rs = unify_text(rp['Sector']).upper()
-                                return d_val == "ALL" or d_val == "" or d_val == rs or d_val in rs or rs in d_val
+                                if not safe_type_match(v_type, tvt): continue
+                                
+                                v_div_chk = unify_text(v.get('division', '')).upper()
+                                route_sec_chk = unify_text(rp['Sector']).upper()
+                                
+                                score = 0
+                                if v_div_chk and v_div_chk != "ALL":
+                                    if v_div_chk == route_sec_chk or v_div_chk in route_sec_chk or route_sec_chk in v_div_chk:
+                                        score += 500
+                                    else:
+                                        score -= 800
+                                
+                                v_anchs = veh_anchors_map.get(v_num_chk, [])
+                                if v_anchs:
+                                    matched_here = any(
+                                        anc in unify_text(rp['AREA']).upper() or 
+                                        anc in route_sec_chk or 
+                                        anc in unify_text(area_obj.get('region', '')).upper()
+                                        for anc in v_anchs
+                                    )
+                                    if matched_here: score += 2000
+                                    else: score -= 2000
+
+                                if v_num_chk in a_anch_vehs: score += 2000
+                                elif v_num_chk in d_anch_vehs: score += 1500
+
+                                claimed_by_other_area = any((unify_text(a).upper() != unify_text(rp['AREA']).upper() and v_num_chk in lst) for a, lst in area_anchors_map.items())
+                                if claimed_by_other_area: score -= 1000
+
+                                potential_vs.append((v, score))
+
+                            potential_vs.sort(key=lambda x: x[1], reverse=True)
                             
-                            def safe_type_match(t_val):
-                                t_val = str(t_val).upper()
-                                target = tvt.upper()
-                                if t_val == target: return True
-                                if target in ["VAN", "PICK-UP"] and t_val == "VAN / PICK-UP": return True
-                                return False
-                            fallback_vs = fallback_vs[fallback_vs['type'].apply(safe_type_match)]
-                            
-                            div_matched_vs = fallback_vs[fallback_vs['division'].apply(safe_div_match)]
-                            if not div_matched_vs.empty:
-                                rp['VEH NO'] = div_matched_vs.iloc[0]['number']
-                                used_vehicles.add(rp['VEH NO'])
-                            elif not fallback_vs.empty:
-                                rp['VEH NO'] = fallback_vs.iloc[0]['number']
+                            if potential_vs:
+                                rp['VEH NO'] = potential_vs[0][0]['number']
                                 used_vehicles.add(rp['VEH NO'])
 
                     if rp['Driver Code'] not in ["N/A", "SHORTAGE", "OPTIONAL", "UNASSIGNED", "PENDING_OPTIONAL"]:
