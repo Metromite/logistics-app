@@ -53,7 +53,7 @@ def unify_dataframe(df):
         'area', 'anchor_area', 'anchor_vehicle', 'restriction', 
         'start_date', 'end_date', 'h_start_date', 'h_end_date', 'replacement_person',
         'drv_repl_code', 'drv_repl_date', 'hlp_repl_code', 'hlp_repl_date', 'warnings',
-        'region', 'needs_driver', 'needs_helper', 'no_rotation'
+        'region', 'needs_driver', 'needs_helper', 'no_rotation', 'rotation'
     ]
     for col in target_cols:
         if col in df.columns:
@@ -408,13 +408,17 @@ def init_sqlite_db():
         "ALTER TABLE drivers ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE drivers ADD COLUMN replacement_person TEXT DEFAULT ''",
         "ALTER TABLE drivers ADD COLUMN no_rotation TEXT DEFAULT 'No'",
+        "ALTER TABLE drivers ADD COLUMN rotation TEXT DEFAULT 'Yes'",
         "ALTER TABLE default_drivers ADD COLUMN anchor_vehicle TEXT DEFAULT ''",
         "ALTER TABLE default_drivers ADD COLUMN no_rotation TEXT DEFAULT 'No'",
+        "ALTER TABLE default_drivers ADD COLUMN rotation TEXT DEFAULT 'Yes'",
         "ALTER TABLE helpers ADD COLUMN health_card TEXT DEFAULT 'No'",
         "ALTER TABLE helpers ADD COLUMN fb_id TEXT DEFAULT ''",
         "ALTER TABLE helpers ADD COLUMN replacement_person TEXT DEFAULT ''",
         "ALTER TABLE helpers ADD COLUMN no_rotation TEXT DEFAULT 'No'",
+        "ALTER TABLE helpers ADD COLUMN rotation TEXT DEFAULT 'Yes'",
         "ALTER TABLE default_helpers ADD COLUMN no_rotation TEXT DEFAULT 'No'",
+        "ALTER TABLE default_helpers ADD COLUMN rotation TEXT DEFAULT 'Yes'",
         "ALTER TABLE areas ADD COLUMN sector TEXT DEFAULT 'Pharma'",
         "ALTER TABLE areas ADD COLUMN needs_driver TEXT DEFAULT 'Yes'",
         "ALTER TABLE areas ADD COLUMN needs_helper TEXT DEFAULT 'Yes'",
@@ -611,13 +615,18 @@ def load_table(table_name):
     if df.empty: return df
     df = unify_dataframe(df)
     
+    if table_name in ['drivers', 'helpers']:
+        if 'rotation' not in df.columns: 
+            df['rotation'] = 'Yes'
+        if 'no_rotation' in df.columns:
+            mask = df['no_rotation'].astype(str).str.strip().str.upper() == 'YES'
+            df.loc[mask, 'rotation'] = 'No'
+
     if table_name == 'helpers':
         if 'health_card' not in df.columns: df['health_card'] = 'No'
-        if 'no_rotation' not in df.columns: df['no_rotation'] = 'No'
     if table_name == 'drivers':
         if 'needs_helper' not in df.columns: df['needs_helper'] = 'Yes'
         if 'anchor_vehicle' not in df.columns: df['anchor_vehicle'] = ''
-        if 'no_rotation' not in df.columns: df['no_rotation'] = 'No'
     if table_name == 'areas':
         if 'sector' not in df.columns: df['sector'] = 'Pharma'
         if 'needs_driver' not in df.columns: df['needs_driver'] = 'Yes'
@@ -767,15 +776,15 @@ if "db_initialized" not in st.session_state:
             
             d_df = load_table('drivers')
             if len(d_df) == 0:
-                d_seed = [("Unknown", code, "VAN", "", "", "", "", "", "No") for code in KEEP_DRIVERS]
-                d_data = [{"name": "Unknown", "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": "", "anchor_vehicle": "", "replacement_person": "", "no_rotation": "No"} for code in KEEP_DRIVERS]
-                run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle, replacement_person, no_rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data, bypass_queue=bq)
+                d_seed = [("Unknown", code, "VAN", "", "", "", "", "", "No", "Yes") for code in KEEP_DRIVERS]
+                d_data = [{"name": "Unknown", "code": code, "veh_type": "VAN", "sector": "", "needs_helper": "", "restriction": "", "anchor_area": "", "anchor_vehicle": "", "replacement_person": "", "no_rotation": "No", "rotation": "Yes"} for code in KEEP_DRIVERS]
+                run_query("INSERT OR IGNORE INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle, replacement_person, no_rotation, rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", d_seed, table_name="drivers", action="INSERT_MANY", data=d_data, bypass_queue=bq)
             
             h_df = load_table('helpers')
             if len(h_df) == 0:
-                h_seed = [("Unknown", code, "", "No", "", "", "No") for code in KEEP_HELPERS]
-                h_data = [{"name": "Unknown", "code": code, "restriction": "", "health_card": "No", "anchor_area": "", "replacement_person": "", "no_rotation": "No"} for code in KEEP_HELPERS]
-                run_query("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area, replacement_person, no_rotation) VALUES (?, ?, ?, ?, ?, ?, ?)", h_seed, table_name="helpers", action="INSERT_MANY", data=h_data, bypass_queue=bq)
+                h_seed = [("Unknown", code, "", "No", "", "", "No", "Yes") for code in KEEP_HELPERS]
+                h_data = [{"name": "Unknown", "code": code, "restriction": "", "health_card": "No", "anchor_area": "", "replacement_person": "", "no_rotation": "No", "rotation": "Yes"} for code in KEEP_HELPERS]
+                run_query("INSERT OR IGNORE INTO helpers (name, code, restriction, health_card, anchor_area, replacement_person, no_rotation, rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", h_seed, table_name="helpers", action="INSERT_MANY", data=h_data, bypass_queue=bq)
             
             st.cache_data.clear()
         except Exception as e:
@@ -1401,12 +1410,21 @@ if choice == "1. AI Route Planner":
                                 break
                 returning_h.sort(key=lambda x: x['avail_date'])
 
+                def get_strictly_anchored(pool_df, used_set, a_name, r_sec):
+                    for _, p in pool_df.iterrows():
+                        if p['code'] in used_set: continue
+                        if str(p.get('rotation', 'Yes')).strip().upper() == 'NO':
+                            anchors = [unify_text(a).upper() for a in str(p.get('anchor_area', '')).split(',') if a.strip()]
+                            if unify_text(a_name).upper() in anchors or unify_text(r_sec).upper() in anchors:
+                                return p['code']
+                    return None
+
                 def get_best_candidate(pool_df, used_set, area_row, r_veh, r_sec, role, hc_assigned=0):
                     avail = pool_df[~pool_df['code'].isin(used_set)].copy()
                     if avail.empty: return None, 0, "No available staff"
                     
                     def is_valid_anchor(cand):
-                        if str(cand.get('no_rotation', 'No')).strip().upper() == 'YES':
+                        if str(cand.get('rotation', 'Yes')).strip().upper() == 'NO':
                             return False
                         anc_str = str(cand.get('anchor_area', ''))
                         if not anc_str.strip(): return True
@@ -1439,7 +1457,7 @@ if choice == "1. AI Route Planner":
                     row = pool_df[pool_df['code'] == c]
                     if row.empty: return False
                     r = row.iloc[0]
-                    if str(r.get('no_rotation', 'No')).strip().upper() == 'YES': return False
+                    if str(r.get('rotation', 'Yes')).strip().upper() == 'NO': return False
                     anc_str = str(r.get('anchor_area', '')).strip()
                     if anc_str and anc_str.upper() != "NONE": return False
                     return True
@@ -1475,6 +1493,12 @@ if choice == "1. AI Route Planner":
                     elif nd == 'Optional':
                         d_code, d_name = "PENDING_OPTIONAL", "PENDING_OPTIONAL"
                     else: # Yes
+                        strict_d = get_strictly_anchored(avail_d_pool, used_drivers, area_name, req_sector)
+                        if not strict_d and p_d_code in avail_d_pool['code'].values and p_d_code not in used_drivers:
+                            d_row_chk = avail_d_pool[avail_d_pool['code'] == p_d_code]
+                            if not d_row_chk.empty and str(d_row_chk.iloc[0].get('rotation', 'Yes')).strip().upper() == 'NO':
+                                strict_d = p_d_code
+
                         is_d_anchored_here = False
                         if p_d_code not in ["UNASSIGNED"]:
                             d_row = all_d[all_d['code'] == p_d_code]
@@ -1489,7 +1513,10 @@ if choice == "1. AI Route Planner":
                                 should_keep_driver = True
 
                         best_d = None
-                        if should_keep_driver and p_d_code in avail_d_pool['code'].values and p_d_code not in used_drivers:
+                        if strict_d:
+                            best_d = avail_d_pool[avail_d_pool['code'] == strict_d].iloc[0]
+                            best_d_score, d_reason = 99999, "Strictly Anchored (Rotation: No)"
+                        elif should_keep_driver and p_d_code in avail_d_pool['code'].values and p_d_code not in used_drivers:
                             best_d = all_d[all_d['code'] == p_d_code].iloc[0]
                             best_d_score, d_reason = 0, "Kept from Draft / Manual"
                         else:
@@ -1550,6 +1577,12 @@ if choice == "1. AI Route Planner":
                         if d_code == "SHORTAGE":
                             h_code, h_name = "SHORTAGE", "SHORTAGE"
                         else:
+                            strict_h = get_strictly_anchored(avail_h_pool, used_helpers, area_name, req_sector)
+                            if not strict_h and p_h_code in avail_h_pool['code'].values and p_h_code not in used_helpers:
+                                h_row_chk = avail_h_pool[avail_h_pool['code'] == p_h_code]
+                                if not h_row_chk.empty and str(h_row_chk.iloc[0].get('rotation', 'Yes')).strip().upper() == 'NO':
+                                    strict_h = p_h_code
+
                             is_h_anchored_here = False
                             if p_h_code not in ["UNASSIGNED"]:
                                 h_row = all_h[all_h['code'] == p_h_code]
@@ -1564,7 +1597,10 @@ if choice == "1. AI Route Planner":
                                     should_keep_helper = True
 
                             best_h = None
-                            if should_keep_helper and p_h_code in avail_h_pool['code'].values and p_h_code not in used_helpers:
+                            if strict_h:
+                                best_h = avail_h_pool[avail_h_pool['code'] == strict_h].iloc[0]
+                                best_h_score, h_reason = 99999, "Strictly Anchored (Rotation: No)"
+                            elif should_keep_helper and p_h_code in avail_h_pool['code'].values and p_h_code not in used_helpers:
                                 best_h = all_h[all_h['code'] == p_h_code].iloc[0]
                                 best_h_score, h_reason = 0, "Kept from Draft / Manual"
                             else:
@@ -1968,8 +2004,8 @@ elif choice == "2. Database Management":
     
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Drivers", "Helpers", "Areas", "Vehicles", "📥 Cloud & File Sync"])
 
-    d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "anchor_vehicle", "replacement_person", "no_rotation", "vacation_status"]
-    h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "replacement_person", "no_rotation", "vacation_status"]
+    d_col_order = ["S/N", "code", "name", "veh_type", "sector", "needs_helper", "anchor_area", "anchor_vehicle", "replacement_person", "rotation", "vacation_status"]
+    h_col_order = ["S/N", "code", "name", "health_card", "anchor_area", "replacement_person", "rotation", "vacation_status"]
     a_col_order = ["S/N", "code", "name", "sector", "region", "needs_driver", "needs_helper", "anchor_vehicle", "sort_order"]
     v_col_order = ["S/N", "number", "type", "division", "status", "anchor_area"]
 
@@ -1992,7 +2028,7 @@ elif choice == "2. Database Management":
         disp_df = drivers_df.drop(columns=['restriction'], errors='ignore').copy()
         
         if 'replacement_person' not in disp_df.columns: disp_df['replacement_person'] = ""
-        if 'no_rotation' not in disp_df.columns: disp_df['no_rotation'] = "No"
+        if 'rotation' not in disp_df.columns: disp_df['rotation'] = "Yes"
         
         if not disp_df.empty:
             disp_df['vacation_status'] = disp_df['code'].apply(lambda x: get_vac_status(x, vac_cache, today))
@@ -2006,7 +2042,7 @@ elif choice == "2. Database Management":
             disp_df, 
             column_order=[c for c in d_col_order if c in disp_df.columns],
             column_config={
-                "id": None, "fb_id": None, 
+                "id": None, "fb_id": None, "no_rotation": None,
                 "S/N": st.column_config.NumberColumn(disabled=True),
                 "vacation_status": st.column_config.TextColumn("Vacation Status", disabled=True),
                 "veh_type": st.column_config.SelectboxColumn("Veh Type", options=get_dynamic_opts(drivers_df, 'veh_type', VEHICLE_OPTIONS)),
@@ -2015,7 +2051,7 @@ elif choice == "2. Database Management":
                 "anchor_area": st.column_config.SelectboxColumn("Anchor Area", options=get_anchor_opts(drivers_df, 'anchor_area', multi_anchor_opts)),
                 "anchor_vehicle": st.column_config.SelectboxColumn("Anchor Veh", options=get_anchor_opts(drivers_df, 'anchor_vehicle', v_num_opts)),
                 "replacement_person": st.column_config.SelectboxColumn("Pref. Replacement", options=drv_codes_opts),
-                "no_rotation": st.column_config.SelectboxColumn("No Rotation", options=["Yes", "No"])
+                "rotation": st.column_config.SelectboxColumn("Rotation", options=["Yes", "No"])
             }, use_container_width=True, height=250, hide_index=True, key="ed_drivers"
         )
         if st.button("💾 Save Table Edits", key="save_table_drivers"):
@@ -2024,7 +2060,7 @@ elif choice == "2. Database Management":
                 row_id = int(disp_df.loc[idx, 'id'])
                 if not disp_df.loc[idx].equals(edited_d.loc[idx]):
                     fb_id = str(disp_df.loc[idx, 'fb_id']) if 'fb_id' in disp_df.columns and pd.notna(disp_df.loc[idx, 'fb_id']) and str(disp_df.loc[idx, 'fb_id']).strip() else str(row_id)
-                    update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N', 'vacation_status'], errors='ignore').to_dict()
+                    update_dict = edited_d.loc[idx].drop(labels=['id', 'S/N', 'vacation_status', 'no_rotation'], errors='ignore').to_dict()
                     update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                     for col in ['sector', 'veh_type', 'division', 'type']:
                         if col in update_dict: update_dict[col] = unify_text(update_dict[col])
@@ -2067,14 +2103,14 @@ elif choice == "2. Database Management":
             d_anchor_v_str = ", ".join(list(set(d_anchor_v_list)))
             
             d_repl = st.selectbox("Preferred Replacement", drv_codes_opts, key="add_d_repl")
-            d_no_rot = st.selectbox("Prevent Rotation / Replacement?", ["No", "Yes"], key="add_d_norot")
+            d_rot = st.selectbox("Rotation Allowed?", ["Yes", "No"], key="add_d_rot")
             
             if st.button("➕ Add Driver", use_container_width=True):
                 if drivers_df['code'].isin([d_code]).any():
                     st.error(f"Driver Code {d_code} already exists! Cannot duplicate.")
                 else:
-                    if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle, replacement_person, no_rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-                              (d_name, d_code, unify_text(d_type), unify_text(d_sec), d_needs_h, "", d_anchor_str, d_anchor_v_str, d_repl, d_no_rot), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":unify_text(d_type), "sector":unify_text(d_sec), "needs_helper":d_needs_h, "restriction":"", "anchor_area":d_anchor_str, "anchor_vehicle":d_anchor_v_str, "replacement_person":d_repl, "no_rotation":d_no_rot}):
+                    if run_query("INSERT INTO drivers (name, code, veh_type, sector, needs_helper, restriction, anchor_area, anchor_vehicle, replacement_person, rotation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                              (d_name, d_code, unify_text(d_type), unify_text(d_sec), d_needs_h, "", d_anchor_str, d_anchor_v_str, d_repl, d_rot), table_name="drivers", action="INSERT", data={"name":d_name, "code":d_code, "veh_type":unify_text(d_type), "sector":unify_text(d_sec), "needs_helper":d_needs_h, "restriction":"", "anchor_area":d_anchor_str, "anchor_vehicle":d_anchor_v_str, "replacement_person":d_repl, "rotation":d_rot}):
                         st.success("Driver Added!")
                         st.rerun()
 
@@ -2100,7 +2136,7 @@ elif choice == "2. Database Management":
         disp_h = helpers_df.drop(columns=['restriction'], errors='ignore').copy()
         
         if 'replacement_person' not in disp_h.columns: disp_h['replacement_person'] = ""
-        if 'no_rotation' not in disp_h.columns: disp_h['no_rotation'] = "No"
+        if 'rotation' not in disp_h.columns: disp_h['rotation'] = "Yes"
         
         if not disp_h.empty:
             disp_h['vacation_status'] = disp_h['code'].apply(lambda x: get_vac_status(x, vac_cache, today))
@@ -2113,13 +2149,13 @@ elif choice == "2. Database Management":
             disp_h, 
             column_order=[c for c in h_col_order if c in disp_h.columns],
             column_config={
-                "id": None, "fb_id": None,
+                "id": None, "fb_id": None, "no_rotation": None,
                 "S/N": st.column_config.NumberColumn(disabled=True),
                 "vacation_status": st.column_config.TextColumn("Vacation Status", disabled=True),
                 "health_card": st.column_config.SelectboxColumn("Health Card", options=["Yes", "No", ""]),
                 "anchor_area": st.column_config.SelectboxColumn("Anchor Area", options=get_anchor_opts(helpers_df, 'anchor_area', multi_anchor_opts)),
                 "replacement_person": st.column_config.SelectboxColumn("Pref. Replacement", options=hlp_codes_opts),
-                "no_rotation": st.column_config.SelectboxColumn("No Rotation", options=["Yes", "No"])
+                "rotation": st.column_config.SelectboxColumn("Rotation", options=["Yes", "No"])
             }, use_container_width=True, height=250, hide_index=True, key="ed_helpers"
         )
         if st.button("💾 Save Table Edits", key="save_table_helpers"):
@@ -2128,7 +2164,7 @@ elif choice == "2. Database Management":
                 row_id = int(disp_h.loc[idx, 'id'])
                 if not disp_h.loc[idx].equals(edited_h.loc[idx]):
                     fb_id = str(disp_h.loc[idx, 'fb_id']) if 'fb_id' in disp_h.columns and pd.notna(disp_h.loc[idx, 'fb_id']) and str(disp_h.loc[idx, 'fb_id']).strip() else str(row_id)
-                    update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N', 'vacation_status'], errors='ignore').to_dict()
+                    update_dict = edited_h.loc[idx].drop(labels=['id', 'S/N', 'vacation_status', 'no_rotation'], errors='ignore').to_dict()
                     update_dict = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in update_dict.items()}
                     for col in ['sector', 'veh_type', 'division', 'type']:
                         if col in update_dict: update_dict[col] = unify_text(update_dict[col])
@@ -2155,13 +2191,13 @@ elif choice == "2. Database Management":
             h_anchor_str = ", ".join(list(set(h_anchor_list)))
             
             h_repl = st.selectbox("Preferred Replacement", hlp_codes_opts, key="add_h_repl")
-            h_no_rot = st.selectbox("Prevent Rotation / Replacement?", ["No", "Yes"], key="add_h_norot")
+            h_rot = st.selectbox("Rotation Allowed?", ["Yes", "No"], key="add_h_rot")
             
             if st.button("➕ Add Helper", use_container_width=True):
                 if helpers_df['code'].isin([h_code]).any():
                     st.error(f"Helper Code {h_code} already exists! Cannot duplicate.")
                 else:
-                    if run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area, replacement_person, no_rotation) VALUES (?, ?, ?, ?, ?, ?, ?)", (h_name, h_code, h_health, "", h_anchor_str, h_repl, h_no_rot), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"", "anchor_area":h_anchor_str, "replacement_person":h_repl, "no_rotation":h_no_rot}):
+                    if run_query("INSERT INTO helpers (name, code, health_card, restriction, anchor_area, replacement_person, rotation) VALUES (?, ?, ?, ?, ?, ?, ?)", (h_name, h_code, h_health, "", h_anchor_str, h_repl, h_rot), table_name="helpers", action="INSERT", data={"name":h_name, "code":h_code, "health_card":h_health, "restriction":"", "anchor_area":h_anchor_str, "replacement_person":h_repl, "rotation":h_rot}):
                         st.success("Helper Added!")
                         st.rerun()
         with c_edit:
