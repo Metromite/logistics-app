@@ -1023,17 +1023,37 @@ if choice == "1. AI Route Planner":
             }
         )
         
+        if "route_editor" in st.session_state:
+            changes = st.session_state["route_editor"].get("edited_rows", {})
+            for str_idx, col_changes in changes.items():
+                try:
+                    row_idx = int(str_idx)
+                    
+                    if "Driver Code" in col_changes:
+                        val = col_changes["Driver Code"]
+                        match = all_d[all_d['code'] == val]
+                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Drivers Name")] = match.iloc[0]['name']
+                    elif "Drivers Name" in col_changes:
+                        val = col_changes["Drivers Name"]
+                        match = all_d[all_d['name'] == val]
+                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Driver Code")] = match.iloc[0]['code']
+
+                    if "Helper Code" in col_changes:
+                        val = col_changes["Helper Code"]
+                        match = all_h[all_h['code'] == val]
+                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Helpers Name")] = match.iloc[0]['name']
+                    elif "Helpers Name" in col_changes:
+                        val = col_changes["Helpers Name"]
+                        match = all_h[all_h['name'] == val]
+                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Helper Code")] = match.iloc[0]['code']
+                except Exception:
+                    pass
+
         col_down, col_save, col_can = st.columns([1, 1, 1])
         output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
         col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
         
         if col_save.button("💾 Save Draft Plan", type="secondary"):
-            if "route_editor" in st.session_state:
-                changes = st.session_state["route_editor"].get("edited_rows", {})
-                for row_idx, col_changes in changes.items():
-                    for col_name, new_val in col_changes.items():
-                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
-                        
             run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
@@ -1045,17 +1065,10 @@ if choice == "1. AI Route Planner":
             for index, r in edited_df.iterrows():
                 sn_val = r.get('S/N', index + 1)
                 
-                d_code = r.get('Driver Code', '')
-                d_name = r.get('Drivers Name', '')
-                if d_name not in ["SHORTAGE", "OPTIONAL", "N/A"]:
-                    match = all_d[all_d['name'] == d_name]
-                    if not match.empty: d_code = match.iloc[0]['code']
-                    
-                h_code = r.get('Helper Code', '')
-                h_name = r.get('Helpers Name', '')
-                if h_name not in ["SHORTAGE", "OPTIONAL", "N/A"]:
-                    match = all_h[all_h['name'] == h_name]
-                    if not match.empty: h_code = match.iloc[0]['code']
+                d_code = str(r.get('Driver Code', '')).strip()
+                d_name = str(r.get('Drivers Name', '')).strip()
+                h_code = str(r.get('Helper Code', '')).strip()
+                h_name = str(r.get('Helpers Name', '')).strip()
 
                 d_repl_n = r.get('Drv Repl Name', '')
                 d_repl_c = ""
@@ -1094,12 +1107,6 @@ if choice == "1. AI Route Planner":
         col_app1, col_app2, col_app3 = st.columns(3)
         
         def save_plan_experiences(mode="ALL"):
-            if "route_editor" in st.session_state:
-                changes = st.session_state["route_editor"].get("edited_rows", {})
-                for row_idx, col_changes in changes.items():
-                    for col_name, new_val in col_changes.items():
-                        edited_df.iat[row_idx, edited_df.columns.get_loc(col_name)] = new_val
-                        
             run_query("DELETE FROM active_routes", table_name="active_routes", action="CLEAR_TABLE") 
             p_s = plan_start.strftime("%Y-%m-%d")
             p_e = plan_end.strftime("%Y-%m-%d")
@@ -1124,17 +1131,10 @@ if choice == "1. AI Route Planner":
             for index, r in edited_df.iterrows():
                 sn_val = r.get('S/N', index + 1)
                 
-                d_code = r.get('Driver Code', '')
-                d_name = r.get('Drivers Name', '')
-                if d_name not in ["SHORTAGE", "OPTIONAL", "N/A"]:
-                    match = all_d[all_d['name'] == d_name]
-                    if not match.empty: d_code = match.iloc[0]['code']
-                    
-                h_code = r.get('Helper Code', '')
-                h_name = r.get('Helpers Name', '')
-                if h_name not in ["SHORTAGE", "OPTIONAL", "N/A"]:
-                    match = all_h[all_h['name'] == h_name]
-                    if not match.empty: h_code = match.iloc[0]['code']
+                d_code = str(r.get('Driver Code', '')).strip()
+                d_name = str(r.get('Drivers Name', '')).strip()
+                h_code = str(r.get('Helper Code', '')).strip()
+                h_name = str(r.get('Helpers Name', '')).strip()
 
                 a_code_val = r.get('Area Code', '')
                 
@@ -1350,6 +1350,9 @@ if choice == "1. AI Route Planner":
                 reserved_helpers = {}
                 reserved_vehicles = {}
                 
+                reserved_for_repl_d = {}
+                reserved_for_repl_h = {}
+                
                 if not base_df.empty:
                     for _, row in base_df.iterrows():
                         a_name = unify_text(row.get('area_name', ''))
@@ -1357,8 +1360,24 @@ if choice == "1. AI Route Planner":
                         hc = str(row.get('helper_code', '')).strip()
                         vn = str(row.get('veh_num', '')).strip()
                         
-                        if dc not in ["UNASSIGNED", "N/A", "", "SHORTAGE", "OPTIONAL"]: reserved_drivers[a_name] = dc
-                        if hc not in ["UNASSIGNED", "N/A", "", "SHORTAGE", "OPTIONAL"]: reserved_helpers[a_name] = hc
+                        if dc not in ["UNASSIGNED", "N/A", "", "SHORTAGE", "OPTIONAL"]: 
+                            reserved_drivers[a_name] = dc
+                            if is_on_vacation(dc, month_target, vac_cache):
+                                orig_d_row = all_d[all_d['code'] == dc]
+                                if not orig_d_row.empty:
+                                    rp_code = str(orig_d_row.iloc[0].get('replacement_person', '')).strip()
+                                    if rp_code and rp_code not in ["", "None", "N/A"]:
+                                        reserved_for_repl_d[rp_code] = a_name
+                                        
+                        if hc not in ["UNASSIGNED", "N/A", "", "SHORTAGE", "OPTIONAL"]: 
+                            reserved_helpers[a_name] = hc
+                            if is_on_vacation(hc, month_target, vac_cache):
+                                orig_h_row = all_h[all_h['code'] == hc]
+                                if not orig_h_row.empty:
+                                    rp_code = str(orig_h_row.iloc[0].get('replacement_person', '')).strip()
+                                    if rp_code and rp_code not in ["", "None", "N/A"]:
+                                        reserved_for_repl_h[rp_code] = a_name
+                                        
                         if vn not in ["UNASSIGNED", "N/A", ""]: reserved_vehicles[a_name] = vn
 
                 # --- PRE-COMPUTE VACATION REPLACEMENTS & SHIELDS ---
