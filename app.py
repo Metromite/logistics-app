@@ -1023,32 +1023,6 @@ if choice == "1. AI Route Planner":
             }
         )
         
-        if "route_editor" in st.session_state:
-            changes = st.session_state["route_editor"].get("edited_rows", {})
-            for str_idx, col_changes in changes.items():
-                try:
-                    row_idx = int(str_idx)
-                    
-                    if "Driver Code" in col_changes:
-                        val = col_changes["Driver Code"]
-                        match = all_d[all_d['code'] == val]
-                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Drivers Name")] = match.iloc[0]['name']
-                    elif "Drivers Name" in col_changes:
-                        val = col_changes["Drivers Name"]
-                        match = all_d[all_d['name'] == val]
-                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Driver Code")] = match.iloc[0]['code']
-
-                    if "Helper Code" in col_changes:
-                        val = col_changes["Helper Code"]
-                        match = all_h[all_h['code'] == val]
-                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Helpers Name")] = match.iloc[0]['name']
-                    elif "Helpers Name" in col_changes:
-                        val = col_changes["Helpers Name"]
-                        match = all_h[all_h['name'] == val]
-                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Helper Code")] = match.iloc[0]['code']
-                except Exception:
-                    pass
-
         col_down, col_save, col_can = st.columns([1, 1, 1])
         output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
         col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
@@ -1069,26 +1043,82 @@ if choice == "1. AI Route Planner":
                 d_name = str(r.get('Drivers Name', '')).strip()
                 h_code = str(r.get('Helper Code', '')).strip()
                 h_name = str(r.get('Helpers Name', '')).strip()
+                v_num = str(r.get('VEH NO', '')).strip()
 
-                d_repl_n = r.get('Drv Repl Name', '')
+                # Sync Driver
+                if d_code and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                    match = all_d[all_d['code'] == d_code]
+                    if not match.empty: d_name = match.iloc[0]['name']
+                elif d_name and d_name not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                    match = all_d[all_d['name'] == d_name]
+                    if not match.empty: d_code = match.iloc[0]['code']
+
+                # Sync Helper
+                if h_code and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                    match = all_h[all_h['code'] == h_code]
+                    if not match.empty: h_name = match.iloc[0]['name']
+                elif h_name and h_name not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                    match = all_h[all_h['name'] == h_name]
+                    if not match.empty: h_code = match.iloc[0]['code']
+
+                # Anchor Vehicle Override
+                if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    drv_row = all_d[all_d['code'] == d_code]
+                    if not drv_row.empty:
+                        d_anch_vehs = [v.strip().upper() for v in str(drv_row.iloc[0].get('anchor_vehicle', '')).split(',') if v.strip() and v.strip().upper() != "NONE"]
+                        if d_anch_vehs: v_num = d_anch_vehs[0]
+
+                # Driver Vacation Prediction
+                d_repl_n = str(r.get('Drv Repl Name', '')).strip()
+                d_repl_dt = str(r.get('Drv Repl Date', '')).strip()
                 d_repl_c = ""
-                if d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", None]:
+                if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    vac_start = vacation_within_3_months(d_code, month_target, vac_cache)
+                    if vac_start:
+                        d_repl_dt = vac_start
+                        if not d_repl_n or d_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
+                            pref_repl = str(all_d[all_d['code'] == d_code].iloc[0].get('replacement_person', '')).strip()
+                            if pref_repl and pref_repl not in ["", "None", "N/A"]:
+                                pref_match = all_d[all_d['code'] == pref_repl]
+                                if not pref_match.empty:
+                                    d_repl_n = pref_match.iloc[0]['name']
+                                    d_repl_c = pref_repl
+                    else:
+                        d_repl_dt = ""
+                        d_repl_n = ""
+                
+                if not d_repl_c and d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", "None"]:
                     match_rd = all_d[all_d['name'] == d_repl_n]
                     if not match_rd.empty: d_repl_c = match_rd.iloc[0]['code']
                     else: d_repl_c = d_repl_n
-                else: d_repl_c = d_repl_n if pd.notna(d_repl_n) else ""
-                    
-                h_repl_n = r.get('Hlp Repl Name', '')
+
+                # Helper Vacation Prediction
+                h_repl_n = str(r.get('Hlp Repl Name', '')).strip()
+                h_repl_dt = str(r.get('Hlp Repl Date', '')).strip()
                 h_repl_c = ""
-                if h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", None]:
+                if h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    vac_start = vacation_within_3_months(h_code, month_target, vac_cache)
+                    if vac_start:
+                        h_repl_dt = vac_start
+                        if not h_repl_n or h_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
+                            pref_repl = str(all_h[all_h['code'] == h_code].iloc[0].get('replacement_person', '')).strip()
+                            if pref_repl and pref_repl not in ["", "None", "N/A"]:
+                                pref_match = all_h[all_h['code'] == pref_repl]
+                                if not pref_match.empty:
+                                    h_repl_n = pref_match.iloc[0]['name']
+                                    h_repl_c = pref_repl
+                    else:
+                        h_repl_dt = ""
+                        h_repl_n = ""
+
+                if not h_repl_c and h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", "None"]:
                     match_rh = all_h[all_h['name'] == h_repl_n]
                     if not match_rh.empty: h_repl_c = match_rh.iloc[0]['code']
                     else: h_repl_c = h_repl_n
-                else: h_repl_c = h_repl_n if pd.notna(h_repl_n) else ""
 
                 a_code_val = r.get('Area Code', '')
-                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), unify_text(r.get('Division Category', '')), p_s, p_e, "", h_p_s, h_p_e, d_repl_c, r.get('Drv Repl Date', ''), h_repl_c, r.get('Hlp Repl Date', ''), r.get('Warnings', '')))
-                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":"", "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":r.get('Drv Repl Date', ''), "hlp_repl_code":h_repl_c, "hlp_repl_date":r.get('Hlp Repl Date', ''), "warnings":r.get('Warnings', '')})
+                insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, v_num, unify_text(r.get('Division Category', '')), p_s, p_e, "", h_p_s, h_p_e, d_repl_c, d_repl_dt, h_repl_c, h_repl_dt, r.get('Warnings', '')))
+                new_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "sector":unify_text(r.get('Sector', '')), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":v_num, "div_cat":unify_text(r.get('Division Category', '')), "start_date":p_s, "end_date":p_e, "veh_perm":"", "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":d_repl_dt, "hlp_repl_code":h_repl_c, "hlp_repl_date":h_repl_dt, "warnings":r.get('Warnings', '')})
                 
             q_dr = "INSERT INTO draft_routes (order_num, area_code, area_name, sector, driver_code, driver_name, helper_code, helper_name, veh_num, div_cat, start_date, end_date, veh_perm, h_start_date, h_end_date, drv_repl_code, drv_repl_date, hlp_repl_code, hlp_repl_date, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY", data=new_dicts)
@@ -1135,33 +1165,84 @@ if choice == "1. AI Route Planner":
                 d_name = str(r.get('Drivers Name', '')).strip()
                 h_code = str(r.get('Helper Code', '')).strip()
                 h_name = str(r.get('Helpers Name', '')).strip()
+                v_num = str(r.get('VEH NO', '')).strip()
 
-                a_code_val = r.get('Area Code', '')
-                
-                d_repl_n = r.get('Drv Repl Name', '')
+                # Sync Driver
+                if d_code and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                    match = all_d[all_d['code'] == d_code]
+                    if not match.empty: d_name = match.iloc[0]['name']
+                elif d_name and d_name not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                    match = all_d[all_d['name'] == d_name]
+                    if not match.empty: d_code = match.iloc[0]['code']
+
+                # Sync Helper
+                if h_code and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                    match = all_h[all_h['code'] == h_code]
+                    if not match.empty: h_name = match.iloc[0]['name']
+                elif h_name and h_name not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
+                    match = all_h[all_h['name'] == h_name]
+                    if not match.empty: h_code = match.iloc[0]['code']
+
+                # Anchor Vehicle Override
+                if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    drv_row = all_d[all_d['code'] == d_code]
+                    if not drv_row.empty:
+                        d_anch_vehs = [v.strip().upper() for v in str(drv_row.iloc[0].get('anchor_vehicle', '')).split(',') if v.strip() and v.strip().upper() != "NONE"]
+                        if d_anch_vehs: v_num = d_anch_vehs[0]
+
+                # Driver Vacation Prediction
+                d_repl_n = str(r.get('Drv Repl Name', '')).strip()
+                d_repl_dt = str(r.get('Drv Repl Date', '')).strip()
                 d_repl_c = ""
-                if d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", None]:
+                if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    vac_start = vacation_within_3_months(d_code, month_target, vac_cache)
+                    if vac_start:
+                        d_repl_dt = vac_start
+                        if not d_repl_n or d_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
+                            pref_repl = str(all_d[all_d['code'] == d_code].iloc[0].get('replacement_person', '')).strip()
+                            if pref_repl and pref_repl not in ["", "None", "N/A"]:
+                                pref_match = all_d[all_d['code'] == pref_repl]
+                                if not pref_match.empty:
+                                    d_repl_n = pref_match.iloc[0]['name']
+                                    d_repl_c = pref_repl
+                    else:
+                        d_repl_dt = ""
+                        d_repl_n = ""
+                
+                if not d_repl_c and d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", "None"]:
                     match_rd = all_d[all_d['name'] == d_repl_n]
                     if not match_rd.empty: d_repl_c = match_rd.iloc[0]['code']
                     else: d_repl_c = d_repl_n
-                else: d_repl_c = d_repl_n if pd.notna(d_repl_n) else ""
-                    
-                h_repl_n = r.get('Hlp Repl Name', '')
+
+                # Helper Vacation Prediction
+                h_repl_n = str(r.get('Hlp Repl Name', '')).strip()
+                h_repl_dt = str(r.get('Hlp Repl Date', '')).strip()
                 h_repl_c = ""
-                if h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", None]:
+                if h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
+                    vac_start = vacation_within_3_months(h_code, month_target, vac_cache)
+                    if vac_start:
+                        h_repl_dt = vac_start
+                        if not h_repl_n or h_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
+                            pref_repl = str(all_h[all_h['code'] == h_code].iloc[0].get('replacement_person', '')).strip()
+                            if pref_repl and pref_repl not in ["", "None", "N/A"]:
+                                pref_match = all_h[all_h['code'] == pref_repl]
+                                if not pref_match.empty:
+                                    h_repl_n = pref_match.iloc[0]['name']
+                                    h_repl_c = pref_repl
+                    else:
+                        h_repl_dt = ""
+                        h_repl_n = ""
+
+                if not h_repl_c and h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", "None"]:
                     match_rh = all_h[all_h['name'] == h_repl_n]
                     if not match_rh.empty: h_repl_c = match_rh.iloc[0]['code']
                     else: h_repl_c = h_repl_n
-                else: h_repl_c = h_repl_n if pd.notna(h_repl_n) else ""
 
-                d_repl_c = str(d_repl_c).strip()
-                d_repl_d = parse_date_safe(r.get('Drv Repl Date', ''))
-                h_repl_c = str(h_repl_c).strip()
-                h_repl_d = parse_date_safe(r.get('Hlp Repl Date', ''))
+                a_code_val = r.get('Area Code', '')
                 warnings_str = str(r.get('Warnings', ''))
                 
-                active_data.append((sn_val, a_code_val, r.get('AREA', ''), d_code, d_name, h_code, h_name, r.get('VEH NO', ''), p_s, p_e, "", h_p_s, h_p_e, d_repl_c, d_repl_d, h_repl_c, h_repl_d, warnings_str))
-                active_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":r.get('VEH NO', ''), "start_date":p_s, "end_date":p_e, "veh_perm":"", "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":d_repl_d, "hlp_repl_code":h_repl_c, "hlp_repl_date":h_repl_d, "warnings":warnings_str})
+                active_data.append((sn_val, a_code_val, r.get('AREA', ''), d_code, d_name, h_code, h_name, v_num, p_s, p_e, "", h_p_s, h_p_e, d_repl_c, d_repl_d, h_repl_c, h_repl_d, warnings_str))
+                active_dicts.append({"order_num":sn_val, "area_code":a_code_val, "area_name":r.get('AREA', ''), "driver_code":d_code, "driver_name":d_name, "helper_code":h_code, "helper_name":h_name, "veh_num":v_num, "start_date":p_s, "end_date":p_e, "veh_perm":"", "h_start_date":h_p_s, "h_end_date":h_p_e, "drv_repl_code":d_repl_c, "drv_repl_date":d_repl_d, "hlp_repl_code":h_repl_c, "hlp_repl_date":h_repl_d, "warnings":warnings_str})
                 
                 save_drv = r.get('Save Drv Exp', True)
                 save_hlp = r.get('Save Hlp Exp', True)
