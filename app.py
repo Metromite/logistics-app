@@ -1023,6 +1023,32 @@ if choice == "1. AI Route Planner":
             }
         )
         
+        if "route_editor" in st.session_state:
+            changes = st.session_state["route_editor"].get("edited_rows", {})
+            for str_idx, col_changes in changes.items():
+                try:
+                    row_idx = int(str_idx)
+                    
+                    if "Driver Code" in col_changes:
+                        val = col_changes["Driver Code"]
+                        match = all_d[all_d['code'] == val]
+                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Drivers Name")] = match.iloc[0]['name']
+                    elif "Drivers Name" in col_changes:
+                        val = col_changes["Drivers Name"]
+                        match = all_d[all_d['name'] == val]
+                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Driver Code")] = match.iloc[0]['code']
+
+                    if "Helper Code" in col_changes:
+                        val = col_changes["Helper Code"]
+                        match = all_h[all_h['code'] == val]
+                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Helpers Name")] = match.iloc[0]['name']
+                    elif "Helpers Name" in col_changes:
+                        val = col_changes["Helpers Name"]
+                        match = all_h[all_h['name'] == val]
+                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Helper Code")] = match.iloc[0]['code']
+                except Exception:
+                    pass
+
         col_down, col_save, col_can = st.columns([1, 1, 1])
         output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
         col_down.download_button("📥 Download Draft Excel", data=output, file_name=f"Draft_Plan_{today}.xlsx")
@@ -1073,7 +1099,7 @@ if choice == "1. AI Route Planner":
                 d_repl_dt = str(r.get('Drv Repl Date', '')).strip()
                 d_repl_c = ""
                 if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    vac_start = vacation_within_3_months(d_code, month_target, vac_cache)
+                    vac_start = vacation_within_3_months(d_code, plan_start, vac_cache)
                     if vac_start:
                         d_repl_dt = vac_start
                         if not d_repl_n or d_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
@@ -1097,7 +1123,7 @@ if choice == "1. AI Route Planner":
                 h_repl_dt = str(r.get('Hlp Repl Date', '')).strip()
                 h_repl_c = ""
                 if h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    vac_start = vacation_within_3_months(h_code, month_target, vac_cache)
+                    vac_start = vacation_within_3_months(h_code, h_plan_start, vac_cache)
                     if vac_start:
                         h_repl_dt = vac_start
                         if not h_repl_n or h_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
@@ -1195,7 +1221,7 @@ if choice == "1. AI Route Planner":
                 d_repl_dt = str(r.get('Drv Repl Date', '')).strip()
                 d_repl_c = ""
                 if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    vac_start = vacation_within_3_months(d_code, month_target, vac_cache)
+                    vac_start = vacation_within_3_months(d_code, plan_start, vac_cache)
                     if vac_start:
                         d_repl_dt = vac_start
                         if not d_repl_n or d_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
@@ -1219,7 +1245,7 @@ if choice == "1. AI Route Planner":
                 h_repl_dt = str(r.get('Hlp Repl Date', '')).strip()
                 h_repl_c = ""
                 if h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    vac_start = vacation_within_3_months(h_code, month_target, vac_cache)
+                    vac_start = vacation_within_3_months(h_code, h_plan_start, vac_cache)
                     if vac_start:
                         h_repl_dt = vac_start
                         if not h_repl_n or h_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
