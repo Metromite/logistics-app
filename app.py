@@ -1029,23 +1029,63 @@ if choice == "1. AI Route Planner":
                 try:
                     row_idx = int(str_idx)
                     
-                    if "Driver Code" in col_changes:
-                        val = col_changes["Driver Code"]
-                        match = all_d[all_d['code'] == val]
-                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Drivers Name")] = match.iloc[0]['name']
-                    elif "Drivers Name" in col_changes:
-                        val = col_changes["Drivers Name"]
-                        match = all_d[all_d['name'] == val]
-                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Driver Code")] = match.iloc[0]['code']
+                    if "Driver Code" in col_changes or "Drivers Name" in col_changes:
+                        val = col_changes.get("Driver Code", col_changes.get("Drivers Name"))
+                        match = all_d[(all_d['code'] == val) | (all_d['name'] == val)]
+                        if not match.empty:
+                            d_code = match.iloc[0]['code']
+                            edited_df.iat[row_idx, edited_df.columns.get_loc("Driver Code")] = d_code
+                            edited_df.iat[row_idx, edited_df.columns.get_loc("Drivers Name")] = match.iloc[0]['name']
+                            
+                            d_anch_vehs = [v.strip().upper() for v in str(match.iloc[0].get('anchor_vehicle', '')).split(',') if v.strip() and v.strip().upper() != "NONE"]
+                            if d_anch_vehs:
+                                edited_df.iat[row_idx, edited_df.columns.get_loc("VEH NO")] = d_anch_vehs[0]
+                                
+                            vac_start = vacation_within_3_months(d_code, plan_start, vac_cache)
+                            if vac_start:
+                                edited_df.iat[row_idx, edited_df.columns.get_loc("Drv Repl Date")] = vac_start
+                                pref_repl = str(match.iloc[0].get('replacement_person', '')).strip()
+                                if pref_repl and pref_repl not in ["", "None", "N/A"]:
+                                    pref_match = all_d[all_d['code'] == pref_repl]
+                                    if not pref_match.empty:
+                                        edited_df.iat[row_idx, edited_df.columns.get_loc("Drv Repl Name")] = pref_match.iloc[0]['name']
+                                    else:
+                                        edited_df.iat[row_idx, edited_df.columns.get_loc("Drv Repl Name")] = "SHORTAGE"
+                                else:
+                                    edited_df.iat[row_idx, edited_df.columns.get_loc("Drv Repl Name")] = "SHORTAGE"
+                            else:
+                                edited_df.iat[row_idx, edited_df.columns.get_loc("Drv Repl Date")] = ""
+                                edited_df.iat[row_idx, edited_df.columns.get_loc("Drv Repl Name")] = ""
+                        else:
+                            edited_df.iat[row_idx, edited_df.columns.get_loc("Drv Repl Date")] = ""
+                            edited_df.iat[row_idx, edited_df.columns.get_loc("Drv Repl Name")] = ""
 
-                    if "Helper Code" in col_changes:
-                        val = col_changes["Helper Code"]
-                        match = all_h[all_h['code'] == val]
-                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Helpers Name")] = match.iloc[0]['name']
-                    elif "Helpers Name" in col_changes:
-                        val = col_changes["Helpers Name"]
-                        match = all_h[all_h['name'] == val]
-                        if not match.empty: edited_df.iat[row_idx, edited_df.columns.get_loc("Helper Code")] = match.iloc[0]['code']
+                    if "Helper Code" in col_changes or "Helpers Name" in col_changes:
+                        val = col_changes.get("Helper Code", col_changes.get("Helpers Name"))
+                        match = all_h[(all_h['code'] == val) | (all_h['name'] == val)]
+                        if not match.empty:
+                            h_code = match.iloc[0]['code']
+                            edited_df.iat[row_idx, edited_df.columns.get_loc("Helper Code")] = h_code
+                            edited_df.iat[row_idx, edited_df.columns.get_loc("Helpers Name")] = match.iloc[0]['name']
+                            
+                            vac_start = vacation_within_3_months(h_code, h_plan_start, vac_cache)
+                            if vac_start:
+                                edited_df.iat[row_idx, edited_df.columns.get_loc("Hlp Repl Date")] = vac_start
+                                pref_repl = str(match.iloc[0].get('replacement_person', '')).strip()
+                                if pref_repl and pref_repl not in ["", "None", "N/A"]:
+                                    pref_match = all_h[all_h['code'] == pref_repl]
+                                    if not pref_match.empty:
+                                        edited_df.iat[row_idx, edited_df.columns.get_loc("Hlp Repl Name")] = pref_match.iloc[0]['name']
+                                    else:
+                                        edited_df.iat[row_idx, edited_df.columns.get_loc("Hlp Repl Name")] = "SHORTAGE"
+                                else:
+                                    edited_df.iat[row_idx, edited_df.columns.get_loc("Hlp Repl Name")] = "SHORTAGE"
+                            else:
+                                edited_df.iat[row_idx, edited_df.columns.get_loc("Hlp Repl Date")] = ""
+                                edited_df.iat[row_idx, edited_df.columns.get_loc("Hlp Repl Name")] = ""
+                        else:
+                            edited_df.iat[row_idx, edited_df.columns.get_loc("Hlp Repl Date")] = ""
+                            edited_df.iat[row_idx, edited_df.columns.get_loc("Hlp Repl Name")] = ""
                 except Exception:
                     pass
 
@@ -1071,76 +1111,23 @@ if choice == "1. AI Route Planner":
                 h_name = str(r.get('Helpers Name', '')).strip()
                 v_num = str(r.get('VEH NO', '')).strip()
 
-                # Sync Driver
-                if d_code and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
-                    match = all_d[all_d['code'] == d_code]
-                    if not match.empty: d_name = match.iloc[0]['name']
-                elif d_name and d_name not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
-                    match = all_d[all_d['name'] == d_name]
-                    if not match.empty: d_code = match.iloc[0]['code']
-
-                # Sync Helper
-                if h_code and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
-                    match = all_h[all_h['code'] == h_code]
-                    if not match.empty: h_name = match.iloc[0]['name']
-                elif h_name and h_name not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
-                    match = all_h[all_h['name'] == h_name]
-                    if not match.empty: h_code = match.iloc[0]['code']
-
-                # Anchor Vehicle Override
-                if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    drv_row = all_d[all_d['code'] == d_code]
-                    if not drv_row.empty:
-                        d_anch_vehs = [v.strip().upper() for v in str(drv_row.iloc[0].get('anchor_vehicle', '')).split(',') if v.strip() and v.strip().upper() != "NONE"]
-                        if d_anch_vehs: v_num = d_anch_vehs[0]
-
-                # Driver Vacation Prediction
                 d_repl_n = str(r.get('Drv Repl Name', '')).strip()
                 d_repl_dt = str(r.get('Drv Repl Date', '')).strip()
-                d_repl_c = ""
-                if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    vac_start = vacation_within_3_months(d_code, plan_start, vac_cache)
-                    if vac_start:
-                        d_repl_dt = vac_start
-                        if not d_repl_n or d_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
-                            pref_repl = str(all_d[all_d['code'] == d_code].iloc[0].get('replacement_person', '')).strip()
-                            if pref_repl and pref_repl not in ["", "None", "N/A"]:
-                                pref_match = all_d[all_d['code'] == pref_repl]
-                                if not pref_match.empty:
-                                    d_repl_n = pref_match.iloc[0]['name']
-                                    d_repl_c = pref_repl
-                    else:
-                        d_repl_dt = ""
-                        d_repl_n = ""
-                
-                if not d_repl_c and d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", "None"]:
+                if d_repl_n and d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
                     match_rd = all_d[all_d['name'] == d_repl_n]
                     if not match_rd.empty: d_repl_c = match_rd.iloc[0]['code']
                     else: d_repl_c = d_repl_n
-
-                # Helper Vacation Prediction
+                else:
+                    d_repl_c = d_repl_n
+                    
                 h_repl_n = str(r.get('Hlp Repl Name', '')).strip()
                 h_repl_dt = str(r.get('Hlp Repl Date', '')).strip()
-                h_repl_c = ""
-                if h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    vac_start = vacation_within_3_months(h_code, h_plan_start, vac_cache)
-                    if vac_start:
-                        h_repl_dt = vac_start
-                        if not h_repl_n or h_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
-                            pref_repl = str(all_h[all_h['code'] == h_code].iloc[0].get('replacement_person', '')).strip()
-                            if pref_repl and pref_repl not in ["", "None", "N/A"]:
-                                pref_match = all_h[all_h['code'] == pref_repl]
-                                if not pref_match.empty:
-                                    h_repl_n = pref_match.iloc[0]['name']
-                                    h_repl_c = pref_repl
-                    else:
-                        h_repl_dt = ""
-                        h_repl_n = ""
-
-                if not h_repl_c and h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", "None"]:
+                if h_repl_n and h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
                     match_rh = all_h[all_h['name'] == h_repl_n]
                     if not match_rh.empty: h_repl_c = match_rh.iloc[0]['code']
                     else: h_repl_c = h_repl_n
+                else:
+                    h_repl_c = h_repl_n
 
                 a_code_val = r.get('Area Code', '')
                 insert_data.append((sn_val, a_code_val, r.get('AREA', ''), unify_text(r.get('Sector', '')), d_code, d_name, h_code, h_name, v_num, unify_text(r.get('Division Category', '')), p_s, p_e, "", h_p_s, h_p_e, d_repl_c, d_repl_dt, h_repl_c, h_repl_dt, r.get('Warnings', '')))
@@ -1193,76 +1180,23 @@ if choice == "1. AI Route Planner":
                 h_name = str(r.get('Helpers Name', '')).strip()
                 v_num = str(r.get('VEH NO', '')).strip()
 
-                # Sync Driver
-                if d_code and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
-                    match = all_d[all_d['code'] == d_code]
-                    if not match.empty: d_name = match.iloc[0]['name']
-                elif d_name and d_name not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
-                    match = all_d[all_d['name'] == d_name]
-                    if not match.empty: d_code = match.iloc[0]['code']
-
-                # Sync Helper
-                if h_code and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
-                    match = all_h[all_h['code'] == h_code]
-                    if not match.empty: h_name = match.iloc[0]['name']
-                elif h_name and h_name not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED"]:
-                    match = all_h[all_h['name'] == h_name]
-                    if not match.empty: h_code = match.iloc[0]['code']
-
-                # Anchor Vehicle Override
-                if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    drv_row = all_d[all_d['code'] == d_code]
-                    if not drv_row.empty:
-                        d_anch_vehs = [v.strip().upper() for v in str(drv_row.iloc[0].get('anchor_vehicle', '')).split(',') if v.strip() and v.strip().upper() != "NONE"]
-                        if d_anch_vehs: v_num = d_anch_vehs[0]
-
-                # Driver Vacation Prediction
                 d_repl_n = str(r.get('Drv Repl Name', '')).strip()
                 d_repl_dt = str(r.get('Drv Repl Date', '')).strip()
-                d_repl_c = ""
-                if d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    vac_start = vacation_within_3_months(d_code, plan_start, vac_cache)
-                    if vac_start:
-                        d_repl_dt = vac_start
-                        if not d_repl_n or d_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
-                            pref_repl = str(all_d[all_d['code'] == d_code].iloc[0].get('replacement_person', '')).strip()
-                            if pref_repl and pref_repl not in ["", "None", "N/A"]:
-                                pref_match = all_d[all_d['code'] == pref_repl]
-                                if not pref_match.empty:
-                                    d_repl_n = pref_match.iloc[0]['name']
-                                    d_repl_c = pref_repl
-                    else:
-                        d_repl_dt = ""
-                        d_repl_n = ""
-                
-                if not d_repl_c and d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", "None"]:
+                if d_repl_n and d_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
                     match_rd = all_d[all_d['name'] == d_repl_n]
                     if not match_rd.empty: d_repl_c = match_rd.iloc[0]['code']
                     else: d_repl_c = d_repl_n
-
-                # Helper Vacation Prediction
+                else:
+                    d_repl_c = d_repl_n
+                    
                 h_repl_n = str(r.get('Hlp Repl Name', '')).strip()
                 h_repl_dt = str(r.get('Hlp Repl Date', '')).strip()
-                h_repl_c = ""
-                if h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", ""]:
-                    vac_start = vacation_within_3_months(h_code, h_plan_start, vac_cache)
-                    if vac_start:
-                        h_repl_dt = vac_start
-                        if not h_repl_n or h_repl_n in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
-                            pref_repl = str(all_h[all_h['code'] == h_code].iloc[0].get('replacement_person', '')).strip()
-                            if pref_repl and pref_repl not in ["", "None", "N/A"]:
-                                pref_match = all_h[all_h['code'] == pref_repl]
-                                if not pref_match.empty:
-                                    h_repl_n = pref_match.iloc[0]['name']
-                                    h_repl_c = pref_repl
-                    else:
-                        h_repl_dt = ""
-                        h_repl_n = ""
-
-                if not h_repl_c and h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "", "None"]:
+                if h_repl_n and h_repl_n not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "None"]:
                     match_rh = all_h[all_h['name'] == h_repl_n]
                     if not match_rh.empty: h_repl_c = match_rh.iloc[0]['code']
                     else: h_repl_c = h_repl_n
+                else:
+                    h_repl_c = h_repl_n
 
                 a_code_val = r.get('Area Code', '')
                 warnings_str = str(r.get('Warnings', ''))
@@ -2065,19 +1999,33 @@ if choice == "1. AI Route Planner":
                         if vac_start:
                             d_repl_dt = vac_start
                             assigned_d_row = all_d[all_d['code'] == rp['Driver Code']].iloc[0]
-                            
                             pref_repl = str(assigned_d_row.get('replacement_person', '')).strip()
                             repl_d = None
+                            gap_days = 0
                             
                             if pref_repl and pref_repl not in ["", "None", "N/A"]:
                                 pref_match = all_d[all_d['code'] == pref_repl]
-                                if not pref_match.empty and pref_repl not in used_drivers and not is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
-                                    repl_d = pref_match.iloc[0]
+                                if not pref_match.empty and pref_repl not in used_drivers:
+                                    if is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
+                                        for s, e in vac_cache.get(pref_repl, []):
+                                            if s <= vac_start <= e:
+                                                avail_dt = (datetime.strptime(e, "%Y-%m-%d") + timedelta(days=1))
+                                                gap_days = (avail_dt - datetime.strptime(vac_start, "%Y-%m-%d")).days
+                                                d_repl_dt = avail_dt.strftime("%Y-%m-%d")
+                                                repl_d = pref_match.iloc[0]
+                                                break
+                                    else:
+                                        repl_d = pref_match.iloc[0]
                             
                             if repl_d is None:
-                                valid_ret = [rd for rd in returning_d if rd['avail_date'] <= vac_start and rd['code'] not in used_drivers and is_free_for_replacement(rd['code'], all_d)]
+                                valid_ret = [rd for rd in returning_d if rd['code'] not in used_drivers and is_free_for_replacement(rd['code'], all_d)]
                                 if valid_ret:
-                                    repl_d = all_d[all_d['code'] == valid_ret[0]['code']].iloc[0]
+                                    valid_ret.sort(key=lambda x: x['avail_date'])
+                                    best_ret = valid_ret[0]
+                                    if best_ret['avail_date'] > vac_start:
+                                        gap_days = (datetime.strptime(best_ret['avail_date'], "%Y-%m-%d") - datetime.strptime(vac_start, "%Y-%m-%d")).days
+                                        d_repl_dt = best_ret['avail_date']
+                                    repl_d = all_d[all_d['code'] == best_ret['code']].iloc[0]
                                     returning_d = [rd for rd in returning_d if rd['code'] != repl_d['code']]
                                 else:
                                     avail_repl = avail_d_pool[~avail_d_pool['code'].isin(used_drivers)]
@@ -2087,11 +2035,14 @@ if choice == "1. AI Route Planner":
                             if repl_d is not None:
                                 d_repl_c, d_repl_n = repl_d['code'], repl_d['name']
                                 used_drivers.add(d_repl_c)
+                                if gap_days > 0:
+                                    warnings.append(f"⚠️ {gap_days} days gap before Drv Repl arrives")
                             else:
                                 d_repl_c, d_repl_n = "SHORTAGE", "SHORTAGE"
+                                warnings.append("⚠️ Drv Repl SHORTAGE")
                                 
-                            predict_data.append((rp['Driver Code'], rp['Drivers Name'], "Driver", vac_start, "Scheduled Vacation", d_repl_n, vac_start))
-                            predict_dicts.append({"person_code":rp['Driver Code'], "person_name":rp['Drivers Name'], "role":"Driver", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":d_repl_n, "replacement_date":vac_start})
+                            predict_data.append((rp['Driver Code'], rp['Drivers Name'], "Driver", vac_start, "Scheduled Vacation", d_repl_n, d_repl_dt))
+                            predict_dicts.append({"person_code":rp['Driver Code'], "person_name":rp['Drivers Name'], "role":"Driver", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":d_repl_n, "replacement_date":d_repl_dt})
                         
                         tot_exp = get_total_exp(rp['Driver Code'], rp['AREA'], history_df_global)
                         if tot_exp < 30: warnings.append("⚠️ Driver New")
@@ -2101,19 +2052,33 @@ if choice == "1. AI Route Planner":
                         if vac_start:
                             h_repl_dt = vac_start
                             assigned_h_row = all_h[all_h['code'] == rp['Helper Code']].iloc[0]
-
                             pref_repl = str(assigned_h_row.get('replacement_person', '')).strip()
                             repl_h = None
+                            gap_days = 0
                             
                             if pref_repl and pref_repl not in ["", "None", "N/A"]:
                                 pref_match = all_h[all_h['code'] == pref_repl]
-                                if not pref_match.empty and pref_repl not in used_helpers and not is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
-                                    repl_h = pref_match.iloc[0]
+                                if not pref_match.empty and pref_repl not in used_helpers:
+                                    if is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
+                                        for s, e in vac_cache.get(pref_repl, []):
+                                            if s <= vac_start <= e:
+                                                avail_dt = (datetime.strptime(e, "%Y-%m-%d") + timedelta(days=1))
+                                                gap_days = (avail_dt - datetime.strptime(vac_start, "%Y-%m-%d")).days
+                                                h_repl_dt = avail_dt.strftime("%Y-%m-%d")
+                                                repl_h = pref_match.iloc[0]
+                                                break
+                                    else:
+                                        repl_h = pref_match.iloc[0]
                             
                             if repl_h is None:
-                                valid_ret = [rh for rh in returning_h if rh['avail_date'] <= vac_start and rh['code'] not in used_helpers and is_free_for_replacement(rh['code'], all_h)]
+                                valid_ret = [rh for rh in returning_h if rh['code'] not in used_helpers and is_free_for_replacement(rh['code'], all_h)]
                                 if valid_ret:
-                                    repl_h = all_h[all_h['code'] == valid_ret[0]['code']].iloc[0]
+                                    valid_ret.sort(key=lambda x: x['avail_date'])
+                                    best_ret = valid_ret[0]
+                                    if best_ret['avail_date'] > vac_start:
+                                        gap_days = (datetime.strptime(best_ret['avail_date'], "%Y-%m-%d") - datetime.strptime(vac_start, "%Y-%m-%d")).days
+                                        h_repl_dt = best_ret['avail_date']
+                                    repl_h = all_h[all_h['code'] == best_ret['code']].iloc[0]
                                     returning_h = [rh for rh in returning_h if rh['code'] != repl_h['code']]
                                 else:
                                     avail_repl = avail_h_pool[~avail_h_pool['code'].isin(used_helpers)]
@@ -2123,11 +2088,14 @@ if choice == "1. AI Route Planner":
                             if repl_h is not None:
                                 h_repl_c, h_repl_n = repl_h['code'], repl_h['name']
                                 used_helpers.add(h_repl_c)
+                                if gap_days > 0:
+                                    warnings.append(f"⚠️ {gap_days} days gap before Hlp Repl arrives")
                             else:
                                 h_repl_c, h_repl_n = "SHORTAGE", "SHORTAGE"
+                                warnings.append("⚠️ Hlp Repl SHORTAGE")
                                 
-                            predict_data.append((rp['Helper Code'], rp['Helpers Name'], "Helper", vac_start, "Scheduled Vacation", h_repl_n, vac_start))
-                            predict_dicts.append({"person_code":rp['Helper Code'], "person_name":rp['Helpers Name'], "role":"Helper", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":h_repl_n, "replacement_date":vac_start})
+                            predict_data.append((rp['Helper Code'], rp['Helpers Name'], "Helper", vac_start, "Scheduled Vacation", h_repl_n, h_repl_dt))
+                            predict_dicts.append({"person_code":rp['Helper Code'], "person_name":rp['Helpers Name'], "role":"Helper", "suggested_start":vac_start, "reason":"Scheduled Vacation", "replacement_person":h_repl_n, "replacement_date":h_repl_dt})
                         
                         tot_exp = get_total_exp(rp['Helper Code'], rp['AREA'], history_df_global)
                         if tot_exp < 30: warnings.append("⚠️ Helper New")
