@@ -1109,14 +1109,14 @@ if choice == "1. AI Route Planner":
 
         with st.expander("📤 Upload Custom Route Plan (Excel / PDF)"):
             st.info("Upload an Excel file (or PDF) to instantly override this draft with your manual plan. The AI will scan it, apply warnings, and load it into the editor above.")
-            bulk_file = st.file_uploader("Upload Route Plan", type=['xlsx', 'pdf'] if PDF_ENABLED else ['xlsx'], key="upload_draft")
+            bulk_file = st.file_uploader("Upload Route Plan", type=['xlsx', 'xls', 'pdf'], key="upload_draft")
             
             if bulk_file and st.button("Process & Load Plan", type="primary"):
                 with st.spinner("Processing uploaded plan..."):
                     new_dicts = []
                     skipped = 0
                     
-                    if bulk_file.name.endswith('.xlsx'):
+                    if bulk_file.name.lower().endswith(('.xlsx', '.xls')):
                         df_up = pd.read_excel(bulk_file)
                         
                         col_map = {}
@@ -1229,119 +1229,122 @@ if choice == "1. AI Route Planner":
                                 "warnings": " | ".join(warnings)
                             })
                             
-                    elif bulk_file.name.endswith('.pdf') and PDF_ENABLED:
-                        pdf_reader = PyPDF2.PdfReader(bulk_file)
-                        text = ""
-                        for page in pdf_reader.pages:
-                            text += page.extract_text() + "\n"
-                            
-                        d_list = all_d.to_dict('records')
-                        h_list = all_h.to_dict('records')
-                        a_list = areas_df_global.to_dict('records')
-                        
-                        idx = 1
-                        for line in text.split('\n'):
-                            if not line.strip(): continue
-                            
-                            area_code_match = re.search(r'\b(PH-[A-Z0-9]+|28-[A-Z0-9]+|GOV-\d+|FLE-\d+|PU-[A-Z0-9]+|CON-[A-Z0-9]+)\b', line, re.IGNORECASE)
-                            if not area_code_match: continue
-                            a_code = area_code_match.group(1).upper()
-                            
-                            a_name, sec = "", "Pharma"
-                            match_a = areas_df_global[areas_df_global['code'] == a_code]
-                            if not match_a.empty:
-                                a_name = match_a.iloc[0]['name']
-                                sec = match_a.iloc[0]['sector']
+                    elif bulk_file.name.lower().endswith('.pdf'):
+                        if not PDF_ENABLED:
+                            st.error("🚨 PDF parsing requires the `PyPDF2` library. Please add a `requirements.txt` file to your app repository and type `PyPDF2` inside it.")
+                        else:
+                            pdf_reader = PyPDF2.PdfReader(bulk_file)
+                            text = ""
+                            for page in pdf_reader.pages:
+                                text += page.extract_text() + "\n"
                                 
-                            d_code_match = re.search(r'\b(D\d{3})\b', line)
-                            d_code = d_code_match.group(1) if d_code_match else ("N/A" if "NO DRIVER" in line.upper() else "SHORTAGE")
-                            d_name = ""
-                            if d_code.startswith('D'):
-                                match = all_d[all_d['code'] == d_code]
-                                if not match.empty: d_name = match.iloc[0]['name']
-                                
-                            h_code_match = re.search(r'\b(H\d{3})\b', line)
-                            h_code = h_code_match.group(1) if h_code_match else ("N/A" if "NO HELPER" in line.upper() else "SHORTAGE")
-                            h_name = ""
-                            if h_code.startswith('H'):
-                                match = all_h[all_h['code'] == h_code]
-                                if not match.empty: h_name = match.iloc[0]['name']
-                                
-                            v_match = re.search(r'\b([A-Z]{1,2}\s*-?\s*\d{4,5})\b', line)
-                            v_num = v_match.group(1).replace("-", " ") if v_match else ""
+                            d_list = all_d.to_dict('records')
+                            h_list = all_h.to_dict('records')
+                            a_list = areas_df_global.to_dict('records')
                             
-                            warnings = []
-                            d_repl_c, d_repl_n, d_repl_dt = "", "", ""
-                            if d_code and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "nan", ""]:
-                                vac_start = vacation_within_3_months(d_code, plan_start, vac_cache)
-                                if vac_start:
-                                    d_repl_dt = vac_start
-                                    pref_repl = str(all_d[all_d['code'] == d_code].iloc[0].get('replacement_person', '')).strip()
-                                    if pref_repl and pref_repl not in ["", "None", "N/A"]:
-                                        pref_match = all_d[all_d['code'] == pref_repl]
-                                        if not pref_match.empty:
-                                            d_repl_n = pref_match.iloc[0]['name']
-                                            d_repl_c = pref_repl
-                                            if is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
-                                                for s, e in vac_cache.get(pref_repl, []):
-                                                    if s <= vac_start <= e:
-                                                        avail_dt = (datetime.strptime(e, "%Y-%m-%d") + timedelta(days=1))
-                                                        gap_days = (avail_dt - datetime.strptime(vac_start, "%Y-%m-%d")).days
-                                                        d_repl_dt = f"{avail_dt.strftime('%Y-%m-%d')} (Gap: {gap_days}d)"
-                                                        warnings.append(f"⚠️ {gap_days} days gap before Drv Repl arrives")
-                                                        break
+                            idx = 1
+                            for line in text.split('\n'):
+                                if not line.strip(): continue
+                                
+                                area_code_match = re.search(r'\b(PH-[A-Z0-9]+|28-[A-Z0-9]+|GOV-\d+|FLE-\d+|PU-[A-Z0-9]+|CON-[A-Z0-9]+)\b', line, re.IGNORECASE)
+                                if not area_code_match: continue
+                                a_code = area_code_match.group(1).upper()
+                                
+                                a_name, sec = "", "Pharma"
+                                match_a = areas_df_global[areas_df_global['code'] == a_code]
+                                if not match_a.empty:
+                                    a_name = match_a.iloc[0]['name']
+                                    sec = match_a.iloc[0]['sector']
+                                    
+                                d_code_match = re.search(r'\b(D\d{3})\b', line)
+                                d_code = d_code_match.group(1) if d_code_match else ("N/A" if "NO DRIVER" in line.upper() else "SHORTAGE")
+                                d_name = ""
+                                if d_code.startswith('D'):
+                                    match = all_d[all_d['code'] == d_code]
+                                    if not match.empty: d_name = match.iloc[0]['name']
+                                    
+                                h_code_match = re.search(r'\b(H\d{3})\b', line)
+                                h_code = h_code_match.group(1) if h_code_match else ("N/A" if "NO HELPER" in line.upper() else "SHORTAGE")
+                                h_name = ""
+                                if h_code.startswith('H'):
+                                    match = all_h[all_h['code'] == h_code]
+                                    if not match.empty: h_name = match.iloc[0]['name']
+                                    
+                                v_match = re.search(r'\b([A-Z]{1,2}\s*-?\s*\d{4,5})\b', line)
+                                v_num = v_match.group(1).replace("-", " ") if v_match else ""
+                                
+                                warnings = []
+                                d_repl_c, d_repl_n, d_repl_dt = "", "", ""
+                                if d_code and d_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "nan", ""]:
+                                    vac_start = vacation_within_3_months(d_code, plan_start, vac_cache)
+                                    if vac_start:
+                                        d_repl_dt = vac_start
+                                        pref_repl = str(all_d[all_d['code'] == d_code].iloc[0].get('replacement_person', '')).strip()
+                                        if pref_repl and pref_repl not in ["", "None", "N/A"]:
+                                            pref_match = all_d[all_d['code'] == pref_repl]
+                                            if not pref_match.empty:
+                                                d_repl_n = pref_match.iloc[0]['name']
+                                                d_repl_c = pref_repl
+                                                if is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
+                                                    for s, e in vac_cache.get(pref_repl, []):
+                                                        if s <= vac_start <= e:
+                                                            avail_dt = (datetime.strptime(e, "%Y-%m-%d") + timedelta(days=1))
+                                                            gap_days = (avail_dt - datetime.strptime(vac_start, "%Y-%m-%d")).days
+                                                            d_repl_dt = f"{avail_dt.strftime('%Y-%m-%d')} (Gap: {gap_days}d)"
+                                                            warnings.append(f"⚠️ {gap_days} days gap before Drv Repl arrives")
+                                                            break
+                                            else:
+                                                d_repl_n = "SHORTAGE"
+                                                warnings.append("⚠️ Drv Repl SHORTAGE")
                                         else:
                                             d_repl_n = "SHORTAGE"
                                             warnings.append("⚠️ Drv Repl SHORTAGE")
-                                    else:
-                                        d_repl_n = "SHORTAGE"
-                                        warnings.append("⚠️ Drv Repl SHORTAGE")
-                                        
-                                tot_exp = get_total_exp(d_code, a_name, history_df_global)
-                                if tot_exp < 30: warnings.append("⚠️ Driver New")
-                                        
-                            h_repl_c, h_repl_n, h_repl_dt = "", "", ""
-                            if h_code and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "nan", ""]:
-                                vac_start = vacation_within_3_months(h_code, h_plan_start, vac_cache)
-                                if vac_start:
-                                    h_repl_dt = vac_start
-                                    pref_repl = str(all_h[all_h['code'] == h_code].iloc[0].get('replacement_person', '')).strip()
-                                    if pref_repl and pref_repl not in ["", "None", "N/A"]:
-                                        pref_match = all_h[all_h['code'] == pref_repl]
-                                        if not pref_match.empty:
-                                            h_repl_n = pref_match.iloc[0]['name']
-                                            h_repl_c = pref_repl
-                                            if is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
-                                                for s, e in vac_cache.get(pref_repl, []):
-                                                    if s <= vac_start <= e:
-                                                        avail_dt = (datetime.strptime(e, "%Y-%m-%d") + timedelta(days=1))
-                                                        gap_days = (avail_dt - datetime.strptime(vac_start, "%Y-%m-%d")).days
-                                                        h_repl_dt = f"{avail_dt.strftime('%Y-%m-%d')} (Gap: {gap_days}d)"
-                                                        warnings.append(f"⚠️ {gap_days} days gap before Hlp Repl arrives")
-                                                        break
+                                            
+                                    tot_exp = get_total_exp(d_code, a_name, history_df_global)
+                                    if tot_exp < 30: warnings.append("⚠️ Driver New")
+                                            
+                                h_repl_c, h_repl_n, h_repl_dt = "", "", ""
+                                if h_code and h_code not in ["SHORTAGE", "OPTIONAL", "N/A", "UNASSIGNED", "nan", ""]:
+                                    vac_start = vacation_within_3_months(h_code, h_plan_start, vac_cache)
+                                    if vac_start:
+                                        h_repl_dt = vac_start
+                                        pref_repl = str(all_h[all_h['code'] == h_code].iloc[0].get('replacement_person', '')).strip()
+                                        if pref_repl and pref_repl not in ["", "None", "N/A"]:
+                                            pref_match = all_h[all_h['code'] == pref_repl]
+                                            if not pref_match.empty:
+                                                h_repl_n = pref_match.iloc[0]['name']
+                                                h_repl_c = pref_repl
+                                                if is_on_vacation(pref_repl, datetime.strptime(vac_start, "%Y-%m-%d"), vac_cache):
+                                                    for s, e in vac_cache.get(pref_repl, []):
+                                                        if s <= vac_start <= e:
+                                                            avail_dt = (datetime.strptime(e, "%Y-%m-%d") + timedelta(days=1))
+                                                            gap_days = (avail_dt - datetime.strptime(vac_start, "%Y-%m-%d")).days
+                                                            h_repl_dt = f"{avail_dt.strftime('%Y-%m-%d')} (Gap: {gap_days}d)"
+                                                            warnings.append(f"⚠️ {gap_days} days gap before Hlp Repl arrives")
+                                                            break
+                                            else:
+                                                h_repl_n = "SHORTAGE"
+                                                warnings.append("⚠️ Hlp Repl SHORTAGE")
                                         else:
                                             h_repl_n = "SHORTAGE"
                                             warnings.append("⚠️ Hlp Repl SHORTAGE")
-                                    else:
-                                        h_repl_n = "SHORTAGE"
-                                        warnings.append("⚠️ Hlp Repl SHORTAGE")
-                                        
-                                tot_exp = get_total_exp(h_code, a_name, history_df_global)
-                                if tot_exp < 30: warnings.append("⚠️ Helper New")
+                                            
+                                    tot_exp = get_total_exp(h_code, a_name, history_df_global)
+                                    if tot_exp < 30: warnings.append("⚠️ Helper New")
 
-                            new_dicts.append({
-                                "order_num": idx, "area_code": a_code, "area_name": a_name, "sector": sec,
-                                "driver_code": d_code if d_code.lower() != 'nan' else "", "driver_name": d_name if d_name.lower() != 'nan' else "", 
-                                "helper_code": h_code if h_code.lower() != 'nan' else "", "helper_name": h_name if h_name.lower() != 'nan' else "", 
-                                "veh_num": v_num if v_num.lower() != 'nan' else "", "div_cat": "",
-                                "start_date": plan_start.strftime("%Y-%m-%d"), "end_date": plan_end.strftime("%Y-%m-%d"), "veh_perm": "", 
-                                "h_start_date": h_plan_start.strftime("%Y-%m-%d"), "h_end_date": h_plan_end.strftime("%Y-%m-%d"), 
-                                "drv_repl_code": d_repl_c, "drv_repl_date": d_repl_dt, 
-                                "hlp_repl_code": h_repl_c, "hlp_repl_date": h_repl_dt, 
-                                "warnings": " | ".join(warnings)
-                            })
-                            idx += 1
-                            
+                                new_dicts.append({
+                                    "order_num": idx, "area_code": a_code, "area_name": a_name, "sector": sec,
+                                    "driver_code": d_code if d_code.lower() != 'nan' else "", "driver_name": d_name if d_name.lower() != 'nan' else "", 
+                                    "helper_code": h_code if h_code.lower() != 'nan' else "", "helper_name": h_name if h_name.lower() != 'nan' else "", 
+                                    "veh_num": v_num if v_num.lower() != 'nan' else "", "div_cat": "",
+                                    "start_date": plan_start.strftime("%Y-%m-%d"), "end_date": plan_end.strftime("%Y-%m-%d"), "veh_perm": "", 
+                                    "h_start_date": h_plan_start.strftime("%Y-%m-%d"), "h_end_date": h_plan_end.strftime("%Y-%m-%d"), 
+                                    "drv_repl_code": d_repl_c, "drv_repl_date": d_repl_dt, 
+                                    "hlp_repl_code": h_repl_c, "hlp_repl_date": h_repl_dt, 
+                                    "warnings": " | ".join(warnings)
+                                })
+                                idx += 1
+                                
                     if new_dicts:
                         run_query("DELETE FROM draft_routes", table_name="draft_routes", action="CLEAR_TABLE")
                         insert_data = []
@@ -1351,8 +1354,6 @@ if choice == "1. AI Route Planner":
                         run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY", data=new_dicts)
                         st.success("Draft Uploaded and Smart Warnings Applied!")
                         st.rerun()
-                    else:
-                        st.warning("Could not extract valid records from the file. Ensure it has Area Codes, Driver Codes, etc.")
 
         col_down, col_save, col_can = st.columns([1, 1, 1])
         output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
@@ -2859,7 +2860,7 @@ elif choice == "2. Database Management":
         st.divider()
         st.subheader("📤 Import Database via Excel")
         st.caption("Did the cloud quota crash delete your cloud data yesterday? Upload the Master_Database.xlsx file you downloaded yesterday to instantly restore everything.")
-        uploaded_file = st.file_uploader("Upload Master Database Excel", type=['xlsx'])
+        uploaded_file = st.file_uploader("Upload Master Database Excel", type=['xlsx', 'xls'])
         if uploaded_file and st.button("Sync Data to System", type="primary"):
             xls = pd.ExcelFile(uploaded_file)
             for sheet in xls.sheet_names:
@@ -3001,11 +3002,11 @@ elif choice == "3. Past Experience Builder":
     # --- SMART BULK EXCEL/PDF SYNC ---
     st.subheader("📥 Smart Bulk Sync (Excel or PDF)")
     if not PDF_ENABLED:
-        st.info("Upload an Excel (.xlsx) file containing history data. To upload PDFs, create a file named `requirements.txt` in your repository and type `PyPDF2` inside it.")
+        st.info("Upload an Excel (.xlsx/.xls) file containing history data. To upload PDFs, create a file named `requirements.txt` in your repository and type `PyPDF2` inside it.")
     else:
-        st.info("Upload an Excel (.xlsx) or PDF ('Dispatch Summary') file. The AI will parse it, unify formatting, and strictly prevent duplicates.")
+        st.info("Upload an Excel (.xlsx/.xls) or PDF ('Dispatch Summary') file. The AI will parse it, unify formatting, and strictly prevent duplicates.")
         
-    bulk_file = st.file_uploader("Upload Experience Data", type=['xlsx', 'pdf'] if PDF_ENABLED else ['xlsx'])
+    bulk_file = st.file_uploader("Upload Experience Data", type=['xlsx', 'xls', 'pdf'])
     
     if bulk_file and st.button("Sync Uploaded Data", type="primary"):
         with st.spinner("Processing file intelligently..."):
@@ -3013,7 +3014,7 @@ elif choice == "3. Past Experience Builder":
             new_dicts = []
             skipped = 0
             
-            if bulk_file.name.endswith('.xlsx'):
+            if bulk_file.name.lower().endswith(('.xlsx', '.xls')):
                 df_up = pd.read_excel(bulk_file)
                 
                 col_map = {}
@@ -3049,56 +3050,59 @@ elif choice == "3. Past Experience Builder":
                         else:
                             skipped += 1
                             
-            elif bulk_file.name.endswith('.pdf') and PDF_ENABLED:
-                pdf_reader = PyPDF2.PdfReader(bulk_file)
-                text = ""
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
-                    
-                date_match = re.search(r"Date\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
-                global_date = parse_date_safe(date_match.group(1)) if date_match else None
-                
-                d_list = load_table('drivers').to_dict('records')
-                h_list = load_table('helpers').to_dict('records')
-                a_list = load_table('areas').to_dict('records')
-                
-                for line in text.split('\n'):
-                    if not line.strip(): continue
-                    
-                    line_dates = re.findall(r'\d{2}/\d{2}/\d{4}', line)
-                    f_val = parse_date_safe(line_dates[0]) if len(line_dates) > 0 else global_date
-                    t_val = parse_date_safe(line_dates[1]) if len(line_dates) > 1 else f_val
-                    
-                    if not f_val: continue
+            elif bulk_file.name.lower().endswith('.pdf'):
+                if not PDF_ENABLED:
+                    st.error("🚨 PDF parsing requires the `PyPDF2` library. Please add a `requirements.txt` file to your app repository and type `PyPDF2` inside it.")
+                else:
+                    pdf_reader = PyPDF2.PdfReader(bulk_file)
+                    text = ""
+                    for page in pdf_reader.pages:
+                        text += page.extract_text() + "\n"
                         
-                    found_area = next((a for a in a_list if str(a['name']).lower() in line.lower()), None)
-                    if found_area:
-                        found_driver = next((d for d in d_list if str(d['name']).lower() in line.lower()), None)
-                        if found_driver:
-                            is_val, _ = validate_experience("Driver", found_driver['code'], found_area['name'], f_val, t_val, history_df_global, new_dicts)
-                            if is_val:
-                                fb_id_val = f"H_{found_driver['code']}_{found_area['name']}_{f_val}".replace(" ", "_").replace("/", "-")
-                                new_records.append(("Driver", found_driver['code'], found_driver['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val, fb_id_val))
-                                new_dicts.append({"person_type": "Driver", "person_code": found_driver['code'], "person_name": found_driver['name'], "area": found_area['name'], "sector": found_area.get('sector', 'Pharma'), "date": f_val, "end_date": t_val, "fb_id": fb_id_val})
-                            else:
-                                skipped += 1
-                                
-                        found_helper = next((h for h in h_list if str(h['name']).lower() in line.lower()), None)
-                        if found_helper:
-                            is_val, _ = validate_experience("Helper", found_helper['code'], found_area['name'], f_val, t_val, history_df_global, new_dicts)
-                            if is_val:
-                                fb_id_val = f"H_{found_helper['code']}_{found_area['name']}_{f_val}".replace(" ", "_").replace("/", "-")
-                                new_records.append(("Helper", found_helper['code'], found_helper['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val, fb_id_val))
-                                new_dicts.append({"person_type": "Helper", "person_code": found_helper['code'], "person_name": found_helper['name'], "area": found_area['name'], "sector": found_area.get('sector', 'Pharma'), "date": f_val, "end_date": t_val, "fb_id": fb_id_val})
-                            else:
-                                skipped += 1
+                    date_match = re.search(r"Date\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
+                    global_date = parse_date_safe(date_match.group(1)) if date_match else None
+                    
+                    d_list = load_table('drivers').to_dict('records')
+                    h_list = load_table('helpers').to_dict('records')
+                    a_list = load_table('areas').to_dict('records')
+                    
+                    for line in text.split('\n'):
+                        if not line.strip(): continue
+                        
+                        line_dates = re.findall(r'\d{2}/\d{2}/\d{4}', line)
+                        f_val = parse_date_safe(line_dates[0]) if len(line_dates) > 0 else global_date
+                        t_val = parse_date_safe(line_dates[1]) if len(line_dates) > 1 else f_val
+                        
+                        if not f_val: continue
+                            
+                        found_area = next((a for a in a_list if str(a['name']).lower() in line.lower()), None)
+                        if found_area:
+                            found_driver = next((d for d in d_list if str(d['name']).lower() in line.lower()), None)
+                            if found_driver:
+                                is_val, _ = validate_experience("Driver", found_driver['code'], found_area['name'], f_val, t_val, history_df_global, new_dicts)
+                                if is_val:
+                                    fb_id_val = f"H_{found_driver['code']}_{found_area['name']}_{f_val}".replace(" ", "_").replace("/", "-")
+                                    new_records.append(("Driver", found_driver['code'], found_driver['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val, fb_id_val))
+                                    new_dicts.append({"person_type": "Driver", "person_code": found_driver['code'], "person_name": found_driver['name'], "area": found_area['name'], "sector": found_area.get('sector', 'Pharma'), "date": f_val, "end_date": t_val, "fb_id": fb_id_val})
+                                else:
+                                    skipped += 1
+                                    
+                            found_helper = next((h for h in h_list if str(h['name']).lower() in line.lower()), None)
+                            if found_helper:
+                                is_val, _ = validate_experience("Helper", found_helper['code'], found_area['name'], f_val, t_val, history_df_global, new_dicts)
+                                if is_val:
+                                    fb_id_val = f"H_{found_helper['code']}_{found_area['name']}_{f_val}".replace(" ", "_").replace("/", "-")
+                                    new_records.append(("Helper", found_helper['code'], found_helper['name'], found_area['name'], found_area.get('sector', 'Pharma'), f_val, t_val, fb_id_val))
+                                    new_dicts.append({"person_type": "Helper", "person_code": found_helper['code'], "person_name": found_helper['name'], "area": found_area['name'], "sector": found_area.get('sector', 'Pharma'), "date": f_val, "end_date": t_val, "fb_id": fb_id_val})
+                                else:
+                                    skipped += 1
 
             if new_records:
                 q_hist = "INSERT OR IGNORE INTO history (person_type, person_code, person_name, area, sector, date, end_date, fb_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 run_query(q_hist, new_records, table_name="history", action="INSERT_MANY", data=new_dicts)
                 st.success(f"Successfully imported {len(new_records)} valid records! (Skipped {skipped} records <14 days or duplicates).")
                 st.rerun()
-            else:
+            elif skipped > 0:
                 st.warning(f"Could not extract valid records from the file. (Skipped {skipped} invalid/duplicate records). Ensure it has CODE, AREA, and DATES.")
 
     st.divider()
@@ -3185,7 +3189,7 @@ elif choice == "4. Vacation Schedule":
     if active_vacs:
         dash_df = pd.DataFrame(active_vacs).sort_values(by="Days Left")
         dash_df.insert(0, 'S/N', range(1, 1 + len(dash_df)))
-        st.dataframe(dash_df, use_container_width=True, hide_index=True)
+        st.dataframe(dash_df, use_container_width=False, hide_index=True)
     else:
         st.info("No personnel currently on vacation today.")
         
@@ -3202,7 +3206,7 @@ elif choice == "4. Vacation Schedule":
                     days_since = (today - datetime.strptime(last_vac, "%Y-%m-%d").date()).days
                     if days_since > 300:
                         due_list.append({"Code": code, "Name": p['name'], "Role": role, "Status": f"Overdue by {days_since - 300} days (Last: {last_vac})"})
-        if due_list: st.dataframe(pd.DataFrame(due_list), use_container_width=True, hide_index=True)
+        if due_list: st.dataframe(pd.DataFrame(due_list), use_container_width=False, hide_index=True)
         else: st.success("Everyone seems well rested!")
 
     st.divider()
@@ -3244,7 +3248,7 @@ elif choice == "4. Vacation Schedule":
         output = generate_excel_with_sn([vacs_df], ['vacations'])
         st.download_button("📥 Download Vacation Data", data=output, file_name="Vacation_Data.xlsx")
         
-        up_vac = st.file_uploader("Upload Vacation Excel", type=['xlsx'], key="up_vac")
+        up_vac = st.file_uploader("Upload Vacation Excel", type=['xlsx', 'xls'], key="up_vac")
         if up_vac and st.button("Sync Vacation Database"):
             df = pd.read_excel(up_vac)
             
