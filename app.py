@@ -1354,6 +1354,8 @@ if choice == "1. AI Route Planner":
                         run_query(q_dr, insert_data, table_name="draft_routes", action="INSERT_MANY", data=new_dicts)
                         st.success("Draft Uploaded and Smart Warnings Applied!")
                         st.rerun()
+                    else:
+                        st.warning("Could not extract valid records from the file. Ensure it has Area Codes, Driver Codes, etc.")
 
         col_down, col_save, col_can = st.columns([1, 1, 1])
         output = generate_excel_with_sn([edited_df], ['Draft Route Plan'])
