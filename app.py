@@ -1109,15 +1109,18 @@ if choice == "1. AI Route Planner":
 
         with st.expander("📤 Upload Custom Route Plan (Excel / PDF)"):
             st.info("Upload an Excel file (or PDF) to instantly override this draft with your manual plan. The AI will scan it, apply warnings, and load it into the editor above.")
-            bulk_file = st.file_uploader("Upload Route Plan", type=['xlsx', 'xls', 'pdf'], key="upload_draft")
+            bulk_file = st.file_uploader("Upload Route Plan", type=['xlsx', 'xls', 'csv', 'pdf'], key="upload_draft")
             
             if bulk_file and st.button("Process & Load Plan", type="primary"):
                 with st.spinner("Processing uploaded plan..."):
                     new_dicts = []
                     skipped = 0
                     
-                    if bulk_file.name.lower().endswith(('.xlsx', '.xls')):
-                        df_up = pd.read_excel(bulk_file)
+                    if bulk_file.name.lower().endswith(('.xlsx', '.xls', '.csv')):
+                        if bulk_file.name.lower().endswith('.csv'):
+                            df_up = pd.read_csv(bulk_file)
+                        else:
+                            df_up = pd.read_excel(bulk_file)
                         
                         col_map = {}
                         for c in df_up.columns:
@@ -3008,7 +3011,7 @@ elif choice == "3. Past Experience Builder":
     else:
         st.info("Upload an Excel (.xlsx/.xls) or PDF ('Dispatch Summary') file. The AI will parse it, unify formatting, and strictly prevent duplicates.")
         
-    bulk_file = st.file_uploader("Upload Experience Data", type=['xlsx', 'xls', 'pdf'])
+    bulk_file = st.file_uploader("Upload Experience Data", type=['xlsx', 'xls', 'csv', 'pdf'])
     
     if bulk_file and st.button("Sync Uploaded Data", type="primary"):
         with st.spinner("Processing file intelligently..."):
@@ -3016,8 +3019,11 @@ elif choice == "3. Past Experience Builder":
             new_dicts = []
             skipped = 0
             
-            if bulk_file.name.lower().endswith(('.xlsx', '.xls')):
-                df_up = pd.read_excel(bulk_file)
+            if bulk_file.name.lower().endswith(('.xlsx', '.xls', '.csv')):
+                if bulk_file.name.lower().endswith('.csv'):
+                    df_up = pd.read_csv(bulk_file)
+                else:
+                    df_up = pd.read_excel(bulk_file)
                 
                 col_map = {}
                 for c in df_up.columns:
@@ -3250,9 +3256,12 @@ elif choice == "4. Vacation Schedule":
         output = generate_excel_with_sn([vacs_df], ['vacations'])
         st.download_button("📥 Download Vacation Data", data=output, file_name="Vacation_Data.xlsx")
         
-        up_vac = st.file_uploader("Upload Vacation Excel", type=['xlsx', 'xls'], key="up_vac")
+        up_vac = st.file_uploader("Upload Vacation Excel", type=['xlsx', 'xls', 'csv'], key="up_vac")
         if up_vac and st.button("Sync Vacation Database"):
-            df = pd.read_excel(up_vac)
+            if up_vac.name.lower().endswith('.csv'):
+                df = pd.read_csv(up_vac)
+            else:
+                df = pd.read_excel(up_vac)
             
             # Fuzzy match columns
             col_map = {}
